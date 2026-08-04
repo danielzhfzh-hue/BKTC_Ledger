@@ -90,12 +90,15 @@ td.date-cell.empty:hover .date-ph { color: #8a93a0; }
 /* 可排序/可筛选表头 */
 th.col-h { cursor: pointer; user-select: none; white-space: nowrap; }
 th.col-h .col-h-name { display: inline; }
-th.col-h .sort-ind { color: #ffdf6b; font-size: 10px; margin-left: 3px; min-width: 10px; display: inline-block; }
+th.col-h .sort-ind { color: #ffdf6b; font-size: 12px; margin-left: 3px; min-width: 12px; display: inline-block; }
 th.col-h:hover { background: #2a5a8a; }
 th.col-h.filt-on { background: #2d5e88; }
-.col-filt { display: inline-block; margin-left: 6px; padding: 0 3px; color: #9fb8d0; font-size: 11px; }
-.col-filt:hover { color: #fff; }
-th.col-h.filt-on .col-filt { color: #ffd24a; }
+.col-filt {
+  display: inline-block; margin-left: 6px; padding: 4px 7px; min-width: 24px; text-align: center;
+  color: #c3d4e6; font-size: 17px; line-height: 1; border-radius: 4px; cursor: pointer; vertical-align: middle;
+}
+.col-filt:hover { color: #fff; background: rgba(255,255,255,.20); }
+th.col-h.filt-on .col-filt { color: #ffd24a; background: rgba(255,210,74,.15); }
 /* 列筛选弹窗 */
 .colfilt-pop {
   position: fixed; z-index: 200; width: 250px; background: #fff; border: 1px solid var(--line);

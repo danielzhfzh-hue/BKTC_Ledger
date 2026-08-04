@@ -1,0 +1,29 @@
+name: build-desktop
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install pywebview openpyxl pyinstaller
+      - name: Build with PyInstaller (onedir)
+        # separator: ';' on Windows, ':' on macOS
+        run: pyinstaller --noconfirm --windowed --clean --name BKTC_Ledger --add-data "ui${{ runner.os == 'Windows' && ';' || ':' }}ui" --collect-all webview --hidden-import "webview.platforms.edgechromium" app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BKTC_Ledger-${{ runner.os }}
+          path: dist/
+          if-no-files-found: error

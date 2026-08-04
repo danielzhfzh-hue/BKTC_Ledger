@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BKTC 台账维护工具</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="title">BKTC 上海 POU 台账维护工具</div>
+  <div class="paths">
+    <span title="数据文件">数据：<b id="lblStore">-</b></span>
+    <span title="台账文件">台账：<b id="lblXlsx">-</b></span>
+  </div>
+  <div class="actions">
+    <button id="btnPickStore">打开数据文件…</button>
+    <button id="btnPickXlsx">选择台账文件…</button>
+    <button id="btnImportFeishu">从飞书导出导入…</button>
+    <button id="btnSyncExcel">从当前 Excel 同步</button>
+    <button id="btnSave">保存数据</button>
+    <button id="btnGenerate" class="primary">生成台账</button>
+    <button id="btnOpenXlsx">打开台账</button>
+  </div>
+</header>
+
+<nav id="tabs">
+  <button class="tab" data-tab="摘要">摘要</button>
+  <button class="tab" data-tab="合同订单">合同订单</button>
+  <button class="tab" data-tab="付款条件">付款条件</button>
+  <button class="tab" data-tab="设备台账">设备台账</button>
+  <button class="tab" data-tab="发货批次">发货批次</button>
+  <button class="tab" data-tab="开票记录">开票记录</button>
+  <button class="tab" data-tab="回款记录">回款记录</button>
+  <button class="tab" data-tab="预警规则">预警规则</button>
+  <button class="tab" data-tab="使用指南">使用指南</button>
+</nav>
+
+<main>
+  <section id="panel-摘要" class="panel">
+    <div id="summaryCards" class="cards"></div>
+    <h3>校验结果</h3>
+    <ul id="summaryIssues" class="issues"></ul>
+  </section>
+
+  <section id="panel-表格" class="panel hidden">
+    <div class="toolbar">
+      <select id="filterCustomer" title="按合同（客户）筛选"><option value="">全部合同（客户）</option></select>
+      <select id="filterJob" title="按 JOB No 筛选"><option value="">全部 JOB</option></select>
+      <button id="btnClearFilter" title="清除筛选">✕ 清除</button>
+      <button data-act="add">＋ 添加行</button>
+      <button data-act="del">🗑 删除选中</button>
+      <button data-act="dup">⧉ 重复选中行</button>
+      <button data-act="rename" class="only-ship" title="把选中批次的名称同步到设备/开票/回款">✎ 重命名批次</button>
+      <button data-act="copy">复制选中 (TSV)</button>
+      <span class="hint">在表格里直接 Ctrl/Cmd+V 可粘贴多行（含表头自动识别）</span>
+      <span class="spacer"></span>
+      <input id="filterKeyword" placeholder="关键字…">
+    </div>
+    <div id="tabHint" class="tabhint"></div>
+    <div id="gridWrap" class="gridwrap">
+      <table id="grid">
+        <thead id="gridHead"></thead>
+        <tbody id="gridBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="panel-使用指南" class="panel hidden">
+    <div class="guide">
+      <h3>操作对照（改完记得「保存数据」→「生成台账」）</h3>
+      <table>
+        <thead><tr><th>要做什么</th><th>在哪个页面</th><th>说明 / 注意</th></tr></thead>
+        <tbody>
+          <tr><td>新建订单</td><td>合同订单</td>
+              <td>「＋添加行」→ 填 JOB No/客户/担当者/订单内容/付款条件文本/发货方式/发货地点/送货地点；再按顺序补：付款条件、设备台账、发货批次、开票、回款。</td></tr>
+          <tr><td>修改订单</td><td>合同订单</td>
+              <td>筛选 JOB 后直接改单元格；总台数/设备型号是自动列，不用改。</td></tr>
+          <tr><td>添加付款方式</td><td>付款条件</td>
+              <td>添加行填 JOB No/款类/比例%/账期天数/触发条件/说明；每单比例合计必须 100%。</td></tr>
+          <tr><td>修改付款方式</td><td>付款条件</td>
+              <td>直接改对应行；合同订单页的“付款条件”展示文本是另一个字段，需同步改（或保持原样）。</td></tr>
+          <tr><td>添加设备/发货明细</td><td>设备台账</td>
+              <td>一台设备一行：PO/型号/製造番号/機番/未税单价/是否无偿/<b>发货批次</b>/送货单回收/验收状态/质保时间/备注。</td></tr>
+          <tr><td>修改设备/质保时间</td><td>设备台账</td>
+              <td>质保开始日/结束日/质保期、验收状态都在这里改。</td></tr>
+          <tr><td>修改设备属于哪个批次</td><td>设备台账 或 发货批次页「✎ 重命名批次」</td>
+              <td><b>批次归属以设备行为准</b>：改设备行的“发货批次”列；改名用发货批次页的「✎ 重命名批次」会自动同步设备/开票/回款。</td></tr>
+          <tr><td>添加发货批次</td><td>发货批次</td>
+              <td>添加行填 JOB No/发货批次/出荷日；<b>台数/未税合计/含税合计/覆盖番号是自动列</b>。新批次还要把对应设备行的“发货批次”改成同名，否则台账页不显示。</td></tr>
+          <tr><td>修改发货信息（出荷日）</td><td>发货批次</td>
+              <td>直接改“出荷日”；台数/金额不要手改，保存时自动重算。</td></tr>
+          <tr><td>添加/修改开票</td><td>开票记录</td>
+              <td>填 JOB No/款类/开票日/状态=已开/含税金额/覆盖批次/覆盖製造番号/账期/应收回款日/回款状态；覆盖台数是自动列。</td></tr>
+          <tr><td>添加/修改回款</td><td>回款记录</td>
+              <td>填 JOB No/款类/回款日/含税金额/覆盖批次/覆盖製造番号；覆盖台数是自动列。</td></tr>
+          <tr><td>修改待回收预警条件</td><td>预警规则</td>
+              <td>可配置临近天数（默认 30）、金额容差（默认 0.01）、未验收/发票异常是否归④待确认；保存后重新「生成台账」生效。</td></tr>
+          <tr><td>看首页/待回收页效果</td><td>摘要 + 生成台账</td>
+              <td>「生成台账」会重建导航页、未回收管理表、全部 JOB 页；摘要页先看校验问题。</td></tr>
+        </tbody>
+      </table>
+      <h3>为什么“发货页面改无效、台账页面改有效”</h3>
+      <p>台账 JOB 页的设备行和批次列全部来自<b>设备台账表</b>；发货批次表只提供“出荷日”和自动汇总（台数/金额）。
+      所以：<b>改批次归属 → 设备台账页改“发货批次”列</b>（或发货批次页「✎ 重命名批次」）；
+      <b>改出荷日 → 发货批次页</b>。只改发货批次页的批次名、设备没跟着改，表格自然不显示。</p>
+      <h3>自动计算列（只读，别手改）</h3>
+      <p>合同订单：设备型号、总台数；发货批次：台数、未税合计、含税合计、覆盖製造番号；
+      开票/回款：覆盖台数。保存/生成时自动重算。</p>
+    </div>
+  </section>
+
+  <section id="panel-预警规则" class="panel hidden">
+    <div class="guide">
+      <h3>待回收预警规则（改完点「保存数据」→「生成台账」生效）</h3>
+      <table>
+        <thead><tr><th style="width:160px">规则</th><th style="width:220px">设置</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>临近天数</td>
+              <td><input type="number" id="rulesDays" min="1" max="365" step="1"> 天</td>
+              <td>应收回款日在 N 天内显示「②临近」并写入“临近”原因（默认 30 天）。</td></tr>
+          <tr><td>金额容差</td>
+              <td><input type="number" id="rulesTol" min="0" step="0.01"></td>
+              <td>未回收金额 ≤ 容差视为「已回清」（默认 0.01）。</td></tr>
+          <tr><td>未验收 → ④待确认</td>
+              <td><input type="checkbox" id="rulesUnacc"></td>
+              <td>验收款未验收时不按日期判逾期，显示④待确认（默认开启）。</td></tr>
+          <tr><td>发票异常 → ④待确认</td>
+              <td><input type="checkbox" id="rulesInvBad"></td>
+              <td>开票状态不是「已开」或缺少应收回款日时归④待确认（默认开启）。</td></tr>
+        </tbody>
+      </table>
+      <p><button id="btnRulesDefault">恢复默认</button>
+         <span style="color:#777">　首页/待回收页由「生成台账」自动重建，不需要手工改 Excel。</span></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div id="status" class="status">正在加载…</div>
+  <div id="counts" class="counts"></div>
+</footer>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

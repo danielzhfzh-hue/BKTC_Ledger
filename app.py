@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 
 APP_DIR = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))

@@ -44,17 +44,15 @@
 
   <section id="panel-表格" class="panel hidden">
     <div class="toolbar">
-      <select id="filterCustomer" title="按合同（客户）筛选"><option value="">全部合同（客户）</option></select>
-      <select id="filterJob" title="按 JOB No 筛选"><option value="">全部 JOB</option></select>
-      <button id="btnClearFilter" title="清除筛选">✕ 清除</button>
+      <button id="btnClearFilter" title="清除本表的筛选与排序">✕ 清除筛选/排序</button>
       <button data-act="add">＋ 添加行</button>
       <button data-act="del">🗑 删除选中</button>
       <button data-act="dup">⧉ 重复选中行</button>
       <button data-act="rename" class="only-ship" title="把选中批次的名称同步到设备/开票/回款">✎ 重命名批次</button>
       <button data-act="copy">复制选中 (TSV)</button>
-      <span class="hint">在表格里直接 Ctrl/Cmd+V 可粘贴多行（含表头自动识别）</span>
+      <span class="hint">点表头排序（升→降→取消）· 点 ▾ 按列筛选 · Ctrl/Cmd+V 粘贴多行</span>
       <span class="spacer"></span>
-      <input id="filterKeyword" placeholder="关键字…">
+      <input id="filterKeyword" placeholder="全表关键字…">
     </div>
     <div id="tabHint" class="tabhint"></div>
     <div id="gridWrap" class="gridwrap">
@@ -163,6 +161,13 @@
   <div id="status" class="status">正在加载…</div>
   <div id="counts" class="counts"></div>
 </footer>
+
+<div id="colFilterPop" class="colfilt-pop" style="display:none">
+  <div class="colfilt-head"><span id="colfiltTitle"></span><button id="colfiltClose" title="关闭">✕</button></div>
+  <input id="colfiltSearch" placeholder="搜索值…">
+  <div class="colfilt-allrow"><label><input type="checkbox" id="colfiltAll"> 全选</label><button id="colfiltClear">清除筛选</button></div>
+  <div id="colfiltList" class="colfilt-list"></div>
+</div>
 
 <div id="toast" class="toast hidden"></div>
 

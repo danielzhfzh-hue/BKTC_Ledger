@@ -87,6 +87,30 @@ td.cb input { min-width: 0; width: auto; }
 td.date-cell.empty { text-align: center; cursor: pointer; }
 td.date-cell.empty .date-ph { display: block; padding: 5px 6px; color: #c0c5cc; }
 td.date-cell.empty:hover .date-ph { color: #8a93a0; }
+/* 可排序/可筛选表头 */
+th.col-h { cursor: pointer; user-select: none; white-space: nowrap; }
+th.col-h .col-h-name { display: inline; }
+th.col-h .sort-ind { color: #ffdf6b; font-size: 10px; margin-left: 3px; min-width: 10px; display: inline-block; }
+th.col-h:hover { background: #2a5a8a; }
+th.col-h.filt-on { background: #2d5e88; }
+.col-filt { display: inline-block; margin-left: 6px; padding: 0 3px; color: #9fb8d0; font-size: 11px; }
+.col-filt:hover { color: #fff; }
+th.col-h.filt-on .col-filt { color: #ffd24a; }
+/* 列筛选弹窗 */
+.colfilt-pop {
+  position: fixed; z-index: 200; width: 250px; background: #fff; border: 1px solid var(--line);
+  border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.18); padding: 8px; font-size: 12px; color: #333;
+}
+.colfilt-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-weight: 600; }
+.colfilt-head button { border: none; background: none; font-size: 14px; color: #888; cursor: pointer; padding: 0 4px; }
+#colfiltSearch { width: 100%; box-sizing: border-box; padding: 4px 6px; border: 1px solid var(--line); border-radius: 5px; margin-bottom: 6px; font: inherit; }
+.colfilt-allrow { display: flex; justify-content: space-between; align-items: center; padding: 4px 2px; border-bottom: 1px solid #eee; margin-bottom: 4px; }
+.colfilt-allrow button { font-size: 11px; color: var(--danger); background: none; border: none; cursor: pointer; padding: 0; }
+.colfilt-list { max-height: 280px; overflow: auto; }
+.cf-item { display: flex; align-items: center; gap: 6px; padding: 3px 4px; cursor: pointer; border-radius: 4px; }
+.cf-item:hover { background: #f0f5fb; }
+.cf-item input { margin: 0; }
+.cf-item .cf-v { flex: 1; word-break: break-all; }
 tr.selected td { background: #dcebfa; }
 tr.row-new td { background: #f0fbe8; }
 tr.row-dup td { background: #fdf3e3; }

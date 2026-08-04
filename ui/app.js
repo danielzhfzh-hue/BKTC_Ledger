@@ -3,7 +3,7 @@
 const state = {
   storePath: "", xlsxPath: "", data: null, schema: null,
   tab: "摘要", dirty: false, selection: new Set(), anchor: null,
-  filter: "", customer: "", job: "", rules: {},
+  filter: "", colFilters: {}, sortBy: {}, rules: {},
   version: "?", update: null,
 };
 
@@ -59,23 +59,22 @@ function renderAll() {
   $("setStore").textContent = state.storePath || "（未选择）";
   $("setXlsx").textContent = state.xlsxPath || "（未选择）";
   $("setVersion").textContent = "v" + state.version;
-  populateFilters();
   renderSummary();
   renderGrid();
   renderCounts();
 }
 
-function populateFilters() {
-  if (!state.data) return;
-  const custs = [...new Set(state.data["合同订单"]
-    .map((c) => String(c["客户"] || "").trim()).filter(Boolean))].sort();
-  $("filterCustomer").innerHTML = '<option value="">全部合同（客户）</option>' +
-    custs.map((c) => `<option value="${esc(c)}" ${c === state.customer ? "selected" : ""}>${esc(c)}</option>`).join("");
-  const jobs = state.data["合同订单"]
-    .filter((c) => !state.customer || c["客户"] === state.customer)
-    .map((c) => String(c["JOB No"])).sort();
-  $("filterJob").innerHTML = '<option value="">全部 JOB</option>' +
-    jobs.map((j) => `<option value="${esc(j)}" ${j === state.job ? "selected" : ""}>${esc(j)}</option>`).join("");
+function currentContext() {
+  // 从当前表的单值列筛选推导"新建行的上下文"（替代旧的客户/JOB 下拉）
+  const cf = state.colFilters[state.tab] || {};
+  const ctx = { job: "", customer: "" };
+  const js = cf["JOB No"];
+  if (js && js.size === 1) ctx.job = [...js][0];
+  if (state.tab === "合同订单") {
+    const cs = cf["客户"];
+    if (cs && cs.size === 1) ctx.customer = [...cs][0];
+  }
+  return ctx;
 }
 
 function renderSummary() {
@@ -199,15 +198,32 @@ $("btnRulesDefault").addEventListener("click", () => {
 
 function visibleRows(table) {
   const q = state.filter.trim().toLowerCase();
-  const jobOf = {};
-  for (const c of state.data["合同订单"]) jobOf[c["JOB No"]] = c["客户"];
-  return state.data[table].map((rec, i) => {
-    const job = String(rec["JOB No"] || "");
-    if (state.job && job !== state.job) return -1;
-    if (state.customer && jobOf[job] !== state.customer) return -1;
-    if (q && !Object.values(rec).join(" ").toLowerCase().includes(q)) return -1;
-    return i;
-  }).filter((i) => i >= 0);
+  const cf = state.colFilters[table] || {};
+  const so = state.sortBy[table];
+  const recs = state.data[table];
+  const idxs = [];
+  for (let i = 0; i < recs.length; i++) {
+    const rec = recs[i];
+    let keep = true;
+    for (const f in cf) {
+      const set = cf[f];
+      if (set && !set.has(String(rec[f] ?? ""))) { keep = false; break; }
+    }
+    if (keep && q && !Object.values(rec).join(" ").toLowerCase().includes(q)) keep = false;
+    if (keep) idxs.push(i);
+  }
+  if (so && so.dir) {
+    const fld = fieldsOf(table).find((x) => x.name === so.field);
+    const isNum = fld && (fld.type === "number" || fld.type === "int");
+    const f = so.field, d = so.dir;
+    idxs.sort((a, b) => {
+      let cmp;
+      if (isNum) cmp = (Number(recs[a][f]) || 0) - (Number(recs[b][f]) || 0);
+      else cmp = String(recs[a][f] ?? "").localeCompare(String(recs[b][f] ?? ""), "zh");
+      return d * cmp;
+    });
+  }
+  return idxs;
 }
 
 function renderGrid() {
@@ -216,8 +232,17 @@ function renderGrid() {
   const fields = fieldsOf(table);
   const all = visibleRows(table);
   const total = all.length;
+  const so = state.sortBy[state.tab];
+  const cfT = state.colFilters[state.tab] || {};
   const head = `<tr><th class="cb"></th>` +
-    fields.map((f) => `<th title="${esc(f.name)}">${esc(f.name)}${f.derived ? " (自动)" : ""}</th>`).join("") + "</tr>";
+    fields.map((f) => {
+      const ind = (so && so.field === f.name) ? (so.dir === 1 ? "▲" : "▼") : "";
+      const act = cfT[f.name] ? " filt-on" : "";
+      return `<th class="col-h${act}" data-field="${esc(f.name)}" title="${esc(f.name)}（点击排序）">` +
+        `<span class="col-h-name">${esc(f.name)}${f.derived ? " (自动)" : ""}</span>` +
+        `<span class="sort-ind">${ind}</span>` +
+        `<span class="col-filt" data-field="${esc(f.name)}" title="筛选">▾</span></th>`;
+    }).join("") + "</tr>";
   const wrap = $("gridWrap");
   const viewH = wrap.clientHeight || 600;
   const scrollTop = wrap.scrollTop || 0;
@@ -361,9 +386,10 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
     const act = b.dataset.act;
     const table = state.tab;
     if (act === "add") {
+      const ctx = currentContext();
       const rec = {};
-      if (state.job) rec["JOB No"] = state.job;
-      if (table === "合同订单" && state.customer) rec["客户"] = state.customer;
+      if (ctx.job) rec["JOB No"] = ctx.job;
+      if (table === "合同订单" && ctx.customer) rec["客户"] = ctx.customer;
       state.data[table].push(rec);
       state.dirty = true;
       state.selection = new Set([state.data[table].length - 1]);
@@ -480,9 +506,10 @@ function pasteGrid(table, row0, col0, text) {
   let r = row0;
   for (const row of rows) {
     if (!state.data[table][r]) {
+      const ctx = currentContext();
       const rec = {};
-      if (state.job) rec["JOB No"] = state.job;
-      if (table === "合同订单" && state.customer) rec["客户"] = state.customer;
+      if (ctx.job) rec["JOB No"] = ctx.job;
+      if (table === "合同订单" && ctx.customer) rec["客户"] = ctx.customer;
       state.data[table].push(rec);
       r = state.data[table].length - 1;
     }
@@ -505,26 +532,111 @@ function pasteGrid(table, row0, col0, text) {
   toast(`已粘贴 ${rows.length} 行`);
 }
 
-$("filterCustomer").addEventListener("change", (e) => {
-  state.customer = e.target.value;
-  state.job = "";
-  populateFilters();
-  renderGrid();
-});
-
-$("filterJob").addEventListener("change", (e) => {
-  state.job = e.target.value;
-  renderGrid();
-});
-
 $("btnClearFilter").addEventListener("click", () => {
-  state.customer = "";
-  state.job = "";
+  state.colFilters[state.tab] = {};
+  delete state.sortBy[state.tab];
   state.filter = "";
   $("filterKeyword").value = "";
-  populateFilters();
+  closeColFilter();
+  renderGrid();
+  toast("已清除本表筛选/排序");
+});
+
+// 表头：点列名=排序(升→降→取消)；点 ▾=打开该列筛选
+$("gridHead").addEventListener("click", (e) => {
+  const fb = e.target.closest(".col-filt");
+  if (fb) { openColFilter(fb.dataset.field); return; }
+  const th = e.target.closest("th.col-h");
+  if (!th) return;
+  const field = th.dataset.field;
+  const cur = state.sortBy[state.tab];
+  let dir;
+  if (!cur || cur.field !== field) dir = 1;
+  else if (cur.dir === 1) dir = -1;
+  else dir = 0;
+  if (dir) state.sortBy[state.tab] = { field, dir };
+  else delete state.sortBy[state.tab];
   renderGrid();
 });
+
+let _cfAllVals = [];
+function openColFilter(field) {
+  const table = state.tab;
+  const recs = state.data[table];
+  const dist = new Map();
+  for (const r of recs) {
+    const k = String(r[field] ?? "");
+    dist.set(k, (dist.get(k) || 0) + 1);
+  }
+  _cfAllVals = [...dist.keys()].sort((a, b) => a.localeCompare(b, "zh"));
+  const allCount = _cfAllVals.length;
+  state.colFilters[table] = state.colFilters[table] || {};
+  const set = state.colFilters[table][field] || new Set(_cfAllVals);
+  $("colfiltTitle").textContent = `${field}（${allCount} 个值）`;
+  $("colfiltSearch").value = "";
+  $("colfiltAll").checked = set.size >= allCount;
+  $("colfiltList").innerHTML = _cfAllVals.map((v) => {
+    const lbl = v === "" ? "（空）" : esc(v);
+    return `<label class="cf-item"><input type="checkbox" data-v="${esc(v)}" ${set.has(v) ? "checked" : ""}><span class="cf-v">${lbl}</span></label>`;
+  }).join("");
+  const pop = $("colFilterPop");
+  pop.dataset.field = field;
+  pop.style.display = "block";
+  const th = document.querySelector(`#gridHead th[data-field="${field}"]`);
+  if (th) {
+    const r = th.getBoundingClientRect();
+    pop.style.top = Math.min(r.bottom + 2, window.innerHeight - 340) + "px";
+    let left = r.left;
+    if (left + 260 > window.innerWidth) left = window.innerWidth - 270;
+    pop.style.left = Math.max(8, left) + "px";
+  }
+}
+function cfApply(field, value, checked) {
+  const table = state.tab;
+  state.colFilters[table] = state.colFilters[table] || {};
+  let set = state.colFilters[table][field];
+  if (!set) { set = new Set(_cfAllVals); state.colFilters[table][field] = set; }
+  if (checked) set.add(value); else set.delete(value);
+  if (set.size >= _cfAllVals.length) delete state.colFilters[table][field];
+  $("colfiltAll").checked = !state.colFilters[table] || !state.colFilters[table][field];
+  renderGrid();
+}
+function closeColFilter() { $("colFilterPop").style.display = "none"; }
+
+$("colfiltSearch").addEventListener("input", (e) => {
+  const q = e.target.value.toLowerCase();
+  document.querySelectorAll("#colfiltList .cf-item").forEach((el) => {
+    el.style.display = el.querySelector(".cf-v").textContent.toLowerCase().includes(q) ? "" : "none";
+  });
+});
+$("colfiltAll").addEventListener("change", (e) => {
+  const field = $("colFilterPop").dataset.field;
+  const table = state.tab;
+  const checked = e.target.checked;
+  state.colFilters[table] = state.colFilters[table] || {};
+  if (checked) delete state.colFilters[table][field];
+  else state.colFilters[table][field] = new Set();
+  document.querySelectorAll("#colfiltList .cf-item input").forEach((c) => { c.checked = checked; });
+  renderGrid();
+});
+$("colfiltList").addEventListener("change", (e) => {
+  if (e.target.tagName !== "INPUT") return;
+  cfApply($("colFilterPop").dataset.field, e.target.dataset.v, e.target.checked);
+});
+$("colfiltClear").addEventListener("click", () => {
+  const field = $("colFilterPop").dataset.field;
+  if (state.colFilters[state.tab]) delete state.colFilters[state.tab][field];
+  closeColFilter();
+  renderGrid();
+});
+$("colfiltClose").addEventListener("click", closeColFilter);
+document.addEventListener("mousedown", (e) => {
+  const pop = $("colFilterPop");
+  if (!pop || pop.style.display === "none") return;
+  if (e.target.closest("#colFilterPop") || e.target.closest(".col-filt")) return;
+  closeColFilter();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeColFilter(); });
 
 let _kwTimer = null;
 $("filterKeyword").addEventListener("input", (e) => {

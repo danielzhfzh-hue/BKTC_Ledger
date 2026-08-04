@@ -157,7 +157,7 @@ function switchTab(tab) {
   document.querySelectorAll(".tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === tab));
   $("panel-摘要").classList.toggle("hidden", tab !== "摘要");
-  $("panel-表格").classList.toggle("hidden", tab === "摘要" || tab === "使用指南");
+  $("panel-表格").classList.toggle("hidden", tab === "摘要" || tab === "使用指南" || tab === "预警规则");
   $("panel-使用指南").classList.toggle("hidden", tab !== "使用指南");
   $("panel-预警规则").classList.toggle("hidden", tab !== "预警规则");
   document.querySelectorAll("[data-act=rename]").forEach((b) =>

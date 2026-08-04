@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """BKTC 台账维护工具（pywebview 桌面壳，macOS / Windows 通用）。"""
 import argparse
-import json
 import os
 import re
 import shutil
@@ -13,7 +12,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 
 APP_DIR = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +29,12 @@ def _parse_version(tag):
         m = re.match(r"\d+", p)
         parts.append(int(m.group()) if m else 0)
     return tuple(parts)
+
+
+def _tag_from_location(url):
+    """从 .../releases/tag/v1.2.3 提取版本号 1.2.3。"""
+    m = re.search(r"/releases/tag/(?:v|V)?([0-9][0-9.]*)", url or "")
+    return m.group(1) if m else ""
 
 DEFAULT_XLSX = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx"
 DEFAULT_STORE = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.records.json"
@@ -93,28 +98,27 @@ class Api:
         return res[0] if res else None
 
     def check_update(self):
-        """查 GitHub 最新 Release，对比本机 __version__，按平台选资产。"""
-        url = f"https://api.github.com/repos/{REPO}/releases/latest"
+        """查 GitHub 最新 Release：走网页 releases/latest 302 重定向读 tag，
+        避开 API 匿名 60 次/时限流；资产下载 URL 直接构造（公开库免鉴权）。"""
+        latest_url = f"https://github.com/{REPO}/releases/latest"
+        want = "macOS" if sys.platform == "darwin" else "Windows"
+        asset_name = f"BKTC_Ledger-{want}.tar.gz"
         try:
-            req = urllib.request.Request(
-                url, headers={"Accept": "application/vnd.github+json",
-                              "User-Agent": "BKTC_Ledger"})
+            req = urllib.request.Request(latest_url, headers={"User-Agent": "BKTC_Ledger"})
             with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError) as e:
+                tag = _tag_from_location(resp.geturl())
+        except (urllib.error.URLError, OSError) as e:
             return {"current": __version__, "latest": None, "has_update": False,
                     "error": f"无法访问 GitHub：{e}"}
-        latest = (data.get("tag_name") or "").lstrip("vV")
-        want = "macOS" if sys.platform == "darwin" else "Windows"
-        asset = next((a for a in data.get("assets", [])
-                      if want in a.get("name", "")), None)
+        if not tag:
+            return {"current": __version__, "latest": None, "has_update": False,
+                    "error": "未找到最新版本（可能尚未发布 Release）"}
+        asset_url = f"https://github.com/{REPO}/releases/download/v{tag}/{asset_name}"
         return {
-            "current": __version__, "latest": latest,
-            "has_update": _parse_version(latest) > _parse_version(__version__),
-            "notes": (data.get("body") or "").strip(),
-            "release_url": data.get("html_url"),
-            "asset_name": asset["name"] if asset else None,
-            "asset_url": asset["browser_download_url"] if asset else None,
+            "current": __version__, "latest": tag,
+            "has_update": _parse_version(tag) > _parse_version(__version__),
+            "release_url": f"https://github.com/{REPO}/releases/tag/v{tag}",
+            "asset_name": asset_name, "asset_url": asset_url,
         }
 
     def download_update(self, asset_url, asset_name):

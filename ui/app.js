@@ -565,6 +565,7 @@ $("btnCheckUpdate").addEventListener("click", async () => {
   try {
     const u = await call("check_update");
     state.update = u;
+    if (u.current) { state.version = u.current; $("setVersion").textContent = "v" + u.current; }
     if (u.error) { $("updateInfo").textContent = u.error; return; }
     if (u.has_update) {
       $("updateInfo").innerHTML = `最新 <b>v${u.latest}</b>（当前 v${u.current}）`;

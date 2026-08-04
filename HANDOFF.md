@@ -75,6 +75,12 @@
 - **备份整理**:生成台账不再在同目录堆 `_备份_TS.xlsx`,改 `备份/BKTC_TS.xlsx`(`core.backup_xlsx`,留近 10 份)。
 - **仓库公开**:`.gitignore` 加 `*.records.json`/`*.xlsx`/`备份/`/`*.bak`;HANDOFF §6 的飞书/钉钉 base id、corp_id 已 scrub。⚠️ `app.py` 的 DEFAULT 路径仍含本机用户名(仅路径字符串,非数据),公开可接受。
 
+### 2026-08-04 v1.1.1–v1.1.4（定稿补丁，最新 = v1.1.4）
+- **v1.1.1** 检查更新限流修复:`check_update` 改走网页 `releases/latest` 302 重定向读 tag(避 GitHub API 匿名 60/h 限流),资产 URL 直接构造 `releases/download/vX.Y.Z/BKTC_Ledger-<平台>.tar.gz`。
+- **v1.1.2** 预警规则 tab 可见性(原 `switchTab` 漏把 panel-表格 在预警规则下隐藏)+ 空日期单元格显示「—」(macOS WKWebView `<input type=date value="">` 会把空值显示成今天,造成"脏数据"错觉;改点击才挂 picker)。
+- **v1.1.3** 六表 Excel 式筛选+排序:点表头升/降/取消;每列表头「▾」弹该列去重值勾选(多列 AND)+搜索+全选;移除客户/JOB 下拉(被列筛选取代);保留关键字全表搜。
+- **v1.1.4 拆分批次 + 派生实时重算**:发货批次页「⇲ 拆分批次」选中源批次→按**设备型号分组**勾选移出(整型号全选/挑个别机)→目标批次+出荷日→移动+自动建/合并目标行(只改设备 `发货批次`,不动开票/回款覆盖);`recomputeDerived()`(JS 镜像 `core.derive`)挂到 updateRec/增删/粘贴/重命名/拆分,批次合计/合同总台数·型号/开票回款覆盖台数 实时刷新。列筛选按钮▾放大。
+
 ## 4. 打包与分发(GitHub CI = 主路径)
 
 **仓库**:https://github.com/danielzhfzh-hue/BKTC_Ledger(私有,`gh` 已登录 `danielzhfzh-hue`)。**源码 15 个文件,无数据**。

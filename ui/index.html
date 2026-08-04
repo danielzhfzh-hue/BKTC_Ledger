@@ -49,6 +49,7 @@
       <button data-act="del">🗑 删除选中</button>
       <button data-act="dup">⧉ 重复选中行</button>
       <button data-act="rename" class="only-ship" title="把选中批次的名称同步到设备/开票/回款">✎ 重命名批次</button>
+      <button data-act="split" class="only-ship" title="把选中批次的部分设备移到另一个批次">⇲ 拆分批次</button>
       <button data-act="copy">复制选中 (TSV)</button>
       <span class="hint">点表头排序（升→降→取消）· 点 ▾ 按列筛选 · Ctrl/Cmd+V 粘贴多行</span>
       <span class="spacer"></span>
@@ -167,6 +168,23 @@
   <input id="colfiltSearch" placeholder="搜索值…">
   <div class="colfilt-allrow"><label><input type="checkbox" id="colfiltAll"> 全选</label><button id="colfiltClear">清除筛选</button></div>
   <div id="colfiltList" class="colfilt-list"></div>
+</div>
+
+<div id="splitModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><span id="splitTitle"></span><button id="splitClose" title="关闭">✕</button></div>
+    <div class="modal-body">
+      <div class="split-form">
+        <label>移到批次 <input id="splitTarget" type="text" placeholder="如 2"></label>
+        <label>出荷日 <input id="splitShipDate" type="date"></label>
+      </div>
+      <div class="split-sub">勾选要移出的设备（按型号分组，可整型号全选或挑个别机）：</div>
+      <div id="splitDevList" class="split-dev-list"></div>
+      <div id="splitPreview" class="split-preview muted"></div>
+      <p class="split-note muted">注：本操作只调整设备的「发货批次」归属；开票/回款的「覆盖批次」不自动改动，如需请另行核对。</p>
+    </div>
+    <div class="modal-foot"><button id="splitCancel">取消</button><button id="splitOk" class="primary">确认拆分</button></div>
+  </div>
 </div>
 
 <div id="toast" class="toast hidden"></div>

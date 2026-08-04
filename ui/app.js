@@ -19,9 +19,10 @@ const TAB_HINTS = {
 };
 
 const $ = (id) => document.getElementById(id);
+function s(v) { return v === null || v === undefined ? "" : String(v); }
 
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => (
+function esc(x) {
+  return String(x ?? "").replace(/[&<>"']/g, (c) => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
@@ -159,7 +160,7 @@ function switchTab(tab) {
   $("panel-表格").classList.toggle("hidden", tab === "摘要" || tab === "使用指南" || tab === "预警规则");
   $("panel-使用指南").classList.toggle("hidden", tab !== "使用指南");
   $("panel-预警规则").classList.toggle("hidden", tab !== "预警规则");
-  document.querySelectorAll("[data-act=rename]").forEach((b) =>
+  document.querySelectorAll(".only-ship").forEach((b) =>
     b.classList.toggle("hidden", tab !== "发货批次"));
   if (tab !== "摘要" && tab !== "使用指南" && tab !== "预警规则") renderGrid();
 }
@@ -224,6 +225,41 @@ function visibleRows(table) {
     });
   }
   return idxs;
+}
+
+function recomputeDerived() {
+  // 镜像 core.derive() 的派生聚合（仅显示用；save 时后端 derive 仍权威落盘）
+  const d = state.data;
+  if (!d) return;
+  const devBy = {};
+  for (const dev of d["设备台账"]) {
+    const k = s(dev["JOB No"]) + "" + s(dev["发货批次"]);
+    (devBy[k] ||= []).push(dev);
+  }
+  for (const x of d["发货批次"]) {
+    const devs = devBy[s(x["JOB No"]) + "" + s(x["发货批次"])] || [];
+    x["台数"] = devs.length;
+    x["未税合计"] = Math.round(devs.reduce((a, v) => a + (Number(v["未税单价"]) || 0), 0) * 1000) / 1000;
+    x["含税合计"] = Math.round(x["未税合计"] * 1.13 * 100) / 100;
+    x["覆盖製造番号"] = devs.map((v) => s(v["製造番号"])).filter(Boolean).join(";");
+  }
+  const cnt = {}, models = {};
+  for (const dev of d["设备台账"]) {
+    const j = s(dev["JOB No"]);
+    cnt[j] = (cnt[j] || 0) + 1;
+    (models[j] ||= new Set()).add(s(dev["设备型号"]));
+  }
+  for (const c of d["合同订单"]) {
+    const j = s(c["JOB No"]);
+    c["总台数"] = cnt[j] || 0;
+    if (!s(c["设备型号"])) c["设备型号"] = [...(models[j] || new Set())].filter((m) => m).sort().join(";");
+  }
+  for (const t of ["开票记录", "回款记录"]) {
+    for (const x of d[t]) {
+      const set = new Set(s(x["覆盖製造番号"]).split(";").map((p) => p.trim()).filter(Boolean));
+      x["覆盖台数"] = set.size;
+    }
+  }
 }
 
 function renderGrid() {
@@ -307,6 +343,7 @@ function updateRec(table, ri, field, raw) {
   else if (f.type === "int") v = raw === "" ? null : Math.round(Number(raw));
   state.data[table][ri][field] = v;
   state.dirty = true;
+  recomputeDerived();
   renderCounts();
 }
 
@@ -393,14 +430,14 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
       state.data[table].push(rec);
       state.dirty = true;
       state.selection = new Set([state.data[table].length - 1]);
-      renderGrid(); renderCounts();
+      recomputeDerived(); renderGrid(); renderCounts();
       $("gridWrap").scrollTop = $("gridWrap").scrollHeight;
     } else if (act === "del") {
       const idxs = [...state.selection].sort((a, b) => b - a);
       for (const i of idxs) state.data[table].splice(i, 1);
       state.selection = new Set();
       state.dirty = true;
-      renderGrid(); renderCounts();
+      recomputeDerived(); renderGrid(); renderCounts();
     } else if (act === "dup") {
       const idxs = [...state.selection].sort((a, b) => a - b);
       const news = [];
@@ -409,12 +446,14 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
       state.data[table].splice(at, 0, ...news);
       state.selection = new Set(news.map((_, k) => at + k));
       state.dirty = true;
-      renderGrid(); renderCounts();
+      recomputeDerived(); renderGrid(); renderCounts();
       toast(`已重复 ${news.length} 行`);
     } else if (act === "copy") {
       copySelection(table);
     } else if (act === "rename" && table === "发货批次") {
       renameBatch();
+    } else if (act === "split" && table === "发货批次") {
+      splitBatch();
     }
   });
 });
@@ -460,9 +499,100 @@ function renameBatch() {
   }
   state.data["发货批次"] = [...best.values()];
   state.dirty = true;
-  renderGrid(); renderCounts();
+  recomputeDerived(); renderGrid(); renderCounts();
   toast(`已重命名批次 ${oldName} → ${nw}（同步 ${touched} 处）`, "ok");
 }
+
+function splitBatch() {
+  const table = "发货批次";
+  const idxs = [...state.selection];
+  if (!idxs.length) { toast("请先选择要拆分的批次行", "error"); return; }
+  const rec = state.data[table][idxs[0]];
+  const job = s(rec["JOB No"]), src = s(rec["发货批次"]);
+  if (!job || !src) { toast("该行缺少 JOB No / 发货批次", "error"); return; }
+  const devIdxs = state.data["设备台账"]
+    .map((d, i) => ({ d, i }))
+    .filter((x) => s(x.d["JOB No"]) === job && s(x.d["发货批次"]) === src)
+    .map((x) => x.i);
+  if (!devIdxs.length) { toast(`批次「${src}」无设备`, "error"); return; }
+  const groups = {};
+  for (const i of devIdxs) {
+    const m = s(state.data["设备台账"][i]["设备型号"]) || "（无型号）";
+    (groups[m] ||= []).push(i);
+  }
+  const existing = new Set(state.data["发货批次"]
+    .filter((b) => s(b["JOB No"]) === job).map((b) => s(b["发货批次"])));
+  let n = 1; while (existing.has(String(n))) n++;
+  $("splitTitle").textContent = `拆分 ${job} 批次「${src}」（共 ${devIdxs.length} 台）→ 勾选要移出的设备`;
+  $("splitTarget").value = String(n);
+  $("splitShipDate").value = s(rec["出荷日"]);
+  $("splitDevList").innerHTML = Object.entries(groups).map(([m, list]) => {
+    const rows = list.map((i) => {
+      const d = state.data["设备台账"][i];
+      const price = Number(d["未税单价"]) || 0;
+      return `<label class="cf-item split-dev" data-idx="${i}"><input type="checkbox"><span class="cf-v">${esc(s(d["製造番号"]) || "(无番号)")}</span><span class="cf-c">${price.toLocaleString()}</span></label>`;
+    }).join("");
+    return `<div class="split-group"><label class="split-group-h"><input type="checkbox" class="split-grp-all"> <b>${esc(m)}</b>（${list.length} 台）</label><div class="split-group-body">${rows}</div></div>`;
+  }).join("");
+  state._split = { job, src, rec, devIdxs, groups };
+  updateSplitPreview();
+  $("splitModal").classList.remove("hidden");
+}
+function splitSelected() {
+  return [...document.querySelectorAll("#splitDevList .split-dev input:checked")]
+    .map((c) => Number(c.closest(".split-dev").dataset.idx));
+}
+function updateSplitPreview() {
+  if (!state._split) return;
+  const { devIdxs, groups } = state._split;
+  const selset = new Set(splitSelected());
+  const moved = [], remain = [];
+  for (const [m, list] of Object.entries(groups)) {
+    const mv = list.filter((i) => selset.has(i)).length;
+    moved.push(`${m}:${mv}`); remain.push(`${m}:${list.length - mv}`);
+  }
+  const n = selset.size;
+  $("splitPreview").textContent =
+    `将移动 ${n} 台（${moved.join("，") || "无"}）；原批次剩 ${devIdxs.length - n} 台（${remain.join("，")}）`;
+}
+function closeSplit() { $("splitModal").classList.add("hidden"); state._split = null; }
+
+$("splitDevList").addEventListener("change", (e) => {
+  const grpAll = e.target.closest(".split-grp-all");
+  if (grpAll) {
+    grpAll.closest(".split-group").querySelectorAll(".split-dev input")
+      .forEach((c) => { c.checked = grpAll.checked; });
+  } else if (e.target.closest(".split-dev")) {
+    const g = e.target.closest(".split-group");
+    const boxes = g.querySelectorAll(".split-dev input");
+    g.querySelector(".split-grp-all").checked = [...boxes].every((c) => c.checked);
+  }
+  updateSplitPreview();
+});
+$("splitOk").addEventListener("click", () => {
+  const sp = state._split; if (!sp) return;
+  const target = ($("splitTarget").value || "").trim();
+  const shipDate = $("splitShipDate").value || "";
+  if (!target) { toast("请填目标批次名", "error"); return; }
+  if (target === sp.src) { toast("目标批次不能与源批次相同", "error"); return; }
+  const sel = splitSelected();
+  if (!sel.length) { toast("请勾选至少 1 台设备", "error"); return; }
+  for (const i of sel) state.data["设备台账"][i]["发货批次"] = target;
+  let targetRow = state.data["发货批次"].find((b) => s(b["JOB No"]) === sp.job && s(b["发货批次"]) === target);
+  if (!targetRow) {
+    state.data["发货批次"].push({ "JOB No": sp.job, "发货批次": target, "出荷日": shipDate });
+  } else if (shipDate) {
+    targetRow["出荷日"] = shipDate;
+  }
+  recomputeDerived();
+  state.dirty = true;
+  closeSplit();
+  renderGrid(); renderCounts();
+  toast(`已把 ${sel.length} 台设备移到批次「${target}」`, "ok");
+});
+$("splitCancel").addEventListener("click", closeSplit);
+$("splitClose").addEventListener("click", closeSplit);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSplit(); });
 
 function copySelection(table) {
   const idxs = [...state.selection].sort((a, b) => a - b);
@@ -528,7 +658,7 @@ function pasteGrid(table, row0, col0, text) {
     r += 1;
   }
   state.dirty = true;
-  renderGrid(); renderCounts();
+  recomputeDerived(); renderGrid(); renderCounts();
   toast(`已粘贴 ${rows.length} 行`);
 }
 

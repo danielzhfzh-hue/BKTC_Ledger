@@ -114,6 +114,25 @@ th.col-h.filt-on .col-filt { color: #ffd24a; background: rgba(255,210,74,.15); }
 .cf-item:hover { background: #f0f5fb; }
 .cf-item input { margin: 0; }
 .cf-item .cf-v { flex: 1; word-break: break-all; }
+/* 拆分批次 modal */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 300; display: flex; align-items: center; justify-content: center; }
+.modal-card { background: #fff; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.25); width: 560px; max-width: 92vw; max-height: 86vh; display: flex; flex-direction: column; }
+.modal-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); font-weight: 600; font-size: 14px; color: #333; }
+.modal-head button { border: none; background: none; font-size: 16px; color: #888; cursor: pointer; padding: 0 4px; }
+.modal-body { padding: 12px 16px; overflow: auto; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); background: #fafbfc; border-radius: 0 0 10px 10px; }
+.split-form { display: flex; gap: 18px; margin-bottom: 8px; flex-wrap: wrap; }
+.split-form label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #444; }
+.split-form input { padding: 4px 6px; border: 1px solid var(--line); border-radius: 5px; font: inherit; }
+#splitTarget { width: 90px; }
+.split-sub { font-size: 12px; color: #555; margin: 6px 0 4px; }
+.split-dev-list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px; background: #fff; }
+.split-group { margin-bottom: 6px; }
+.split-group-h { display: flex; align-items: center; gap: 6px; padding: 5px 8px; background: #eef3f8; border-radius: 4px; font-size: 12px; }
+.split-group-body { padding-left: 24px; }
+.split-dev .cf-c { color: #999; font-size: 11px; min-width: 100px; text-align: right; font-family: ui-monospace, Menlo, monospace; }
+.split-preview { margin-top: 8px; font-size: 12px; }
+.split-note { margin-top: 6px; font-size: 11px; line-height: 1.5; }
 tr.selected td { background: #dcebfa; }
 tr.row-new td { background: #f0fbe8; }
 tr.row-dup td { background: #fdf3e3; }

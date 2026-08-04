@@ -68,6 +68,13 @@
 - `build_win.bat` 改纯 ASCII(中文 echo + `chcp 65001` 在中文 Windows cmd 解析崩 → 闪退)。
 - 数据迁 Windows 只需 `ledger.records.json` 一个文件(ASCII 名,见 §4)。
 
+### 2026-08-04 v1.1（功能升级）
+- **预警灯跨平台**:导航页「预警」列原用 emoji 🔴🟡🟢(Mac 彩色、Windows 单色/方框),改纯文本「有逾期/部分未回·关注/已回款/无开票」+ 条件格式底色(红 FBE2E2 / 黄 FFF2CC / 绿 E2EFDA);JOB 页隐藏「行预警」列同步去 emoji。Mac/Win 一致。
+- **按钮重排**:顶栏 7 键 → 标题 + 数据/台账徽标 + 「⚙ 设置」;日常三键(保存/生成/打开)独立 actionbar。「从飞书导出导入」「从当前 Excel 同步」**删除**(后者删后 core 的 `load_from_workbook`/`merge_workbook`/`reconcile_store_with_excel` 一并移除)。「设置」面板放文件路径更换 + 检查更新。
+- **手动升级**:`app.py` 加 `__version__`、`check_update()`/`download_update()`(标准库 urllib/tarfile);tag `v*` 触发 CI 出 GitHub Release(`BKTC_Ledger-macOS.tar.gz` / `-Windows.tar.gz`);应用内「设置→检查更新→下载并打开」解压到 `~/Downloads/BKTC_Ledger_update/`,用户手动替换(运行中的 exe/app 不自替换)。
+- **备份整理**:生成台账不再在同目录堆 `_备份_TS.xlsx`,改 `备份/BKTC_TS.xlsx`(`core.backup_xlsx`,留近 10 份)。
+- **仓库公开**:`.gitignore` 加 `*.records.json`/`*.xlsx`/`备份/`/`*.bak`;HANDOFF §6 的飞书/钉钉 base id、corp_id 已 scrub。⚠️ `app.py` 的 DEFAULT 路径仍含本机用户名(仅路径字符串,非数据),公开可接受。
+
 ## 4. 打包与分发(GitHub CI = 主路径)
 
 **仓库**:https://github.com/danielzhfzh-hue/BKTC_Ledger(私有,`gh` 已登录 `danielzhfzh-hue`)。**源码 15 个文件,无数据**。
@@ -82,6 +89,8 @@ gh run list --workflow=build.yml --limit 1            # 找最新 run id
 gh run download <run-id> -n BKTC_Ledger-Windows -D ./out   # 下载解压到 ./out
 # 或网页:Actions → 点 run → Artifacts → 下 BKTC_Ledger-Windows
 ```
+
+**发版与升级(v1.1+,主路径)**:改 `app.py` 的 `__version__` → commit → `git tag vX.Y.Z && git push --tags` → CI 自动构建 win+mac 并发布到 GitHub Releases(资产 `BKTC_Ledger-macOS.tar.gz` / `BKTC_Ledger-Windows.tar.gz`)。用户在应用「⚙ 设置 → 检查更新」见新版,点「下载并打开」自动下载解压到 `~/Downloads/BKTC_Ledger_update/`,退出本程序后用新版本替换旧文件夹(未签名,首开警告照旧)。仓库公开 → 下载免 token。
 
 **Mac 本地 .app(备选)**:`BKTC_Ledger/.venv`(3.11)→ `.venv/bin/pyinstaller --noconfirm --windowed --clean --name BKTC_Ledger --add-data "ui:ui" --collect-all webview --hidden-import webview.platforms.edgechromium app.py` → `dist/BKTC_Ledger.app`(ad-hoc 签名,首次右键打开)。
 
@@ -128,7 +137,8 @@ cd ~/projects/订单整理/BKTC_Ledger && .venv/bin/python app.py
 ## 8. 坑 / 注意
 
 - **records.json 是权威源**,Excel 没有付款条件/覆盖串/应收日结构化字段——别丢;丢了只能从 `.bak` 恢复。
-- 「从当前 Excel 同步」用 `merge_list` 会丢 parse 不回的记录(隐藏公式锚点脆弱);有 `.bak` 兜底但**务必看 toast 里的 `-Z`**。
+- 生成台账的备份在 `备份/` 子目录(`core.backup_xlsx`,留近 10 份);不再在根目录堆 `_备份_*.xlsx`。
+- 「从当前 Excel 同步」功能已于 v1.1 **移除**(records.json 是唯一权威源;旧 `merge_list` 会丢 parse 不回的记录)。如需从旧 Excel 救数据,临时回退到 v1.0。
 - **Windows 一切用 ASCII**:文件夹/程序名/.bat/数据文件名都不能有中文(乱码);`build_win.bat` 已纯 ASCII;数据文件用 `ledger.records.json`。
 - 勿跑 `feishu_rebuild.py`;`transform_relational.py` 缺近期修复,重跑回退。
 - `build_ledger_main.py` 末尾 `verify()` 仍硬编码 0.01(工具不调,仅 standalone 跑用)。

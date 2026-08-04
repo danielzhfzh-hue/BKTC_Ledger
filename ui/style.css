@@ -16,9 +16,16 @@ header {
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
 }
 .title { font-size: 15px; font-weight: 600; }
-.paths { font-size: 11px; opacity: .85; display: flex; gap: 14px; min-width: 0; }
-.paths b { font-weight: 500; }
-.actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.paths { font-size: 11px; opacity: .9; display: flex; gap: 14px; min-width: 0; }
+.paths b { font-weight: 600; }
+.paths b.ok { color: #7ee0a0; }
+.paths b.no { color: #f3a6a6; }
+#btnSettings { margin-left: auto; }
+.actionbar {
+  display: flex; align-items: center; gap: 8px; justify-content: center;
+  padding: 8px 14px; background: #eaeef3; border-bottom: 1px solid var(--line);
+}
+.actionbar .actionhint { color: #7a8794; font-size: 11px; margin-left: 10px; }
 button {
   font: inherit; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px;
   background: #fff; cursor: pointer;
@@ -89,6 +96,12 @@ tr.warn-row td { background: #fdf3e3; }
 .guide th { background: var(--head); color: #fff; }
 .guide td:first-child { white-space: nowrap; font-weight: 600; }
 .guide p { max-width: 860px; line-height: 1.6; }
+.settings { width: 100%; max-width: 900px; background: var(--panel); border-collapse: collapse; }
+.settings th, .settings td { border: 1px solid var(--line); padding: 8px 12px; vertical-align: middle; text-align: left; }
+.settings th { background: var(--head); color: #fff; white-space: nowrap; font-weight: 600; }
+.path { word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #3a4753; }
+.muted { color: #888; font-size: 12px; }
+code { background: #eef1f5; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 footer {
   display: flex; align-items: center; gap: 14px; padding: 7px 14px;
   background: #e8ecf1; border-top: 1px solid var(--line); font-size: 12px;

@@ -2,17 +2,34 @@
 # -*- coding: utf-8 -*-
 """BKTC 台账维护工具（pywebview 桌面壳，macOS / Windows 通用）。"""
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
-import time
+import tarfile
+import urllib.error
+import urllib.request
+import zipfile
+
+__version__ = "1.1.0"
+REPO = "danielzhfzh-hue/BKTC_Ledger"
 
 APP_DIR = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
 import core  # noqa: E402
 import webview  # noqa: E402
+
+
+def _parse_version(tag):
+    """'v1.2.3' -> (1, 2, 3)；解析不出的部分按 0。"""
+    parts = []
+    for p in str(tag).strip().lstrip("vV").split("."):
+        m = re.match(r"\d+", p)
+        parts.append(int(m.group()) if m else 0)
+    return tuple(parts)
 
 DEFAULT_XLSX = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx"
 DEFAULT_STORE = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.records.json"
@@ -48,7 +65,8 @@ class Api:
         data = core.load_store(self.store_path)
         return {"store_path": self.store_path, "xlsx_path": self.xlsx_path,
                 "data": data, "schema": schema_for_js(),
-                "rules": core.get_rules(self.store_path)}
+                "rules": core.get_rules(self.store_path),
+                "version": __version__}
 
     def save_data(self, data, rules=None):
         core.save_store(self.store_path, data, rules)
@@ -57,10 +75,7 @@ class Api:
     def generate(self, data, rules=None):
         if not self.xlsx_path or not os.path.isdir(os.path.dirname(self.xlsx_path)):
             raise RuntimeError("请先选择台账 Excel 文件")
-        if os.path.exists(self.xlsx_path):
-            root, ext = os.path.splitext(self.xlsx_path)
-            bak = f"{root}_备份_{time.strftime('%Y%m%d_%H%M%S')}{ext}"
-            shutil.copy2(self.xlsx_path, bak)
+        core.backup_xlsx(self.xlsx_path)
         core.save_store(self.store_path, data, rules)
         out, issues, counts = core.generate_xlsx(data, self.xlsx_path, rules)
         return {"ok": True, "out": out, "issues": issues, "counts": counts}
@@ -77,21 +92,58 @@ class Api:
                                    file_types=("Excel (*.xlsx)", "All files (*.*)"))
         return res[0] if res else None
 
-    def pick_dir(self):
-        w = webview.windows[0]
-        res = w.create_file_dialog(webview.FOLDER_DIALOG)
-        return res[0] if res else None
+    def check_update(self):
+        """查 GitHub 最新 Release，对比本机 __version__，按平台选资产。"""
+        url = f"https://api.github.com/repos/{REPO}/releases/latest"
+        try:
+            req = urllib.request.Request(
+                url, headers={"Accept": "application/vnd.github+json",
+                              "User-Agent": "BKTC_Ledger"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            return {"current": __version__, "latest": None, "has_update": False,
+                    "error": f"无法访问 GitHub：{e}"}
+        latest = (data.get("tag_name") or "").lstrip("vV")
+        want = "macOS" if sys.platform == "darwin" else "Windows"
+        asset = next((a for a in data.get("assets", [])
+                      if want in a.get("name", "")), None)
+        return {
+            "current": __version__, "latest": latest,
+            "has_update": _parse_version(latest) > _parse_version(__version__),
+            "notes": (data.get("body") or "").strip(),
+            "release_url": data.get("html_url"),
+            "asset_name": asset["name"] if asset else None,
+            "asset_url": asset["browser_download_url"] if asset else None,
+        }
 
-    def import_from_dir(self, path):
-        data = core.import_from_export_dir(path)
-        core.save_store(self.store_path, data, core.get_rules(self.store_path))
-        return {"ok": True, "data": data, "path": self.store_path}
-
-    def sync_from_excel(self):
-        if not os.path.exists(self.xlsx_path):
-            raise RuntimeError("请先选择台账 Excel 文件")
-        store, changed = core.reconcile_store_with_excel(self.store_path, self.xlsx_path)
-        return {"ok": True, "data": store, "changed": changed}
+    def download_update(self, asset_url, asset_name):
+        """下载更新资产到 ~/Downloads/BKTC_Ledger_update/ 并解压；返回解压目录。"""
+        if not asset_url or not asset_name:
+            raise RuntimeError("没有可下载的更新资产")
+        dl_root = os.path.join(os.path.expanduser("~"), "Downloads")
+        os.makedirs(dl_root, exist_ok=True)
+        dest_dir = os.path.join(dl_root, "BKTC_Ledger_update")
+        if os.path.isdir(dest_dir):
+            shutil.rmtree(dest_dir, ignore_errors=True)
+        os.makedirs(dest_dir, exist_ok=True)
+        archive = os.path.join(dest_dir, asset_name)
+        req = urllib.request.Request(asset_url, headers={"User-Agent": "BKTC_Ledger"})
+        with urllib.request.urlopen(req, timeout=180) as resp, open(archive, "wb") as f:
+            shutil.copyfileobj(resp, f)
+        if asset_name.endswith((".tar.gz", ".tgz")):
+            with tarfile.open(archive, "r:gz") as tf:
+                try:
+                    tf.extractall(dest_dir, filter="data")
+                except TypeError:
+                    tf.extractall(dest_dir)
+        elif asset_name.endswith(".zip"):
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(dest_dir)
+        else:
+            raise RuntimeError(f"未知压缩格式：{asset_name}")
+        os.remove(archive)
+        return dest_dir
 
     def open_path(self, path):
         if sys.platform == "darwin":

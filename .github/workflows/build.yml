@@ -3,7 +3,11 @@ name: build-desktop
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
+
+permissions:
+  contents: write   # tag 触发时创建 Release 并上传资产
 
 jobs:
   build:
@@ -27,3 +31,13 @@ jobs:
           name: BKTC_Ledger-${{ runner.os }}
           path: dist/
           if-no-files-found: error
+      # tag (v*) 触发时打包并发布到 Release；tar.gz 保权限/符号链接（mac .app 可执行位）
+      - name: Package release asset (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: tar -czf "BKTC_Ledger-${RUNNER_OS}.tar.gz" -C dist .
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: BKTC_Ledger-${{ runner.os }}.tar.gz
+          generate_release_notes: true

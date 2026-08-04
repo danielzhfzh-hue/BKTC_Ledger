@@ -24,6 +24,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -38,6 +39,12 @@ F_BOLD = Font(bold=True, size=10)
 FILL_HEAD = PatternFill('solid', fgColor='1F4E79')
 FILL_INFO = PatternFill('solid', fgColor='DDEBF7')
 FILL_TOTAL = PatternFill('solid', fgColor='F2F2F2')
+# 预警灯底色/字色（条件格式，跨平台：不依赖 emoji 字形）
+FILL_WARN_RED = PatternFill('solid', fgColor='FBE2E2')
+FILL_WARN_YEL = PatternFill('solid', fgColor='FFF2CC')
+FILL_WARN_GRN = PatternFill('solid', fgColor='E2EFDA')
+F_WARN_RED = Font(bold=True, size=10, color='C00000')
+F_WARN_GRN = Font(bold=True, size=10, color='548235')
 AL_C = Alignment(horizontal='center', vertical='center', wrap_text=True)
 AL_L = Alignment(horizontal='left', vertical='center', wrap_text=True)
 AL_R = Alignment(horizontal='right', vertical='center')
@@ -555,8 +562,8 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
                 pay_expr = '+'.join(f'{c}{r}' for c in pay_row_cols) or '0'
                 dc = f'{due_col}{r}'
                 formula = (f'=IF({inv_expr}=0,"",'
-                           f'IF({pay_expr}+{tol:g}>={inv_expr},"🟢已回款",'
-                           f'IF({dc}="","🟡未到期",IF({dc}<TODAY(),"🔴逾期","🟡未到期"))))')
+                           f'IF({pay_expr}+{tol:g}>={inv_expr},"已回款",'
+                           f'IF({dc}="","未到期",IF({dc}<TODAY(),"逾期","未到期"))))')
                 set_cell(ws, r, cidx, formula, align=AL_C)
     for cidx, *_ in hidden_specs:
         ws.column_dimensions[get_column_letter(cidx)].hidden = True
@@ -946,9 +953,9 @@ def build_from_data(contracts, terms, devices, shipments, invoices, payments, ou
             f'={inv_sum}',
             f'={pay_sum}',
             f'=IF(I{nav_row}=0,"",J{nav_row}/I{nav_row})',
-            f'=IF(COUNTIF({warn_rng},"*🔴*")>0,"🔴有逾期",'
-            f'IF(COUNTIF({warn_rng},"*🟡*")>0,"🟡部分未回/关注",'
-            f'IF(COUNTIF({warn_rng},"*🟢*")>0,"🟢已回款","无开票")))',
+            f'=IF(COUNTIF({warn_rng},"*逾期*")>0,"有逾期",'
+            f'IF(COUNTIF({warn_rng},"*未到期*")>0,"部分未回/关注",'
+            f'IF(COUNTIF({warn_rng},"*已回款*")>0,"已回款","无开票")))',
             remark,
         ]
         for c, v in enumerate(vals, 1):
@@ -981,6 +988,16 @@ def build_from_data(contracts, terms, devices, shipments, invoices, payments, ou
     if prev_cust is not None and cust_start < nav_row - 1:
         ws_nav.merge_cells(start_row=cust_start, start_column=1,
                            end_row=nav_row - 1, end_column=1)
+
+    # 预警列（L）条件格式：底色+字色，Mac/Win 一致（替代 emoji 红绿黄灯）
+    if nav_row > 3:
+        warn_range = f"L3:L{nav_row - 1}"
+        ws_nav.conditional_formatting.add(warn_range, FormulaRule(
+            formula=['ISNUMBER(SEARCH("逾期",L3))'], fill=FILL_WARN_RED, font=F_WARN_RED))
+        ws_nav.conditional_formatting.add(warn_range, FormulaRule(
+            formula=['ISNUMBER(SEARCH("部分未回",L3))'], fill=FILL_WARN_YEL))
+        ws_nav.conditional_formatting.add(warn_range, FormulaRule(
+            formula=['ISNUMBER(SEARCH("已回款",L3))'], fill=FILL_WARN_GRN, font=F_WARN_GRN))
 
     wb.save(out)
     print('saved:', out)

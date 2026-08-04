@@ -1,71 +1,72 @@
 # BKTC 台账维护工具
 
-用于维护 `/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx` 的桌面应用：
+用于维护 `BKTC上海POU营业管理表.xlsx` 的桌面应用：
 录入订单、发货、开票、回款数据，一键重建「导航页 + 未回收管理表 + 各 JOB 页」。
+macOS / Windows 同一份代码，预警灯（红/黄/绿）跨平台一致显示。
 
 ## 技术选型（跨平台）
 
-- Python + pywebview：macOS 用 WKWebView，Windows 10/11 用 Edge WebView2，**同一份代码两边跑**。
-- 界面为纯 HTML/JS（表格化录入），后端为纯 Python（openpyxl），无 macOS/Windows 专属 API。
-- 打包：后续可用 PyInstaller 分别生成 `.app`（macOS）和 `.exe`（Windows）。
+- Python + pywebview：macOS 用 WKWebView，Windows 10/11 用 Edge WebView2。
+- 界面为纯 HTML/JS（表格化录入），后端为纯 Python（openpyxl），无平台专属 API。
+- 打包：GitHub Actions 出 `.app`（macOS）/ `.exe` 文件夹（Windows）；应用内可一键检查更新。
 
 ## 目录结构
 
 ```
-台账维护工具/
-  app.py            桌面壳（pywebview 窗口 + JS 桥）
-  core.py           数据层：records.json 读写 / 飞书导出导入 / Excel 解析合并 / 校验 / 生成台账
+BKTC_Ledger/
+  app.py            桌面壳（pywebview 窗口 + JS 桥 + 检查更新/下载）
+  core.py           数据层：records.json 读写 / 校验 / 生成台账 / 备份
+  build_ledger_main.py  生成引擎（导航页/未回收管理表/JOB 页 + 预警条件格式）
   ui/               界面（index.html + style.css + app.js）
   requirements.txt  依赖（pywebview、openpyxl）
   启动.command      macOS 双击启动
   启动.bat          Windows 双击启动
 ```
 
-## macOS 使用
+> 销售数据（`*.records.json` / `*.xlsx` / `备份/`）**不在本目录**，由 `.gitignore` 拦截，绝不进仓库。
 
-1. 双击 `启动.command`（首次会自动创建 `.venv` 并安装依赖）。
-2. 默认打开数据文件 `BKTC上海POU营业管理表.records.json` 和台账
-   `BKTC上海POU营业管理表.xlsx`（与 Excel 同目录，已预置当前数据）。
-3. 录入：
-   - 六个标签页分别编辑：合同订单 / 付款条件 / 设备台账 / 发货批次 / 开票记录 / 回款记录。
-   - 顶部先按「合同（客户）」「JOB No」筛选，再编辑对应数据；新添加的行会自动带上当前 JOB。
-     大表（如 614 台设备）使用行虚拟化渲染，滚动和输入不卡顿。
-   - 「发货批次」页有「✎ 重命名批次」：选中批次行改名，会自动同步该 JOB 下的设备、
-     发货批次和开票/回款覆盖批次（避免只改发货表、设备还是旧批次导致页面不显示）。
-   - **多行复制粘贴**：点行首选中（支持 Shift 范围、⌘/Ctrl 多选），工具栏「复制选中 (TSV)」；
-     在表格任意单元格直接 ⌘V，可整块粘贴 Excel 复制出来的多行；首行是列名时自动按列名匹配。
-   - **重复行**：选中后点「⧉ 重复选中行」。
-4. 点「保存数据」写入 records.json。
-5. 点「生成台账」：自动备份现有 Excel（同目录 `_备份_时间戳.xlsx`），
-   然后重建 42 个 sheet（导航页、未回收管理表、各 JOB 页）。
-6. 如果你在 Excel 里手改过合同头/设备/开票/回款，回 app 点「从当前 Excel 同步」，
-   会把可见改动合入数据文件（覆盖串等内部字段保留数据文件里的权威值），避免生成时被覆盖。
+## 日常使用（macOS / Windows 通用）
 
-## Windows 10/11 迁移
+1. 启动：macOS 双击 `启动.command`；Windows 双击 `启动.bat`（首次自动建 `.venv`、装依赖）。
+2. 首次需在「⚙ 设置」里选择**数据文件**（`BKTC上海POU营业管理表.records.json`）和**台账文件**（`.xlsx`）；
+   之后每次启动自动加载。顶栏「数据 ✓ / 台账 ✓」表示已就绪。
+3. 录入（六个标签页：合同订单 / 付款条件 / 设备台账 / 发货批次 / 开票记录 / 回款记录）：
+   - 先按「合同（客户）」「JOB No」筛选再编辑；新添加的行自动带上当前 JOB。
+   - 大表（如 600+ 台设备）行虚拟化渲染，滚动/输入不卡。
+   - 「发货批次」页「✎ 重命名批次」：选中批次改名，自动同步该 JOB 的设备/开票/回款覆盖批次。
+   - **多行粘贴**：在表格单元格直接 ⌘/Ctrl+V，可整块粘 Excel 复制的多行（首行是列名时自动匹配）。
+4. 点「**保存数据**」→ 写入 `records.json`（覆盖前自动留 `.bak`）。
+5. 点「**生成台账**」→ 重写 xlsx（导航页 / 未回收管理表 / 各 JOB 页）；旧版自动进同目录 `备份/`（留近 10 份）。
+6. 点「**打开台账**」→ 用系统默认程序打开 xlsx。
 
-1. 安装 Python 3.10+（勾选 Add to PATH），安装 WebView2 Runtime
-   （Win10/11 一般已内置；没有则到 Microsoft 官网下载 Evergreen 版）。
-2. 把 `台账维护工具` 整个文件夹拷到 Windows。
-3. 双击 `启动.bat`（首次自动建 `.venv`、装依赖、启动）。
-4. 默认路径是 macOS 的，Windows 上请点「选择台账文件…」「打开数据文件…」；
-   也可以设置环境变量 `BKTC_XLSX` / `BKTC_STORE`，或命令行
-   `python app.py --xlsx D:\path\台账.xlsx --store D:\path\台账.records.json`。
+> 三键含义：**保存** = 写 records.json（权威源）；**生成** = 重写 xlsx（产物）；**打开** = 打开 xlsx。
 
-## 数据来源与飞书
+## 升级到新版本
 
-- 数据文件 records.json 是应用的编辑源（含付款条件等 Excel 里不展示的结构化字段）。
-- 首次/迁移时可用「从飞书导出导入…」：选择含
-  `contracts.json / terms.json / shipments.json / invoices.json / payments.json / devices/*.json`
-  的导出文件夹（即 `lark-cli base +record-list ... --format json` 的导出目录）。
-- 本工具 v1 只维护 Excel，不直接写飞书；要回写飞书时可用该数据文件作为导入源。
+1. 应用内「⚙ 设置 → 检查更新」联网查 GitHub 最新版本。
+2. 有新版时点「下载并打开」，自动下载解压到 `~/Downloads/BKTC_Ledger_update/`。
+3. **退出本程序**，用里面的新版本（`BKTC_Ledger.app` / `BKTC_Ledger/` 文件夹）替换旧位置。
+   - 未签名：macOS 首次右键→打开；Windows SmartScreen「更多信息→仍要运行」。
+
+也可直接到 <https://github.com/danielzhfzh-hue/BKTC_Ledger/releases> 手动下载。
+
+## Windows 迁移（无 Python 环境）
+
+- 直接用 Releases 里的 `BKTC_Ledger-Windows.tar.gz`，解压后双击 `BKTC_Ledger.exe`（需 Win10/11 自带 WebView2）。
+- 或从源码跑：装 Python 3.11（勾选 Add to PATH），双击 `启动.bat`。
+- 数据文件只拷一个 `ledger.records.json`（ASCII 名，避免中文乱码），在「⚙ 设置」里选它。
+
+## 数据来源与飞书 / 钉钉
+
+- `records.json` 是唯一编辑源（含付款条件等 Excel 不展示的结构化字段）。
+- 本工具只维护本地数据；回写飞书/钉钉用 `订单整理/feishu_upsert.py`、`dingtalk_push.py`（独立脚本，不在本工具内）。
 
 ## 注意事项
 
-- 「从当前 Excel 同步」不能恢复付款条件表（Excel 页不展示条款行），条款请在 app 内编辑。
-- Excel 里手工插入的“无制造番号”设备行（如 25BS011 的 `2025-0 / HOT N2系统`）会保留，
-  并按“批次匹配”参与开票/回款覆盖（金额计入合同总额）；校验仅提示补全制造番号。
-  注意导航页“总台数”按制造番号计数，该行未填番号前台数不 +1。
-- 生成前会自动备份；如需更保险，建议配合 Git 或定期复制。
+- 生成前会自动备份到 `备份/`（留近 10 份）；records.json 每次保存留一份 `.bak`。
+- Excel 里手工插入的“无制造番号”设备行（如 25BS011 的 `HOT N2系统`）会保留并按“批次匹配”参与覆盖；
+  导航页“总台数”按制造番号计数，未填番号前台数不 +1。
+- 预警灯用单元格条件格式（底色），不依赖 emoji；Mac/Windows/WPS 都正常显示。
 
 ## 操作对照（完整版见应用内「使用指南」页）
 
@@ -84,7 +85,3 @@
 | 看首页/待回收 | 摘要 + 生成台账 | 生成会重建导航页、未回收管理表、全部 JOB 页 |
 
 改完任何页面后：**保存数据 → 生成台账**。
-
-「生成台账」每次都会**自动重建导航页（首页）和未回收管理表（待回收）**，不需要手工改 Excel。
-待回收预警规则可在「预警规则」页调整：临近天数（应收回款日 N 天内 → ②临近）、金额容差
-（未回收 ≤ 容差视为已回清）、未验收/发票异常是否显示④待确认；改完保存并重新生成即生效。

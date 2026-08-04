@@ -4,6 +4,7 @@ const state = {
   storePath: "", xlsxPath: "", data: null, schema: null,
   tab: "摘要", dirty: false, selection: new Set(), anchor: null,
   filter: "", customer: "", job: "", rules: {},
+  version: "?", update: null,
 };
 
 const ROW_H = 31, BUFFER = 20;
@@ -50,8 +51,14 @@ function val(rec, field) {
 }
 
 function renderAll() {
-  $("lblStore").textContent = state.storePath || "（未选择）";
-  $("lblXlsx").textContent = state.xlsxPath || "（未选择）";
+  const setBadge = (id, ok) => {
+    const b = $(id); b.textContent = ok ? "✓" : "✗"; b.className = ok ? "ok" : "no";
+  };
+  setBadge("badgeStore", !!state.storePath);
+  setBadge("badgeXlsx", !!state.xlsxPath);
+  $("setStore").textContent = state.storePath || "（未选择）";
+  $("setXlsx").textContent = state.xlsxPath || "（未选择）";
+  $("setVersion").textContent = "v" + state.version;
   populateFilters();
   renderSummary();
   renderGrid();
@@ -146,6 +153,7 @@ function validateAll() {
 
 function switchTab(tab) {
   state.tab = tab;
+  $("panel-设置").classList.add("hidden");
   document.querySelectorAll(".tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === tab));
   $("panel-摘要").classList.toggle("hidden", tab !== "摘要");
@@ -544,33 +552,43 @@ $("btnPickXlsx").addEventListener("click", async () => {
   if (p) { await refresh(null, p); }
 });
 
-$("btnImportFeishu").addEventListener("click", async () => {
-  const dir = await call("pick_dir");
-  if (!dir) return;
-  try {
-    setStatus("导入中…");
-    const r = await call("import_from_dir", dir);
-    state.data = r.data;
-    state.dirty = false;
-    renderAll();
-    setStatus(`已从 ${dir} 导入`);
-    toast("导入完成", "ok");
-  } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
+$("btnSettings").addEventListener("click", () => {
+  ["摘要", "表格", "使用指南", "预警规则"].forEach((p) => $("panel-" + p).classList.add("hidden"));
+  $("panel-设置").classList.remove("hidden");
+  document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+  $("setVersion").textContent = "v" + state.version;
 });
 
-$("btnSyncExcel").addEventListener("click", async () => {
+$("btnCheckUpdate").addEventListener("click", async () => {
+  $("updateInfo").textContent = "检查中…";
+  $("btnDownloadUpdate").classList.add("hidden");
   try {
-    setStatus("同步 Excel 手改内容…");
-    const r = await call("sync_from_excel");
-    state.data = r.data;
-    state.dirty = false;
-    renderAll();
-    const c = r.changed;
-    const parts = Object.entries(c).map(([t, d]) =>
-      `${t} +${d["新增"]} ~${d["更新"]} -${d["删除"]}`).filter((x) => !x.endsWith("+0 ~0 -0"));
-    setStatus("同步完成：" + (parts.join("；") || "无变化"));
-    toast("已同步 Excel 改动", "ok");
-  } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
+    const u = await call("check_update");
+    state.update = u;
+    if (u.error) { $("updateInfo").textContent = u.error; return; }
+    if (u.has_update) {
+      $("updateInfo").innerHTML = `最新 <b>v${u.latest}</b>（当前 v${u.current}）`;
+      $("btnDownloadUpdate").classList.toggle("hidden", !u.asset_url);
+    } else {
+      $("updateInfo").textContent = `已是最新（v${u.current}）`;
+    }
+  } catch (e) { $("updateInfo").textContent = String(e); }
+});
+
+$("btnDownloadUpdate").addEventListener("click", async () => {
+  const u = state.update;
+  if (!u || !u.asset_url) {
+    toast("未找到下载资产，打开发布页", "error");
+    if (u && u.release_url) await call("open_path", u.release_url);
+    return;
+  }
+  try {
+    setStatus("下载更新中…");
+    const dir = await call("download_update", u.asset_url, u.asset_name);
+    setStatus("已下载并解压到：" + dir);
+    toast("已下载，请退出本程序后用新版本替换", "ok");
+    await call("open_path", dir);
+  } catch (e) { setStatus(String(e), "error"); toast(String(e), "error"); }
 });
 
 $("btnOpenXlsx").addEventListener("click", async () => {
@@ -584,6 +602,7 @@ async function refresh(store, xlsx) {
   state.data = r.data;
   state.schema = r.schema;
   state.rules = r.rules || {};
+  state.version = r.version || "?";
   state.dirty = false;
   renderAll();
   renderRules();

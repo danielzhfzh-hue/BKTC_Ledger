@@ -10,19 +10,18 @@
 <header>
   <div class="title">BKTC 上海 POU 台账维护工具</div>
   <div class="paths">
-    <span title="数据文件">数据：<b id="lblStore">-</b></span>
-    <span title="台账文件">台账：<b id="lblXlsx">-</b></span>
+    <span title="数据文件（records.json）">数据 <b id="badgeStore" class="no">✗</b></span>
+    <span title="台账文件（xlsx）">台账 <b id="badgeXlsx" class="no">✗</b></span>
   </div>
-  <div class="actions">
-    <button id="btnPickStore">打开数据文件…</button>
-    <button id="btnPickXlsx">选择台账文件…</button>
-    <button id="btnImportFeishu">从飞书导出导入…</button>
-    <button id="btnSyncExcel">从当前 Excel 同步</button>
-    <button id="btnSave">保存数据</button>
-    <button id="btnGenerate" class="primary">生成台账</button>
-    <button id="btnOpenXlsx">打开台账</button>
-  </div>
+  <button id="btnSettings">⚙ 设置</button>
 </header>
+
+<div class="actionbar">
+  <button id="btnSave">保存数据</button>
+  <button id="btnGenerate" class="primary">生成台账</button>
+  <button id="btnOpenXlsx">打开台账</button>
+  <span class="actionhint">保存→写入 records.json · 生成→重写 xlsx（旧版自动进 备份/）</span>
+</div>
 
 <nav id="tabs">
   <button class="tab" data-tab="摘要">摘要</button>
@@ -132,6 +131,30 @@
       </table>
       <p><button id="btnRulesDefault">恢复默认</button>
          <span style="color:#777">　首页/待回收页由「生成台账」自动重建，不需要手工改 Excel。</span></p>
+    </div>
+  </section>
+
+  <section id="panel-设置" class="panel hidden">
+    <div class="guide">
+      <h3>设置</h3>
+      <table class="settings">
+        <thead><tr><th style="width:120px">项目</th><th>当前</th><th style="width:220px">操作</th></tr></thead>
+        <tbody>
+          <tr><td>数据文件</td>
+              <td><span id="setStore" class="path">（未选择）</span></td>
+              <td><button id="btnPickStore">更换…</button></td></tr>
+          <tr><td>台账文件</td>
+              <td><span id="setXlsx" class="path">（未选择）</span></td>
+              <td><button id="btnPickXlsx">更换…</button></td></tr>
+          <tr><td>当前版本</td>
+              <td><span id="setVersion">v?</span>　<span id="updateInfo" class="muted"></span></td>
+              <td><button id="btnCheckUpdate">检查更新</button>　<button id="btnDownloadUpdate" class="primary hidden">下载并打开</button></td></tr>
+        </tbody>
+      </table>
+      <h3>说明</h3>
+      <p>· <b>保存数据</b>：把当前编辑写入 <code>records.json</code>（权威数据源，覆盖前自动留 <code>.bak</code>）。<br>
+         · <b>生成台账</b>：按 records.json 重写 <code>xlsx</code>（导航页 / 未回收管理表 / 各 JOB 页），旧版自动进同目录 <code>备份/</code>（留近 10 份）。<br>
+         · <b>检查更新</b>：联网查 GitHub 最新版本；有新版可点「下载并打开」，解压到下载目录后，<b>请退出本程序，用其中的新版本替换旧文件夹</b>（未签名，首开仍需 Mac 右键打开 / Windows SmartScreen「仍要运行」）。</p>
     </div>
   </section>
 </main>

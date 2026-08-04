@@ -84,6 +84,9 @@ td.auto { background: #f2f4f7; color: #777; font-size: 12px; }
 td.auto span { display: block; padding: 5px 6px; min-width: 70px; }
 td.cb { text-align: center; width: 26px; }
 td.cb input { min-width: 0; width: auto; }
+td.date-cell.empty { text-align: center; cursor: pointer; }
+td.date-cell.empty .date-ph { display: block; padding: 5px 6px; color: #c0c5cc; }
+td.date-cell.empty:hover .date-ph { color: #8a93a0; }
 tr.selected td { background: #dcebfa; }
 tr.row-new td { background: #f0fbe8; }
 tr.row-dup td { background: #fdf3e3; }

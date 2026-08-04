@@ -244,7 +244,10 @@ function renderGrid() {
         return `<td><select data-f="${esc(f.name)}">${opts}</select></td>`;
       }
       if (f.type === "date") {
-        return `<td><input type="date" data-f="${esc(f.name)}" value="${esc(v)}"></td>`;
+        if (v === "") {
+          return `<td class="date-cell empty" data-datefield="${esc(f.name)}"><span class="date-ph" title="点击设置日期">—</span></td>`;
+        }
+        return `<td class="date-cell"><input type="date" data-f="${esc(f.name)}" value="${esc(v)}"></td>`;
       }
       if (f.type === "number" || f.type === "int") {
         return `<td><input type="number" step="any" data-f="${esc(f.name)}" value="${esc(v)}"></td>`;
@@ -325,11 +328,32 @@ $("gridWrap").addEventListener("scroll", () => {
 });
 
 $("gridBody").addEventListener("mousedown", (e) => {
-  if (e.target.closest("td.cb") || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.target.closest("td.cb") || e.target.tagName === "INPUT" || e.target.tagName === "SELECT"
+      || e.target.closest("td.date-cell.empty")) return;
   const tr = e.target.closest("tr");
   if (!tr) return;
   e.preventDefault();
   selectRow(Number(tr.dataset.ri), e.shiftKey || e.metaKey || e.ctrlKey);
+});
+
+// 空日期单元格：点击才挂日期选择器（macOS 原生 picker 会把空值显示成"今天"，造成"假数据"错觉）
+$("gridBody").addEventListener("click", (e) => {
+  const td = e.target.closest("td.date-cell.empty");
+  if (!td) return;
+  const field = td.dataset.datefield;
+  td.classList.remove("empty");
+  td.innerHTML = `<input type="date" data-f="${esc(field)}" value="">`;
+  td.querySelector("input").focus();
+});
+$("gridBody").addEventListener("focusout", (e) => {
+  const inp = e.target;
+  if (inp.tagName === "INPUT" && inp.type === "date" && inp.value === "") {
+    const td = inp.closest("td.date-cell");
+    if (td && !td.classList.contains("empty")) {
+      td.classList.add("empty");
+      td.innerHTML = `<span class="date-ph" title="点击设置日期">—</span>`;
+    }
+  }
 });
 
 document.querySelectorAll(".toolbar [data-act]").forEach((b) => {

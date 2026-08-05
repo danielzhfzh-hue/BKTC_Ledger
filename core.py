@@ -369,3 +369,42 @@ def backup_xlsx(path, keep=10):
     return dst
 
 
+def _exp_val(v, typ=None):
+    """导出单元格取值：None→空；列表→; 拼接；日期/数字按类型转真值（Excel 可排序求和）。"""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (list, tuple)):
+        return ";".join(s(x) for x in v)
+    if typ == DATE:
+        try:
+            from datetime import datetime
+            return datetime.strptime(s(v)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return s(v)
+    if typ == NUMBER:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return s(v)
+    if typ == INT:
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return s(v)
+    return v
+
+
+def export_filtered(path, table, rows, fields):
+    """把筛选后的行 + 选定字段写成 xlsx（日期/数字按 SCHEMA 类型转真值）。"""
+    from openpyxl import Workbook
+    types = {f: t for f, t, *_ in SCHEMA.get(table, [])}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (table or "导出")[:31]
+    ws.append(list(fields))
+    for r in rows:
+        ws.append([_exp_val(r.get(f), types.get(f)) for f in fields])
+    wb.save(path)
+    return path
+
+

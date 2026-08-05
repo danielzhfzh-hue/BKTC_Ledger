@@ -450,6 +450,8 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
       toast(`已重复 ${news.length} 行`);
     } else if (act === "copy") {
       copySelection(table);
+    } else if (act === "export") {
+      openExportModal();
     } else if (act === "rename" && table === "发货批次") {
       renameBatch();
     } else if (act === "split" && table === "发货批次") {
@@ -593,6 +595,53 @@ $("splitOk").addEventListener("click", () => {
 $("splitCancel").addEventListener("click", closeSplit);
 $("splitClose").addEventListener("click", closeSplit);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSplit(); });
+
+// 导出筛选结果到 Excel（可选字段）
+function openExportModal() {
+  const table = state.tab;
+  const fields = fieldsOf(table);
+  const n = visibleRows(table).length;
+  $("exportTitle").textContent = `导出「${table}」筛选结果（${n} 行）`;
+  $("exportFields").innerHTML = fields.map((f) =>
+    `<label class="cf-item"><input type="checkbox" data-f="${esc(f.name)}" checked><span class="cf-v">${esc(f.name)}${f.derived ? " (自动)" : ""}</span></label>`
+  ).join("");
+  $("exportAll").checked = true;
+  updateExportCount();
+  $("exportModal").classList.remove("hidden");
+}
+function updateExportCount() {
+  const n = visibleRows(state.tab).length;
+  const nf = document.querySelectorAll("#exportFields input:checked").length;
+  $("exportCount").textContent = `将导出 ${n} 行 × ${nf} 个字段  →  ~/Downloads/<表>_导出_<时间>.xlsx`;
+}
+function closeExport() { $("exportModal").classList.add("hidden"); }
+function doExport() {
+  const table = state.tab;
+  const fields = [...document.querySelectorAll("#exportFields input:checked")].map((c) => c.dataset.f);
+  if (!fields.length) { toast("请至少勾选一个字段", "error"); return; }
+  const rows = visibleRows(table).map((i) => state.data[table][i]);
+  if (!rows.length) { toast("当前筛选结果为空", "error"); return; }
+  setStatus(`导出 ${rows.length} 行…`);
+  call("export_xlsx", table, rows, fields).then((r) => {
+    closeExport();
+    setStatus(`已导出：${r.path}（${r.rows} 行 × ${r.fields} 列）`);
+    toast(`已导出 ${r.rows} 行到 Downloads`, "ok");
+    return call("open_path", r.path);
+  }).catch((e) => { setStatus(String(e), "error"); toast(String(e), "error"); });
+}
+$("exportFields").addEventListener("change", () => {
+  const boxes = document.querySelectorAll("#exportFields input");
+  $("exportAll").checked = [...boxes].every((c) => c.checked);
+  updateExportCount();
+});
+$("exportAll").addEventListener("change", (e) => {
+  document.querySelectorAll("#exportFields input").forEach((c) => { c.checked = e.target.checked; });
+  updateExportCount();
+});
+$("exportOk").addEventListener("click", doExport);
+$("exportCancel").addEventListener("click", closeExport);
+$("exportClose").addEventListener("click", closeExport);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeExport(); });
 
 function copySelection(table) {
   const idxs = [...state.selection].sort((a, b) => a - b);

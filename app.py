@@ -8,11 +8,12 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
 
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 
 APP_DIR = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
@@ -84,6 +85,19 @@ class Api:
         core.save_store(self.store_path, data, rules)
         out, issues, counts = core.generate_xlsx(data, self.xlsx_path, rules)
         return {"ok": True, "out": out, "issues": issues, "counts": counts}
+
+    def export_xlsx(self, table, rows, fields):
+        """把筛选后的行 + 选定字段导出到 ~/Downloads/<表>_导出_<时间>.xlsx。"""
+        if not fields:
+            raise RuntimeError("未选择导出字段")
+        if not isinstance(rows, list):
+            raise RuntimeError("无可导出的行")
+        dl = os.path.join(os.path.expanduser("~"), "Downloads")
+        os.makedirs(dl, exist_ok=True)
+        safe = (table or "导出").replace("/", "_").replace("\\", "_")
+        path = os.path.join(dl, f"{safe}_导出_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
+        core.export_filtered(path, table, rows, fields)
+        return {"ok": True, "path": path, "rows": len(rows), "fields": len(fields)}
 
     def pick_store(self):
         w = webview.windows[0]

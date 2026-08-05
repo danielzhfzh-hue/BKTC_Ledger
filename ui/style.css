@@ -133,6 +133,11 @@ th.col-h.filt-on .col-filt { color: #ffd24a; background: rgba(255,210,74,.15); }
 .split-dev .cf-c { color: #999; font-size: 11px; min-width: 100px; text-align: right; font-family: ui-monospace, Menlo, monospace; }
 .split-preview { margin-top: 8px; font-size: 12px; }
 .split-note { margin-top: 6px; font-size: 11px; line-height: 1.5; }
+/* 导出 Excel modal */
+.export-sub { font-size: 12px; color: #444; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+.export-all { font-size: 12px; color: #555; }
+.export-fields { max-height: 300px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px; background: #fff; }
+.export-count { margin-top: 8px; font-size: 12px; }
 tr.selected td { background: #dcebfa; }
 tr.row-new td { background: #f0fbe8; }
 tr.row-dup td { background: #fdf3e3; }

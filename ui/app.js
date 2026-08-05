@@ -40,42 +40,12 @@ function setStatus(msg, kind = "") {
   s.className = "status" + (kind ? " " + kind : "");
 }
 
-// 虚拟"关联"列（join 自父表，display-only，不入 records.json）
-const VIRTUAL = {
-  "设备台账": [{ name: "客户", src: "contract.客户" }, { name: "出荷日", src: "ship.出荷日" }],
-  "发货批次": [{ name: "客户", src: "contract.客户" }],
-  "开票记录": [{ name: "客户", src: "contract.客户" }],
-  "回款记录": [{ name: "客户", src: "contract.客户" }],
-  "付款条件": [{ name: "客户", src: "contract.客户" }],
-};
-const VIRT_TYPE = { "客户": "text", "出荷日": "date" };
-let _jobContract = {}, _jobbatchShip = {};
-function buildJoinMaps() {
-  _jobContract = {};
-  for (const c of state.data["合同订单"]) _jobContract[s(c["JOB No"])] = c;
-  _jobbatchShip = {};
-  for (const b of state.data["发货批次"]) _jobbatchShip[s(b["JOB No"]) + "" + s(b["发货批次"])] = b;
-}
-function isVirtual(table, field) {
-  return (VIRTUAL[table] || []).some((v) => v.name === field);
-}
-function virtVal(table, rec, field) {
-  if (field === "客户") return s(_jobContract[s(rec["JOB No"])]?.["客户"]);
-  if (field === "出荷日") return s(_jobbatchShip[s(rec["JOB No"]) + "" + s(rec["发货批次"])]?.["出荷日"]);
-  return "";
-}
 function fieldsOf(table) {
-  const base = state.schema[table].map((f) => ({
+  return state.schema[table].map((f) => ({
     name: f[0], type: f[1], options: f[2] || [], derived: !!f[3],
   }));
-  for (const v of (VIRTUAL[table] || [])) {
-    base.push({ name: v.name, type: VIRT_TYPE[v.name] || "text", options: [], derived: true, virtual: true });
-  }
-  return base;
 }
-function val(rec, field, table) {
-  table = table || state.tab;
-  if (isVirtual(table, field)) return virtVal(table, rec, field);
+function val(rec, field) {
   const v = rec[field];
   return v === null || v === undefined ? "" : v;
 }
@@ -89,7 +59,6 @@ function renderAll() {
   $("setStore").textContent = state.storePath || "（未选择）";
   $("setXlsx").textContent = state.xlsxPath || "（未选择）";
   $("setVersion").textContent = "v" + state.version;
-  if (state.data) buildJoinMaps();
   renderSummary();
   renderGrid();
   renderCounts();
@@ -184,6 +153,7 @@ function validateAll() {
 function switchTab(tab) {
   state.tab = tab;
   $("panel-设置").classList.add("hidden");
+  $("panel-跨表查询").classList.add("hidden");
   document.querySelectorAll(".tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === tab));
   $("panel-摘要").classList.toggle("hidden", tab !== "摘要");
@@ -232,20 +202,15 @@ function visibleRows(table) {
   const cf = state.colFilters[table] || {};
   const so = state.sortBy[table];
   const recs = state.data[table];
-  const vlist = VIRTUAL[table] || [];
   const idxs = [];
   for (let i = 0; i < recs.length; i++) {
     const rec = recs[i];
     let keep = true;
     for (const f in cf) {
       const set = cf[f];
-      if (set && !set.has(String(val(rec, f, table) ?? ""))) { keep = false; break; }
+      if (set && !set.has(String(rec[f] ?? ""))) { keep = false; break; }
     }
-    if (keep && q) {
-      let hay = Object.values(rec).join(" ");
-      for (const vf of vlist) hay += " " + virtVal(table, rec, vf.name);
-      if (!hay.toLowerCase().includes(q)) keep = false;
-    }
+    if (keep && q && !Object.values(rec).join(" ").toLowerCase().includes(q)) keep = false;
     if (keep) idxs.push(i);
   }
   if (so && so.dir) {
@@ -254,8 +219,8 @@ function visibleRows(table) {
     const f = so.field, d = so.dir;
     idxs.sort((a, b) => {
       let cmp;
-      if (isNum) cmp = (Number(val(recs[a], f, table)) || 0) - (Number(val(recs[b], f, table)) || 0);
-      else cmp = String(val(recs[a], f, table) ?? "").localeCompare(String(val(recs[b], f, table) ?? ""), "zh");
+      if (isNum) cmp = (Number(recs[a][f]) || 0) - (Number(recs[b][f]) || 0);
+      else cmp = String(recs[a][f] ?? "").localeCompare(String(recs[b][f] ?? ""), "zh");
       return d * cmp;
     });
   }
@@ -266,7 +231,6 @@ function recomputeDerived() {
   // 镜像 core.derive() 的派生聚合（仅显示用；save 时后端 derive 仍权威落盘）
   const d = state.data;
   if (!d) return;
-  buildJoinMaps();
   const devBy = {};
   for (const dev of d["设备台账"]) {
     const k = s(dev["JOB No"]) + "" + s(dev["发货批次"]);
@@ -653,20 +617,9 @@ function updateExportCount() {
 function closeExport() { $("exportModal").classList.add("hidden"); }
 function doExport() {
   const table = state.tab;
-  const checked = [...document.querySelectorAll("#exportFields input:checked")].map((c) => c.dataset.f);
-  if (!checked.length) { toast("请至少勾选一个字段", "error"); return; }
-  const all = fieldsOf(table);
-  const fields = checked.map((name) => {
-    const f = all.find((x) => x.name === name);
-    return { name, type: f ? f.type : "text" };
-  });
-  // 行注入虚拟关联值（客户/出荷日），使导出含跨表字段；records.json 不受影响
-  const rows = visibleRows(table).map((i) => {
-    const rec = state.data[table][i];
-    const enriched = { ...rec };
-    for (const vf of (VIRTUAL[table] || [])) enriched[vf.name] = virtVal(table, rec, vf.name);
-    return enriched;
-  });
+  const fields = [...document.querySelectorAll("#exportFields input:checked")].map((c) => c.dataset.f);
+  if (!fields.length) { toast("请至少勾选一个字段", "error"); return; }
+  const rows = visibleRows(table).map((i) => state.data[table][i]);
   if (!rows.length) { toast("当前筛选结果为空", "error"); return; }
   setStatus(`导出 ${rows.length} 行…`);
   call("export_xlsx", table, rows, fields).then((r) => {
@@ -689,6 +642,168 @@ $("exportOk").addEventListener("click", doExport);
 $("exportCancel").addEventListener("click", closeExport);
 $("exportClose").addEventListener("click", closeExport);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeExport(); });
+
+// ============ 跨表查询导出（report builder）============
+const PARENTS = {
+  "设备台账": ["合同订单", "发货批次"],
+  "发货批次": ["合同订单"],
+  "付款条件": ["合同订单"],
+  "开票记录": ["合同订单", "付款条件"],
+  "回款记录": ["合同订单", "付款条件"],
+  "合同订单": [],
+};
+const SHORT = { "合同订单": "合同", "发货批次": "批次", "付款条件": "条款", "设备台账": "设备", "开票记录": "开票", "回款记录": "回款" };
+let _contractByJob = {}, _batchByJobBatch = {}, _termByJobKind = {};
+function buildLookups() {
+  _contractByJob = {};
+  for (const c of state.data["合同订单"]) _contractByJob[s(c["JOB No"])] = c;
+  _batchByJobBatch = {};
+  for (const b of state.data["发货批次"]) _batchByJobBatch[s(b["JOB No"]) + "|" + s(b["发货批次"])] = b;
+  _termByJobKind = {};
+  for (const t of state.data["付款条件"]) _termByJobKind[s(t["JOB No"]) + "|" + s(t["款类"])] = t;
+}
+function getJoined(base, parent, rec) {
+  if (parent === "合同订单") return _contractByJob[s(rec["JOB No"])];
+  if (parent === "发货批次") return _batchByJobBatch[s(rec["JOB No"]) + "|" + s(rec["发货批次"])];
+  if (parent === "付款条件") return _termByJobKind[s(rec["JOB No"]) + "|" + s(rec["款类"])];
+  return null;
+}
+function qbTables(base) { return [base, ...(PARENTS[base] || [])]; }
+function qbFieldList(base) {
+  const out = [];
+  for (const t of qbTables(base)) {
+    const isBase = (t === base);
+    for (const f of (state.schema[t] || [])) {
+      const name = f[0], type = f[1];
+      out.push({ table: t, name, type, label: isBase ? name : `${SHORT[t] || t}.${name}` });
+    }
+  }
+  return out;
+}
+function openQueryBuilder() {
+  if (!state.data) return;
+  buildLookups();
+  const tables = Object.keys(state.schema);
+  $("qbBase").innerHTML = tables.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+  if (tables.includes("设备台账")) $("qbBase").value = "设备台账";
+  renderQueryBuilder();
+}
+function renderQueryBuilder() {
+  const base = $("qbBase").value;
+  const fields = qbFieldList(base);
+  $("qbFields").innerHTML = qbTables(base).map((t) => {
+    const isBase = (t === base);
+    const items = fields.filter((f) => f.table === t).map((f) =>
+      `<label class="cf-item"><input type="checkbox" data-t="${esc(f.table)}" data-n="${esc(f.name)}" data-type="${f.type}" data-label="${esc(f.label)}"><span class="cf-v">${esc(f.label)}</span></label>`
+    ).join("");
+    return `<div class="qb-group"><div class="qb-group-h">${isBase ? esc(t) + "（基础表）" : "← " + esc(t)}</div><div class="qb-group-body">${items}</div></div>`;
+  }).join("");
+  $("qbFilters").innerHTML = "";
+  $("qbPreview").innerHTML = "";
+  $("qbCount").textContent = "";
+}
+function qbAddFilterRow() {
+  const opts = qbFieldList($("qbBase").value).map((f) =>
+    `<option data-t="${esc(f.table)}" data-n="${esc(f.name)}" data-type="${f.type}">${esc(f.label)}</option>`).join("");
+  const tr = document.createElement("div");
+  tr.className = "qb-filter";
+  tr.innerHTML = `<select class="qb-f-field">${opts}</select>
+    <select class="qb-f-op">
+      <option value="eq">等于</option><option value="contains">包含</option>
+      <option value="empty">为空</option><option value="notempty">不为空</option>
+      <option value="gt">大于</option><option value="lt">小于</option>
+    </select>
+    <input class="qb-f-val" type="text" placeholder="值">
+    <button class="qb-f-del" title="删除条件">✕</button>`;
+  $("qbFilters").appendChild(tr);
+}
+function readFilters() {
+  return [...document.querySelectorAll("#qbFilters .qb-filter")].map((tr) => {
+    const opt = tr.querySelector(".qb-f-field").selectedOptions[0];
+    return {
+      table: opt.dataset.t, name: opt.dataset.n, type: opt.dataset.type,
+      op: tr.querySelector(".qb-f-op").value,
+      value: tr.querySelector(".qb-f-val").value,
+    };
+  });
+}
+function _numOrStr(x) { const n = Number(x); return isNaN(n) ? s(x) : n; }
+function matchFilter(value, flt) {
+  const v = s(value);
+  if (flt.op === "empty") return v === "";
+  if (flt.op === "notempty") return v !== "";
+  const target = s(flt.value).trim();
+  if (flt.op === "eq") return v === target;
+  if (flt.op === "contains") return v.toLowerCase().includes(target.toLowerCase());
+  if (flt.op === "gt") return target !== "" && _numOrStr(v) > _numOrStr(target);
+  if (flt.op === "lt") return target !== "" && _numOrStr(v) < _numOrStr(target);
+  return true;
+}
+function runQuery() {
+  const base = $("qbBase").value;
+  const selFields = [...document.querySelectorAll("#qbFields input:checked")].map((c) => ({
+    table: c.dataset.t, name: c.dataset.n, type: c.dataset.type, label: c.dataset.label,
+  }));
+  const filters = readFilters();
+  const recs = state.data[base] || [];
+  const rows = [];
+  for (const r of recs) {
+    const get = (table, name) => (table === base ? r[name] : (getJoined(base, table, r) || {})[name]);
+    let keep = true;
+    for (const flt of filters) {
+      if (!matchFilter(get(flt.table, flt.name), flt)) { keep = false; break; }
+    }
+    if (keep) {
+      const row = {};
+      for (const f of selFields) row[f.label] = get(f.table, f.name);
+      rows.push(row);
+    }
+  }
+  return { fields: selFields, rows };
+}
+function qbDoPreview() {
+  const { fields, rows } = runQuery();
+  if (!fields.length) { toast("请至少勾选一个输出字段", "error"); return; }
+  $("qbCount").textContent = `符合 ${rows.length} 行 × ${fields.length} 列`;
+  const head = `<tr>${fields.map((f) => `<th>${esc(f.label)}</th>`).join("")}</tr>`;
+  const body = rows.slice(0, 10).map((r) =>
+    `<tr>${fields.map((f) => `<td>${esc(r[f.label])}</td>`).join("")}</tr>`).join("");
+  $("qbPreview").innerHTML = `<thead>${head}</thead><tbody>${body}</tbody>`;
+}
+function qbDoExport() {
+  const { fields, rows } = runQuery();
+  if (!fields.length) { toast("请至少勾选一个输出字段", "error"); return; }
+  if (!rows.length) { toast("查询结果为空", "error"); return; }
+  const exportFields = fields.map((f) => ({ name: f.label, type: f.type }));
+  setStatus(`导出 ${rows.length} 行…`);
+  call("export_xlsx", $("qbBase").value, rows, exportFields).then((r) => {
+    setStatus(`已导出：${r.path}（${r.rows} 行 × ${r.fields} 列）`);
+    toast(`已导出 ${r.rows} 行到 Downloads`, "ok");
+    return call("open_path", r.path);
+  }).catch((e) => { setStatus(String(e), "error"); toast(String(e), "error"); });
+}
+$("btnQuery").addEventListener("click", () => {
+  ["摘要", "表格", "使用指南", "预警规则", "设置"].forEach((p) => $("panel-" + p).classList.add("hidden"));
+  $("panel-跨表查询").classList.remove("hidden");
+  document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+  openQueryBuilder();
+});
+$("qbBase").addEventListener("change", renderQueryBuilder);
+$("qbAddFilter").addEventListener("click", qbAddFilterRow);
+$("qbRun").addEventListener("click", qbDoPreview);
+$("qbExport").addEventListener("click", qbDoExport);
+$("qbFilters").addEventListener("click", (e) => {
+  const del = e.target.closest(".qb-f-del");
+  if (del) del.closest(".qb-filter").remove();
+});
+$("qbFilters").addEventListener("change", (e) => {
+  const opSel = e.target.closest(".qb-f-op");
+  if (opSel) {
+    const op = opSel.value;
+    opSel.closest(".qb-filter").querySelector(".qb-f-val").style.display =
+      (op === "empty" || op === "notempty") ? "none" : "";
+  }
+});
 
 function copySelection(table) {
   const idxs = [...state.selection].sort((a, b) => a - b);

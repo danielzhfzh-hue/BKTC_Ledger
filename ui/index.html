@@ -13,6 +13,7 @@
     <span title="数据文件（records.json）">数据 <b id="badgeStore" class="no">✗</b></span>
     <span title="台账文件（xlsx）">台账 <b id="badgeXlsx" class="no">✗</b></span>
   </div>
+  <button id="btnQuery">🔍 跨表查询</button>
   <button id="btnSettings">⚙ 设置</button>
 </header>
 
@@ -134,9 +135,35 @@
     </div>
   </section>
 
+  <section id="panel-跨表查询" class="panel hidden">
+    <div class="qb">
+      <div class="qb-bar">
+        <label class="qb-base">基础表 <select id="qbBase"></select></label>
+        <span class="spacer"></span>
+        <span id="qbCount" class="muted"></span>
+        <button id="qbRun" class="primary">🔍 预览</button>
+        <button id="qbExport">📥 导出 Excel</button>
+      </div>
+      <div class="qb-grid">
+        <div class="qb-box">
+          <div class="qb-box-h">输出字段（勾选要导出的列；「← X」为关联父表字段）</div>
+          <div id="qbFields" class="qb-fields"></div>
+        </div>
+        <div class="qb-box">
+          <div class="qb-box-h">筛选条件（全部满足）<button id="qbAddFilter" class="qb-mini">＋ 添加</button></div>
+          <div id="qbFilters" class="qb-filters"></div>
+          <div class="qb-tip muted">等于/包含=文本；大于/小于=数字或日期(YYYY-MM-DD)；为空/不为空无需填值。</div>
+        </div>
+      </div>
+      <div class="qb-box">
+        <div class="qb-box-h">预览（前 10 行；点「预览」刷新）</div>
+        <div class="qb-prev-wrap"><table id="qbPreview" class="qb-preview"></table></div>
+      </div>
+    </div>
+  </section>
+
   <section id="panel-设置" class="panel hidden">
-    <div class="guide">
-      <h3>设置</h3>
+    <div class="guide">      <h3>设置</h3>
       <table class="settings">
         <thead><tr><th style="width:120px">项目</th><th>当前</th><th style="width:220px">操作</th></tr></thead>
         <tbody>

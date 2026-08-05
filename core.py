@@ -395,15 +395,22 @@ def _exp_val(v, typ=None):
 
 
 def export_filtered(path, table, rows, fields):
-    """把筛选后的行 + 选定字段写成 xlsx（日期/数字按 SCHEMA 类型转真值）。"""
+    """把筛选后的行 + 选定字段写成 xlsx（日期/数字按类型转真值）。
+    fields 可为字段名字符串列表（类型查 SCHEMA）或 [{name,type}]（含虚拟关联列类型）。"""
     from openpyxl import Workbook
     types = {f: t for f, t, *_ in SCHEMA.get(table, [])}
+    norm = []
+    for f in fields:
+        if isinstance(f, dict):
+            norm.append((f.get("name"), f.get("type")))
+        else:
+            norm.append((f, types.get(f)))
     wb = Workbook()
     ws = wb.active
     ws.title = (table or "导出")[:31]
-    ws.append(list(fields))
+    ws.append([n for n, _ in norm])
     for r in rows:
-        ws.append([_exp_val(r.get(f), types.get(f)) for f in fields])
+        ws.append([_exp_val(r.get(n), t) for n, t in norm])
     wb.save(path)
     return path
 

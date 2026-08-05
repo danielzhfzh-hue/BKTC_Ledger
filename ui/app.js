@@ -40,13 +40,42 @@ function setStatus(msg, kind = "") {
   s.className = "status" + (kind ? " " + kind : "");
 }
 
+// 虚拟"关联"列（join 自父表，display-only，不入 records.json）
+const VIRTUAL = {
+  "设备台账": [{ name: "客户", src: "contract.客户" }, { name: "出荷日", src: "ship.出荷日" }],
+  "发货批次": [{ name: "客户", src: "contract.客户" }],
+  "开票记录": [{ name: "客户", src: "contract.客户" }],
+  "回款记录": [{ name: "客户", src: "contract.客户" }],
+  "付款条件": [{ name: "客户", src: "contract.客户" }],
+};
+const VIRT_TYPE = { "客户": "text", "出荷日": "date" };
+let _jobContract = {}, _jobbatchShip = {};
+function buildJoinMaps() {
+  _jobContract = {};
+  for (const c of state.data["合同订单"]) _jobContract[s(c["JOB No"])] = c;
+  _jobbatchShip = {};
+  for (const b of state.data["发货批次"]) _jobbatchShip[s(b["JOB No"]) + "" + s(b["发货批次"])] = b;
+}
+function isVirtual(table, field) {
+  return (VIRTUAL[table] || []).some((v) => v.name === field);
+}
+function virtVal(table, rec, field) {
+  if (field === "客户") return s(_jobContract[s(rec["JOB No"])]?.["客户"]);
+  if (field === "出荷日") return s(_jobbatchShip[s(rec["JOB No"]) + "" + s(rec["发货批次"])]?.["出荷日"]);
+  return "";
+}
 function fieldsOf(table) {
-  return state.schema[table].map((f) => ({
+  const base = state.schema[table].map((f) => ({
     name: f[0], type: f[1], options: f[2] || [], derived: !!f[3],
   }));
+  for (const v of (VIRTUAL[table] || [])) {
+    base.push({ name: v.name, type: VIRT_TYPE[v.name] || "text", options: [], derived: true, virtual: true });
+  }
+  return base;
 }
-
-function val(rec, field) {
+function val(rec, field, table) {
+  table = table || state.tab;
+  if (isVirtual(table, field)) return virtVal(table, rec, field);
   const v = rec[field];
   return v === null || v === undefined ? "" : v;
 }
@@ -60,6 +89,7 @@ function renderAll() {
   $("setStore").textContent = state.storePath || "（未选择）";
   $("setXlsx").textContent = state.xlsxPath || "（未选择）";
   $("setVersion").textContent = "v" + state.version;
+  if (state.data) buildJoinMaps();
   renderSummary();
   renderGrid();
   renderCounts();
@@ -202,15 +232,20 @@ function visibleRows(table) {
   const cf = state.colFilters[table] || {};
   const so = state.sortBy[table];
   const recs = state.data[table];
+  const vlist = VIRTUAL[table] || [];
   const idxs = [];
   for (let i = 0; i < recs.length; i++) {
     const rec = recs[i];
     let keep = true;
     for (const f in cf) {
       const set = cf[f];
-      if (set && !set.has(String(rec[f] ?? ""))) { keep = false; break; }
+      if (set && !set.has(String(val(rec, f, table) ?? ""))) { keep = false; break; }
     }
-    if (keep && q && !Object.values(rec).join(" ").toLowerCase().includes(q)) keep = false;
+    if (keep && q) {
+      let hay = Object.values(rec).join(" ");
+      for (const vf of vlist) hay += " " + virtVal(table, rec, vf.name);
+      if (!hay.toLowerCase().includes(q)) keep = false;
+    }
     if (keep) idxs.push(i);
   }
   if (so && so.dir) {
@@ -219,8 +254,8 @@ function visibleRows(table) {
     const f = so.field, d = so.dir;
     idxs.sort((a, b) => {
       let cmp;
-      if (isNum) cmp = (Number(recs[a][f]) || 0) - (Number(recs[b][f]) || 0);
-      else cmp = String(recs[a][f] ?? "").localeCompare(String(recs[b][f] ?? ""), "zh");
+      if (isNum) cmp = (Number(val(recs[a], f, table)) || 0) - (Number(val(recs[b], f, table)) || 0);
+      else cmp = String(val(recs[a], f, table) ?? "").localeCompare(String(val(recs[b], f, table) ?? ""), "zh");
       return d * cmp;
     });
   }
@@ -231,6 +266,7 @@ function recomputeDerived() {
   // 镜像 core.derive() 的派生聚合（仅显示用；save 时后端 derive 仍权威落盘）
   const d = state.data;
   if (!d) return;
+  buildJoinMaps();
   const devBy = {};
   for (const dev of d["设备台账"]) {
     const k = s(dev["JOB No"]) + "" + s(dev["发货批次"]);
@@ -617,9 +653,20 @@ function updateExportCount() {
 function closeExport() { $("exportModal").classList.add("hidden"); }
 function doExport() {
   const table = state.tab;
-  const fields = [...document.querySelectorAll("#exportFields input:checked")].map((c) => c.dataset.f);
-  if (!fields.length) { toast("请至少勾选一个字段", "error"); return; }
-  const rows = visibleRows(table).map((i) => state.data[table][i]);
+  const checked = [...document.querySelectorAll("#exportFields input:checked")].map((c) => c.dataset.f);
+  if (!checked.length) { toast("请至少勾选一个字段", "error"); return; }
+  const all = fieldsOf(table);
+  const fields = checked.map((name) => {
+    const f = all.find((x) => x.name === name);
+    return { name, type: f ? f.type : "text" };
+  });
+  // 行注入虚拟关联值（客户/出荷日），使导出含跨表字段；records.json 不受影响
+  const rows = visibleRows(table).map((i) => {
+    const rec = state.data[table][i];
+    const enriched = { ...rec };
+    for (const vf of (VIRTUAL[table] || [])) enriched[vf.name] = virtVal(table, rec, vf.name);
+    return enriched;
+  });
   if (!rows.length) { toast("当前筛选结果为空", "error"); return; }
   setStatus(`导出 ${rows.length} 行…`);
   call("export_xlsx", table, rows, fields).then((r) => {

@@ -703,19 +703,38 @@ function renderQueryBuilder() {
   $("qbCount").textContent = "";
 }
 function qbAddFilterRow() {
-  const opts = qbFieldList($("qbBase").value).map((f) =>
+  const fields = qbFieldList($("qbBase").value);
+  const opts = fields.map((f) =>
     `<option data-t="${esc(f.table)}" data-n="${esc(f.name)}" data-type="${f.type}">${esc(f.label)}</option>`).join("");
   const tr = document.createElement("div");
   tr.className = "qb-filter";
   tr.innerHTML = `<select class="qb-f-field">${opts}</select>
     <select class="qb-f-op">
-      <option value="eq">等于</option><option value="contains">包含</option>
-      <option value="empty">为空</option><option value="notempty">不为空</option>
+      <option value="eq">等于</option><option value="ne">不等于</option>
       <option value="gt">大于</option><option value="lt">小于</option>
+      <option value="empty">为空</option><option value="notempty">不为空</option>
     </select>
-    <input class="qb-f-val" type="text" placeholder="值">
+    <select class="qb-f-val"></select>
     <button class="qb-f-del" title="删除条件">✕</button>`;
   $("qbFilters").appendChild(tr);
+  const f0 = fields[0];
+  if (f0) populateValueSelect(tr.querySelector(".qb-f-val"), f0.table, f0.name);
+}
+function distinctValues(table, name) {
+  const set = new Set();
+  for (const r of (state.data[table] || [])) {
+    const v = s(r[name]);
+    if (v !== "") set.add(v);
+  }
+  const arr = [...set];
+  if (arr.length && arr.every((v) => !isNaN(Number(v)))) arr.sort((a, b) => Number(a) - Number(b));
+  else arr.sort((a, b) => a.localeCompare(b, "zh"));
+  return arr;
+}
+function populateValueSelect(sel, table, name) {
+  const vals = distinctValues(table, name);
+  sel.innerHTML = `<option value="">（选值…）</option>` +
+    vals.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
 }
 function readFilters() {
   return [...document.querySelectorAll("#qbFilters .qb-filter")].map((tr) => {
@@ -732,11 +751,12 @@ function matchFilter(value, flt) {
   const v = s(value);
   if (flt.op === "empty") return v === "";
   if (flt.op === "notempty") return v !== "";
-  const target = s(flt.value).trim();
+  const target = s(flt.value);
+  if (target === "") return true;  // 未选值 → 该条件不生效（避免空筛）
   if (flt.op === "eq") return v === target;
-  if (flt.op === "contains") return v.toLowerCase().includes(target.toLowerCase());
-  if (flt.op === "gt") return target !== "" && _numOrStr(v) > _numOrStr(target);
-  if (flt.op === "lt") return target !== "" && _numOrStr(v) < _numOrStr(target);
+  if (flt.op === "ne") return v !== target;
+  if (flt.op === "gt") return _numOrStr(v) > _numOrStr(target);
+  if (flt.op === "lt") return _numOrStr(v) < _numOrStr(target);
   return true;
 }
 function runQuery() {
@@ -797,6 +817,13 @@ $("qbFilters").addEventListener("click", (e) => {
   if (del) del.closest(".qb-filter").remove();
 });
 $("qbFilters").addEventListener("change", (e) => {
+  const fieldSel = e.target.closest(".qb-f-field");
+  if (fieldSel) {
+    const opt = fieldSel.selectedOptions[0];
+    const tr = fieldSel.closest(".qb-filter");
+    populateValueSelect(tr.querySelector(".qb-f-val"), opt.dataset.t, opt.dataset.n);
+    return;
+  }
   const opSel = e.target.closest(".qb-f-op");
   if (opSel) {
     const op = opSel.value;

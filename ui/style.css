@@ -154,7 +154,7 @@ th.col-h.filt-on .col-filt { color: #ffd24a; background: rgba(255,210,74,.15); }
 .qb-filter { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
 .qb-filter select, .qb-filter input { padding: 4px 6px; border: 1px solid var(--line); border-radius: 5px; font: inherit; font-size: 12px; }
 .qb-f-field { max-width: 200px; }
-.qb-f-val { min-width: 110px; flex: 1; }
+.qb-f-val { min-width: 130px; max-width: 240px; flex: 1; }
 .qb-f-del { padding: 3px 7px; color: var(--danger); }
 .qb-tip { padding: 4px 10px 8px; font-size: 11px; }
 .qb-prev-wrap { overflow: auto; max-height: 300px; }

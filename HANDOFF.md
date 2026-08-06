@@ -4,7 +4,9 @@
 
 ## 0. 一句话现状
 
-`BKTC_Ledger`（pywebview 桌面应用）是**当前唯一的编辑入口**；`BKTC上海POU营业管理表.records.json` 是**权威数据源**；`build_ledger_main.py` 是**生成引擎**（已并入工具,自包含）；`BKTC上海POU营业管理表.xlsx` 是**生成产物**（42 sheet）。**打包走 GitHub Actions**(win+mac CI);飞书/钉钉已同步(见 §6)。
+`BKTC_Ledger`（pywebview 桌面应用，**v1.1.9**）是**当前唯一的编辑入口**；`BKTC上海POU营业管理表.records.json` 是**权威数据源**；`build_ledger_main.py` 是**生成引擎**（已并入工具,自包含）；`BKTC上海POU营业管理表.xlsx` 是**生成产物**（42 sheet）。**打包走 GitHub Actions**(win+mac CI);飞书/钉钉已同步(见 §6)。
+
+> v1.1.5–v1.1.9 新增：任意六表**筛选+排序**、**单表导出 Excel**(📥)、**跨表查询导出**(🔍 report builder，按客户等任意关联字段筛+选字段+导出)、发货批次**拆分**(⇲)、**3 处派生字段自动同步**(付款条件文本/应收回款日/验收状态，见 §8)。
 
 > 旧文档 `订单整理/HANDOFF.md` 描述「飞书 pipeline 为权威源」的旧架构,已过时——以本文为准(其 §三数据口径修复/脏数据清单仍可查)。
 
@@ -23,13 +25,12 @@
    六表 + 预警规则           ↓
    覆盖前 → .bak           备份 xlsx → 重写 42 sheet
               ↑                 ↓
-              └── 从当前 Excel 同步 ◄── BKTC上海POU营业管理表.xlsx
-                  (load_from_workbook + merge_workbook)
+              └── (仅 records.json ↔ xlsx;「从 Excel 同步」已于 v1.1 移除,records.json 为唯一权威源)
 ```
 
 - **保存** `save_store` → `derive`(normalize+派生) → 覆盖 records.json(覆盖前 `shutil.copy2` → `.bak`)
 - **生成** `generate_xlsx` → `derive`+`validate` → `build_from_data` → 备份 xlsx → 重写 导航页/未回收管理表/40 JOB 页
-- **同步回** `sync_from_excel` → `load_from_workbook`(解析可见单元格+隐藏公式锚点) + `merge_workbook`(并入 store,丢 parse 不回的记录) → 覆盖 records.json(有 `.bak`)
+- **派生同步(显示)**：JS `recomputeDerived()` 镜像 `core.derive` 的派生字段(发货批次合计/合同总台数·型号·付款条件文本/验收状态/应收回款日/覆盖台数),编辑后实时刷新,无需保存重启。
 
 ## 2. 关键文件与位置
 
@@ -38,7 +39,7 @@
 | 文件 | 位置 | 角色 |
 |---|---|---|
 | `app.py` | `BKTC_Ledger/` | pywebview 壳 + `Api`;`APP_DIR` 已支持 `sys._MEIPASS` |
-| `core.py` | `BKTC_Ledger/` | 数据层:`SCHEMA`/`normalize`/`derive`/`validate`/`save_store`/`generate_xlsx`/`load_from_workbook`/`merge_workbook` |
+| `core.py` | `BKTC_Ledger/` | 数据层:`SCHEMA`/`DERIVED`/`normalize`/`derive`/`validate`/`save_store`/`generate_xlsx`/`backup_xlsx`/`export_filtered`(「从 Excel 同步」相关 load_from_workbook/merge_workbook/reconcile 已于 v1.1 移除) |
 | `build_ledger_main.py` | `BKTC_Ledger/`(已并入,自包含) | **生成引擎**:`build_from_data`/`write_job_sheet`/`compute_unpaid_rows`/`build_unpaid_sheet`/`verify`;core.py 直接 `from build_ledger_main import`。⚠️ 父目录 `~/Documents/销售订单管理多维表格构筑/` 另有 **legacy 副本**(供旧脚本),**改引擎只改工具内这份** |
 | `ui/{index.html,app.js,style.css}` | `BKTC_Ledger/ui/` | 前端(行虚拟化、多行粘贴、批次重命名) |
 | `.github/workflows/build.yml` | `BKTC_Ledger/` | **GitHub Actions 打包**(win+mac 矩阵,见 §4) |
@@ -80,6 +81,13 @@
 - **v1.1.2** 预警规则 tab 可见性(原 `switchTab` 漏把 panel-表格 在预警规则下隐藏)+ 空日期单元格显示「—」(macOS WKWebView `<input type=date value="">` 会把空值显示成今天,造成"脏数据"错觉;改点击才挂 picker)。
 - **v1.1.3** 六表 Excel 式筛选+排序:点表头升/降/取消;每列表头「▾」弹该列去重值勾选(多列 AND)+搜索+全选;移除客户/JOB 下拉(被列筛选取代);保留关键字全表搜。
 - **v1.1.4 拆分批次 + 派生实时重算**:发货批次页「⇲ 拆分批次」选中源批次→按**设备型号分组**勾选移出(整型号全选/挑个别机)→目标批次+出荷日→移动+自动建/合并目标行(只改设备 `发货批次`,不动开票/回款覆盖);`recomputeDerived()`(JS 镜像 `core.derive`)挂到 updateRec/增删/粘贴/重命名/拆分,批次合计/合同总台数·型号/开票回款覆盖台数 实时刷新。列筛选按钮▾放大。
+
+### 2026-08-05/06 v1.1.5–v1.1.9（导出 / 跨表查询 / 派生同步，最新 = v1.1.9）
+- **v1.1.5 单表导出 Excel**:任意六表筛选+排序后,工具栏「📥 导出 Excel」→勾字段→导出到 `~/Downloads/<表>_导出_<ts>.xlsx`;日期/数字按类型转真 Excel 值(`core.export_filtered`,支持 `{name,type}` 入参)。
+- **v1.1.6 虚拟关联列(已撤)**:曾给表格加 客户/出荷日 虚拟列;用户嫌不通用,v1.1.7 撤掉、表格回单表。
+- **v1.1.7 跨表查询导出(report builder)**:顶栏「🔍 跨表查询」面板——选基础表→勾任意字段(基础表+关联父表字段树)→加筛选条件→预览前10行→导出。父表 join(多对一不炸行):设备台账→合同/批次;开票/回款→合同/付款条件;批次/条款→合同。lookup:`contractByJob`/`batchByJobBatch`/`termByJobKind`(`buildLookups`)。
+- **v1.1.8 筛选值改下拉**:跨表查询筛选「值」从手填改为该字段去重值下拉(`distinctValues`+`populateValueSelect`,选字段后填);操作符 等于/不等于/大于/小于/为空/不为空;未选值不生效。
+- **v1.1.9 三处派生字段自动同步**:`合同订单.付款条件`(=付款条件.说明按；拼接)、`开票记录.应收回款日`(=开票日+账期天数)、`设备台账.验收状态`(=质保开始日 有无) 加入 `DERIVED`+`derive()`+`recomputeDerived()`,表格内变只读、编辑源字段即更新。数据验证 0 不一致。
 
 ## 4. 打包与分发(GitHub CI = 主路径)
 
@@ -150,6 +158,11 @@ cd ~/projects/订单整理/BKTC_Ledger && .venv/bin/python app.py
 - `build_ledger_main.py` 末尾 `verify()` 仍硬编码 0.01(工具不调,仅 standalone 跑用)。
 - 脏数据(26BS009 空单/22BS006 人工状态/23BS004-058/-061 双记录/源表 L 列 10 倍笔误)见 `订单整理/HANDOFF.md` §三。
 - 设备业务键 = `(JOB No, 製造番号, 機番)`;款类 5 规范名(预付/发货/到货/验收/质保 + 全额);含税 = 未税 × 1.13。
+
+### 派生字段：已自动 / 决定不做 / 可做未做（2026-08-06 梳理）
+- **已自动派生（表格内只读，编辑源字段）**：发货批次(台数/未税合计/含税合计/覆盖製造番号)、合同订单(总台数/设备型号/**付款条件文本**←付款条件.说明拼接)、设备台账(**验收状态**←质保开始日有无)、开票记录(**应收回款日**←开票日+账期天数)、开票/回款(覆盖台数)。逻辑在 `core.derive()` + JS `recomputeDerived()`。
+- **决定不做（维持手录）**：① 开票/回款 **含税金额**——两表无"未税金额"字段，是实际开票/收款金额，直接录入（不是 未税×1.13 的派生；要那样得新增未税字段+回填，用户选择不改）。② 回款 **对应应收回款日**——51 个(JOB,款类)组里 15 组多发票/多期、27 条回款对应组无开票，不够干净。
+- **可做未做（已验证干净，待用户确认）**：设备台账 **质保期** = `round((质保结束日 − 质保开始日).days / 365)年`（499/502 一致；3 个不一致是数据标错，派生会自动纠正为 1年）。需时加进 `DERIVED`+`derive`+`recomputeDerived`。
 
 ## 9. 相关文档
 

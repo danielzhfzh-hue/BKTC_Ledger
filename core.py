@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import time
+from datetime import datetime, timedelta
 
 from openpyxl import load_workbook
 
@@ -74,9 +75,10 @@ SCHEMA = {
 }
 
 DERIVED = {
-    "合同订单": ["设备型号", "总台数"],
+    "合同订单": ["设备型号", "总台数", "付款条件"],
     "发货批次": ["台数", "未税合计", "含税合计", "覆盖製造番号"],
-    "开票记录": ["覆盖台数"],
+    "设备台账": ["验收状态"],
+    "开票记录": ["覆盖台数", "应收回款日"],
     "回款记录": ["覆盖台数"],
 }
 
@@ -144,12 +146,18 @@ def derive(data):
         x["含税合计"] = round(x["未税合计"] * 1.13, 2)
         x["覆盖製造番号"] = ";".join(d["製造番号"] for d in devs if s(d["製造番号"]))
 
+    # 付款条件文本 = 条款说明按"；"拼接（跨表：改条款→合同文本更新）；无条款保留原值
+    terms_by_job = {}
+    for t in data["付款条件"]:
+        terms_by_job.setdefault(s(t["JOB No"]), []).append(t)
+
     dev_count = {}
     dev_models = {}
     for d in data["设备台账"]:
         job = s(d["JOB No"])
         dev_count[job] = dev_count.get(job, 0) + 1
         dev_models.setdefault(job, set()).add(s(d["设备型号"]))
+        d["验收状态"] = "已验收" if s(d.get("质保开始日")) else "未验收"
     for c in data["合同订单"]:
         job = s(c["JOB No"])
         c["总台数"] = dev_count.get(job, 0)
@@ -158,6 +166,11 @@ def derive(data):
             c["设备型号"] = ";".join(models)
         if not s(c.get("币种")):
             c["币种"] = "RMB"
+        terms = terms_by_job.get(job, [])
+        if terms:
+            desc = "；".join(s(t.get("说明")).strip() for t in terms if s(t.get("说明")).strip())
+            if desc:
+                c["付款条件"] = desc
 
     for table in ("开票记录", "回款记录"):
         for x in data[table]:
@@ -169,6 +182,15 @@ def derive(data):
                                or s(d["製造番号"]) in s(x.get("覆盖製造番号")).split(";"))}
                 if len(batches) == 1:
                     x["覆盖批次"] = next(iter(batches))
+            if table == "开票记录":
+                invd = s(x.get("开票日"))
+                if invd:
+                    try:
+                        days = int(float(x.get("账期天数") or 0))
+                        x["应收回款日"] = (datetime.strptime(invd[:10], "%Y-%m-%d")
+                                            + timedelta(days=days)).strftime("%Y-%m-%d")
+                    except ValueError:
+                        pass
     return data
 
 

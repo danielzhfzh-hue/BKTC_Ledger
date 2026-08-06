@@ -244,20 +244,35 @@ function recomputeDerived() {
     x["覆盖製造番号"] = devs.map((v) => s(v["製造番号"])).filter(Boolean).join(";");
   }
   const cnt = {}, models = {};
+  const termsByJob = {};
+  for (const t of d["付款条件"]) (termsByJob[s(t["JOB No"])] ||= []).push(t);
   for (const dev of d["设备台账"]) {
     const j = s(dev["JOB No"]);
     cnt[j] = (cnt[j] || 0) + 1;
     (models[j] ||= new Set()).add(s(dev["设备型号"]));
+    dev["验收状态"] = s(dev["质保开始日"]) ? "已验收" : "未验收";
   }
   for (const c of d["合同订单"]) {
     const j = s(c["JOB No"]);
     c["总台数"] = cnt[j] || 0;
     if (!s(c["设备型号"])) c["设备型号"] = [...(models[j] || new Set())].filter((m) => m).sort().join(";");
+    const terms = termsByJob[j] || [];
+    if (terms.length) {
+      const desc = terms.map((t) => s(t["说明"]).trim()).filter(Boolean).join("；");
+      if (desc) c["付款条件"] = desc;
+    }
   }
   for (const t of ["开票记录", "回款记录"]) {
     for (const x of d[t]) {
       const set = new Set(s(x["覆盖製造番号"]).split(";").map((p) => p.trim()).filter(Boolean));
       x["覆盖台数"] = set.size;
+      if (t === "开票记录") {
+        const m = s(x["开票日"]).match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (m) {
+          const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + (parseInt(x["账期天数"], 10) || 0));
+          x["应收回款日"] = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+        }
+      }
     }
   }
 }

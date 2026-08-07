@@ -3,7 +3,7 @@
 const state = {
   storePath: "", xlsxPath: "", data: null, schema: null,
   tab: "摘要", dirty: false, selection: new Set(), anchor: null,
-  filter: "", colFilters: {}, sortBy: {}, rules: {},
+  filter: "", colFilters: {}, sortBy: {}, rules: {}, jobFilter: null,
   version: "?", update: null,
 };
 
@@ -68,8 +68,7 @@ function currentContext() {
   // 从当前表的单值列筛选推导"新建行的上下文"（替代旧的客户/JOB 下拉）
   const cf = state.colFilters[state.tab] || {};
   const ctx = { job: "", customer: "" };
-  const js = cf["JOB No"];
-  if (js && js.size === 1) ctx.job = [...js][0];
+  if (state.jobFilter && state.jobFilter.size === 1) ctx.job = [...state.jobFilter][0];
   if (state.tab === "合同订单") {
     const cs = cf["客户"];
     if (cs && cs.size === 1) ctx.customer = [...cs][0];
@@ -207,9 +206,11 @@ function visibleRows(table) {
     const rec = recs[i];
     let keep = true;
     for (const f in cf) {
+      if (f === "JOB No") continue; // JOB 走全局 jobFilter，跨表共享
       const set = cf[f];
       if (set && !set.has(String(rec[f] ?? ""))) { keep = false; break; }
     }
+    if (keep && state.jobFilter && !state.jobFilter.has(String(rec["JOB No"] ?? ""))) keep = false;
     if (keep && q && !Object.values(rec).join(" ").toLowerCase().includes(q)) keep = false;
     if (keep) idxs.push(i);
   }
@@ -288,7 +289,7 @@ function renderGrid() {
   const head = `<tr><th class="cb"></th>` +
     fields.map((f) => {
       const ind = (so && so.field === f.name) ? (so.dir === 1 ? "▲" : "▼") : "";
-      const act = cfT[f.name] ? " filt-on" : "";
+      const act = (f.name === "JOB No" ? state.jobFilter : cfT[f.name]) ? " filt-on" : "";
       return `<th class="col-h${act}" data-field="${esc(f.name)}" title="${esc(f.name)}（点击排序）">` +
         `<span class="col-h-name">${esc(f.name)}${f.derived ? " (自动)" : ""}</span>` +
         `<span class="sort-ind">${ind}</span>` +
@@ -337,7 +338,9 @@ function renderGrid() {
   $("gridBody").innerHTML = html;
   $("gridHead").innerHTML = head;
   const hint = $("tabHint");
-  hint.textContent = TAB_HINTS[table] || "";
+  let h = TAB_HINTS[table] || "";
+  if (state.jobFilter) h += `　［跨表 JOB 筛选：${[...state.jobFilter].map(esc).join("、")}］`;
+  hint.textContent = h;
 }
 
 function applySelectionClasses() {
@@ -917,12 +920,13 @@ function pasteGrid(table, row0, col0, text) {
 
 $("btnClearFilter").addEventListener("click", () => {
   state.colFilters[state.tab] = {};
+  state.jobFilter = null;
   delete state.sortBy[state.tab];
   state.filter = "";
   $("filterKeyword").value = "";
   closeColFilter();
   renderGrid();
-  toast("已清除本表筛选/排序");
+  toast("已清除筛选/排序（含 JOB 跨表筛选）");
 });
 
 // 表头：点列名=排序(升→降→取消)；点 ▾=打开该列筛选
@@ -953,9 +957,11 @@ function openColFilter(field) {
   }
   _cfAllVals = [...dist.keys()].sort((a, b) => a.localeCompare(b, "zh"));
   const allCount = _cfAllVals.length;
+  const isJob = field === "JOB No";
   state.colFilters[table] = state.colFilters[table] || {};
-  const set = state.colFilters[table][field] || new Set(_cfAllVals);
-  $("colfiltTitle").textContent = `${field}（${allCount} 个值）`;
+  const set = isJob ? (state.jobFilter || new Set(_cfAllVals))
+                    : (state.colFilters[table][field] || new Set(_cfAllVals));
+  $("colfiltTitle").textContent = `${field}（${allCount} 个值${isJob ? "；此列跨表共享" : ""}）`;
   $("colfiltSearch").value = "";
   $("colfiltAll").checked = set.size >= allCount;
   $("colfiltList").innerHTML = _cfAllVals.map((v) => {
@@ -976,6 +982,14 @@ function openColFilter(field) {
 }
 function cfApply(field, value, checked) {
   const table = state.tab;
+  if (field === "JOB No") {
+    let set = state.jobFilter ? new Set(state.jobFilter) : new Set(_cfAllVals);
+    if (checked) set.add(value); else set.delete(value);
+    state.jobFilter = set.size >= _cfAllVals.length ? null : set;
+    $("colfiltAll").checked = !state.jobFilter;
+    renderGrid();
+    return;
+  }
   state.colFilters[table] = state.colFilters[table] || {};
   let set = state.colFilters[table][field];
   if (!set) { set = new Set(_cfAllVals); state.colFilters[table][field] = set; }
@@ -994,8 +1008,14 @@ $("colfiltSearch").addEventListener("input", (e) => {
 });
 $("colfiltAll").addEventListener("change", (e) => {
   const field = $("colFilterPop").dataset.field;
-  const table = state.tab;
   const checked = e.target.checked;
+  if (field === "JOB No") {
+    state.jobFilter = checked ? null : new Set();
+    document.querySelectorAll("#colfiltList .cf-item input").forEach((c) => { c.checked = checked; });
+    renderGrid();
+    return;
+  }
+  const table = state.tab;
   state.colFilters[table] = state.colFilters[table] || {};
   if (checked) delete state.colFilters[table][field];
   else state.colFilters[table][field] = new Set();
@@ -1008,7 +1028,8 @@ $("colfiltList").addEventListener("change", (e) => {
 });
 $("colfiltClear").addEventListener("click", () => {
   const field = $("colFilterPop").dataset.field;
-  if (state.colFilters[state.tab]) delete state.colFilters[state.tab][field];
+  if (field === "JOB No") state.jobFilter = null;
+  else if (state.colFilters[state.tab]) delete state.colFilters[state.tab][field];
   closeColFilter();
   renderGrid();
 });

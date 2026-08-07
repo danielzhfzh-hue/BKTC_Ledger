@@ -116,6 +116,7 @@ function validateAll() {
   }
   const sums = {};
   for (const t of state.data["付款条件"]) {
+    if (!s(t["款类"])) continue; // 空占位行不参与比例校验
     sums[t["JOB No"]] = (sums[t["JOB No"]] || 0) + Number(t["比例%"] || 0);
   }
   for (const [job, total] of Object.entries(sums)) {
@@ -127,7 +128,7 @@ function validateAll() {
   for (const d of state.data["设备台账"]) {
     const job = String(d["JOB No"] || ""), ser = String(d["製造番号"] || ""), ki = String(d["機番"] || "");
     if (!ser) {
-      issues.push({ severity: "error", msg: `${job} 设备台账存在空製造番号` });
+      issues.push({ severity: "warning", msg: `${job} 设备台账存在空製造番号（新建占位行待补）` });
       continue;
     }
     const k1 = job + "|" + ser, k2 = k1 + "|" + ki;
@@ -452,6 +453,7 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
       $("gridWrap").scrollTop = $("gridWrap").scrollHeight;
     } else if (act === "del") {
       const idxs = [...state.selection].sort((a, b) => b - a);
+      if (table === "合同订单" && tryCascadeDelete(idxs)) return;
       for (const i of idxs) state.data[table].splice(i, 1);
       state.selection = new Set();
       state.dirty = true;
@@ -477,6 +479,24 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
     }
   });
 });
+
+function tryCascadeDelete(idxs) {
+  const jobs = [...new Set(idxs.map((i) => String(state.data["合同订单"][i]?.["JOB No"] || "")).filter(Boolean))];
+  if (!jobs.length) return false; // 选中行无 JOB No，走普通删
+  const list = jobs.join("、");
+  if (!confirm("确定删除订单 " + list + "？\n这将删除该 JOB 在【全部六表】的所有数据（合同/付款条件/设备台账/发货批次/开票/回款），不可恢复。")) return false;
+  if (!confirm("再次确认：彻底删除 " + list + " 的全部数据？")) return false;
+  const jset = new Set(jobs);
+  for (const t of Object.keys(state.schema)) {
+    state.data[t] = state.data[t].filter((r) => !jset.has(String(r["JOB No"] || "")));
+  }
+  state.selection = new Set();
+  state.jobFilter = null; // 删除的 JOB 可能正被筛，清筛选看全貌
+  state.dirty = true;
+  recomputeDerived(); renderGrid(); renderCounts();
+  toast("已删除 " + jobs.length + " 个订单（六表全部数据）");
+  return true;
+}
 
 function renameBatch() {
   const table = "发货批次";
@@ -1167,4 +1187,287 @@ window.addEventListener("pywebviewready", async () => {
   } catch (err) {
     setStatus("加载失败：" + err, "error");
   }
+});
+
+// ========== 新建订单 modal ==========
+const PAYMENT_TEMPLATES = {
+  A: [
+    { kind: "预付款", ratio: 30, days: 0, trigger: "合同生效后", desc: "合同生效后付 30% 预付款" },
+    { kind: "发货款", ratio: 30, days: 30, trigger: "货到签收后", desc: "货到签收后 30 天付 30% 发货款" },
+    { kind: "验收款", ratio: 30, days: 60, trigger: "验收合格后", desc: "验收合格后 60 天付 30% 验收款" },
+    { kind: "质保款", ratio: 10, days: 30, trigger: "质保期满后", desc: "质保期满后 30 天付 10% 尾款" },
+  ],
+  B: [
+    { kind: "预付款", ratio: 50, days: 0, trigger: "合同生效后", desc: "合同生效后付 50% 预付款" },
+    { kind: "发货款", ratio: 50, days: 30, trigger: "货到签收后", desc: "货到签收后 30 天付 50% 发货款" },
+  ],
+  C: [
+    { kind: "预付款", ratio: 30, days: 0, trigger: "合同生效后", desc: "合同生效后付 30% 预付款" },
+    { kind: "到货款", ratio: 40, days: 30, trigger: "货到签收后", desc: "货到签收后 30 天付 40% 到货款" },
+    { kind: "验收款", ratio: 20, days: 60, trigger: "验收合格后", desc: "验收合格后 60 天付 20% 验收款" },
+    { kind: "质保款", ratio: 10, days: 30, trigger: "质保期满后", desc: "质保期满后 30 天付 10% 尾款" },
+  ],
+};
+
+function suggestJobNo(kind) {
+  const yy = String(new Date().getFullYear()).slice(-2);
+  const re = new RegExp("^" + yy + "(BS|DS)(\\d{3})$");
+  let max = 0;
+  for (const c of state.data["合同订单"]) {
+    const m = String(c["JOB No"] || "").match(re);
+    if (m && m[1] === kind) max = Math.max(max, parseInt(m[2], 10));
+  }
+  return yy + kind + String(max + 1).padStart(3, "0");
+}
+
+function buildNocDatalists() {
+  const fill = (id, table, field) => {
+    $(id).innerHTML = distinctValues(table, field).map((v) => `<option value="${esc(v)}">`).join("");
+  };
+  fill("dlCustomer", "合同订单", "客户");
+  fill("dlAssist", "合同订单", "担当者");
+  fill("dlModel", "设备台账", "设备型号");
+  fill("dlShipMethod", "合同订单", "发货方式");
+  fill("dlShipFrom", "合同订单", "发货地点");
+  fill("dlShipTo", "合同订单", "送货地点");
+  fill("dlPo", "设备台账", "PO No");
+  fill("dlKind", "付款条件", "款类");
+}
+
+function nocDevRowHtml() {
+  return `<tr>
+    <td><input class="nd-model" list="dlModel" autocomplete="off" placeholder="型号"></td>
+    <td><input class="nd-qty" type="number" min="1" step="1" value="1"></td>
+    <td><input class="nd-price" type="number" step="any" placeholder="0"></td>
+    <td><input class="nd-po" list="dlPo" autocomplete="off"></td>
+    <td><select class="nd-free"><option>否</option><option>是</option></select></td>
+    <td class="noc-del"><button type="button" class="nd-del">✕</button></td>
+  </tr>`;
+}
+
+function nocUpdateSummary() {
+  let qty = 0;
+  const models = new Set();
+  document.querySelectorAll("#nocDevRows tr").forEach((tr) => {
+    const q = parseInt(tr.querySelector(".nd-qty").value, 10);
+    const m = tr.querySelector(".nd-model").value.trim();
+    if (q > 0) qty += q;
+    if (m) models.add(m);
+  });
+  $("nocDevSummary").textContent = "合计 " + qty + " 台 / " + models.size + " 个型号";
+}
+
+function addNocDeviceRow() {
+  const tr = document.createElement("tr");
+  tr.innerHTML = nocDevRowHtml();
+  $("nocDevRows").appendChild(tr);
+}
+
+function nocTermRowHtml() {
+  return `<tr>
+    <td><input class="nt-kind" list="dlKind" autocomplete="off" placeholder="款类"></td>
+    <td><input class="nt-ratio" type="number" min="0" max="100" step="any" placeholder="0"></td>
+    <td><input class="nt-days" type="number" min="0" step="1" placeholder="0"></td>
+    <td class="noc-del"><button type="button" class="nt-del">✕</button></td>
+  </tr>`;
+}
+function addNocTermRow(kind, ratio, days) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = nocTermRowHtml();
+  $("nocTermRows").appendChild(tr);
+  if (kind !== undefined && kind !== "") {
+    tr.querySelector(".nt-kind").value = kind;
+    tr.querySelector(".nt-ratio").value = ratio;
+    tr.querySelector(".nt-days").value = days;
+  }
+}
+function fillNocTemplate(key) {
+  const terms = PAYMENT_TEMPLATES[key];
+  if (!terms) return;
+  $("nocTermRows").innerHTML = "";
+  for (const t of terms) addNocTermRow(t.kind, t.ratio, t.days);
+  nocTermSummary();
+}
+function nocTermSummary() {
+  let total = 0, n = 0;
+  document.querySelectorAll("#nocTermRows tr").forEach((tr) => {
+    const k = tr.querySelector(".nt-kind").value.trim();
+    const r = Number(tr.querySelector(".nt-ratio").value) || 0;
+    if (k) { total += r; n++; }
+  });
+  const sum = $("nocTermSummary");
+  if (!n) { sum.textContent = ""; sum.style.color = ""; return; }
+  const ok = Math.abs(total - 100) <= 0.01;
+  sum.textContent = "合计 " + total + "% / " + n + " 条" + (ok ? "  ✓" : "  ⚠ 应为 100%");
+  sum.style.color = ok ? "var(--ok)" : "var(--danger)";
+}
+
+function openNewOrder() {
+  if (!state.data) return;
+  buildNocDatalists();
+  $("nocJobKind").value = "BS";
+  $("nocJob").value = suggestJobNo("BS");
+  $("nocCustomer").value = "";
+  $("nocAssist").value = "朱方周";
+  $("nocContent").value = "";
+  $("nocCurrency").value = "RMB";
+  $("nocShipMethod").value = "";
+  $("nocShipFrom").value = "";
+  $("nocShipTo").value = "";
+  $("nocNote").value = "";
+  $("nocBatch").value = "1";
+  $("nocShipDate").value = "";
+  $("nocTermRows").innerHTML = "";
+  addNocTermRow();
+  nocTermSummary();
+  $("nocDevRows").innerHTML = "";
+  addNocDeviceRow();
+  nocUpdateSummary();
+  $("nocErrors").classList.add("hidden");
+  $("nocErrors").innerHTML = "";
+  state._nocSubmitting = false;
+  $("newOrderModal").classList.remove("hidden");
+}
+
+function closeNewOrder() { $("newOrderModal").classList.add("hidden"); }
+
+function readNocForm() {
+  const devices = [];
+  document.querySelectorAll("#nocDevRows tr").forEach((tr) => {
+    devices.push({
+      model: tr.querySelector(".nd-model").value.trim(),
+      qty: parseInt(tr.querySelector(".nd-qty").value, 10),
+      price: tr.querySelector(".nd-price").value,
+      po: tr.querySelector(".nd-po").value.trim(),
+      free: tr.querySelector(".nd-free").value,
+    });
+  });
+  return {
+    job: $("nocJob").value.trim(),
+    customer: $("nocCustomer").value.trim(),
+    assist: $("nocAssist").value.trim(),
+    content: $("nocContent").value.trim(),
+    currency: $("nocCurrency").value,
+    shipMethod: $("nocShipMethod").value.trim(),
+    shipFrom: $("nocShipFrom").value.trim(),
+    shipTo: $("nocShipTo").value.trim(),
+    note: $("nocNote").value.trim(),
+    batchName: $("nocBatch").value.trim() || "1",
+    shipDate: $("nocShipDate").value,
+    devices,
+    terms: [...document.querySelectorAll("#nocTermRows tr")].map((tr) => ({
+      kind: tr.querySelector(".nt-kind").value.trim(),
+      ratio: Number(tr.querySelector(".nt-ratio").value) || 0,
+      days: Number(tr.querySelector(".nt-days").value) || 0,
+    })).filter((t) => t.kind),
+  };
+}
+
+function validateNoc(f) {
+  const errs = [];
+  if (!/^\d{2}(BS|DS)\d{3}$/.test(f.job)) errs.push("JOB No 格式应为 YYBS### 或 YYDS###：" + (f.job || "（空）"));
+  else if (state.data["合同订单"].some((c) => String(c["JOB No"]) === f.job)) errs.push("JOB No 已存在：" + f.job);
+  if (!f.customer) errs.push("客户不能为空");
+  const devs = f.devices.filter((d) => d.model && d.qty > 0);
+  if (!devs.length) errs.push("至少添加 1 行设备（型号非空、台数>0）");
+  f.devices.forEach((d, i) => {
+    if (d.qty > 0 && !d.model) errs.push("第 " + (i + 1) + " 行设备缺少型号");
+  });
+  if (f.terms.length) {
+    const sum = f.terms.reduce((a, t) => a + Number(t.ratio), 0);
+    if (Math.abs(sum - 100) > 0.01) errs.push("付款条件比例合计 " + sum + "% ≠ 100%（或全部留空建空占位）");
+  }
+  return { ok: !errs.length, errors: errs };
+}
+
+function showNocErrors(errors) {
+  const box = $("nocErrors");
+  box.innerHTML = "<b>请修正以下 " + errors.length + " 处问题：</b><ul>" +
+    errors.map((e) => "<li>" + esc(e) + "</li>").join("") + "</ul>";
+  box.classList.remove("hidden");
+}
+
+function commitNewOrder(f) {
+  const ts = Date.now();
+  let rid = 0;
+  const newId = () => "local-" + ts + "-" + (++rid);
+  const job = f.job;
+  const batch = f.batchName;
+
+  state.data["合同订单"].push({
+    "记录ID": newId(), "JOB No": job, "客户": f.customer, "担当者": f.assist,
+    "订单内容": f.content, "发货方式": f.shipMethod, "发货地点": f.shipFrom,
+    "送货地点": f.shipTo, "币种": f.currency || "RMB", "备注": f.note,
+  });
+  for (const d of f.devices) {
+    if (!d.model || !(d.qty > 0)) continue;
+    for (let i = 0; i < d.qty; i++) {
+      state.data["设备台账"].push({
+        "记录ID": newId(), "JOB No": job, "PO No": d.po, "设备型号": d.model,
+        "未税单价": Number(d.price) || 0, "是否无偿": d.free, "发货批次": batch,
+      });
+    }
+  }
+  state.data["发货批次"].push({
+    "记录ID": newId(), "JOB No": job, "发货批次": batch, "出荷日": f.shipDate,
+  });
+  if (f.terms.length) {
+    for (const t of f.terms) {
+      state.data["付款条件"].push({
+        "记录ID": newId(), "JOB No": job, "款类": t.kind, "比例%": Number(t.ratio),
+        "账期天数": Number(t.days),
+      });
+    }
+  } else {
+    state.data["付款条件"].push({ "记录ID": newId(), "JOB No": job }); // 空占位
+  }
+  // 开票/回款各建一条空占位：保证六表都有该 JOB 的记录（以 JOB No 索引），切表不空
+  state.data["开票记录"].push({ "记录ID": newId(), "JOB No": job });
+  state.data["回款记录"].push({ "记录ID": newId(), "JOB No": job });
+
+  state.dirty = true;
+  recomputeDerived();
+  state.jobFilter = new Set([job]);
+  switchTab("合同订单");
+  renderCounts();
+  closeNewOrder();
+  const total = f.devices.reduce((a, d) => a + (d.qty > 0 ? d.qty : 0), 0);
+  toast("已创建订单 " + job + "（" + total + " 台），已筛到该订单；点 ✕清除筛选 看全部", "ok");
+}
+
+$("btnNewOrder").addEventListener("click", openNewOrder);
+$("nocClose").addEventListener("click", closeNewOrder);
+$("nocCancel").addEventListener("click", closeNewOrder);
+$("nocAddDev").addEventListener("click", () => { addNocDeviceRow(); nocUpdateSummary(); });
+$("nocDevRows").addEventListener("input", nocUpdateSummary);
+$("nocDevRows").addEventListener("click", (e) => {
+  const del = e.target.closest(".nd-del");
+  if (!del) return;
+  if (document.querySelectorAll("#nocDevRows tr").length > 1) {
+    del.closest("tr").remove();
+    nocUpdateSummary();
+  }
+});
+$("nocJobKind").addEventListener("change", (e) => { $("nocJob").value = suggestJobNo(e.target.value); });
+$("nocAddTerm").addEventListener("click", () => { addNocTermRow(); nocTermSummary(); });
+$("nocTermRows").addEventListener("input", nocTermSummary);
+$("nocTermRows").addEventListener("click", (e) => {
+  const del = e.target.closest(".nt-del");
+  if (!del) return;
+  del.closest("tr").remove();
+  nocTermSummary();
+});
+document.querySelectorAll(".noc-tmpl").forEach((b) => {
+  b.addEventListener("click", () => fillNocTemplate(b.dataset.tmpl));
+});
+$("nocOk").addEventListener("click", () => {
+  if (state._nocSubmitting) return;
+  const f = readNocForm();
+  const v = validateNoc(f);
+  if (!v.ok) { showNocErrors(v.errors); toast("请修正 " + v.errors.length + " 处问题", "error"); return; }
+  state._nocSubmitting = true;
+  commitNewOrder(f);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("newOrderModal").classList.contains("hidden")) closeNewOrder();
 });

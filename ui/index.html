@@ -18,6 +18,7 @@
 </header>
 
 <div class="actionbar">
+  <button id="btnNewOrder" class="primary">＋ 新建订单</button>
   <button id="btnSave">保存数据</button>
   <button id="btnGenerate" class="primary">生成台账</button>
   <button id="btnOpenXlsx">打开台账</button>
@@ -226,6 +227,80 @@
     <div class="modal-foot"><button id="exportCancel">取消</button><button id="exportOk" class="primary">导出到 Excel</button></div>
   </div>
 </div>
+
+<div id="newOrderModal" class="modal hidden">
+  <div class="modal-card noc-card">
+    <div class="modal-head"><span>新建订单</span><button id="nocClose" title="关闭">✕</button></div>
+    <div class="modal-body">
+      <div id="nocErrors" class="noc-errors hidden"></div>
+
+      <div class="noc-section">
+        <h4>① 订单头 → 合同订单</h4>
+        <div class="noc-grid">
+          <label>JOB No
+            <span class="noc-jobrow">
+              <input id="nocJob" autocomplete="off">
+              <select id="nocJobKind"><option>BS</option><option>DS</option></select>
+            </span>
+          </label>
+          <label>客户 <input id="nocCustomer" list="dlCustomer" autocomplete="off" placeholder="输入或选择现有"></label>
+          <label>担当者 <input id="nocAssist" list="dlAssist" autocomplete="off"></label>
+          <label>订单内容 <input id="nocContent" autocomplete="off" placeholder="如 KT1000FI*10"></label>
+          <label>币种
+            <select id="nocCurrency"><option>RMB</option><option>USD</option><option>JPY</option><option>EUR</option></select>
+          </label>
+          <label>发货方式 <input id="nocShipMethod" list="dlShipMethod" autocomplete="off"></label>
+          <label>发货地点 <input id="nocShipFrom" list="dlShipFrom" autocomplete="off"></label>
+          <label>送货地点 <input id="nocShipTo" list="dlShipTo" autocomplete="off"></label>
+          <label class="noc-full">备注 <input id="nocNote" autocomplete="off"></label>
+        </div>
+      </div>
+
+      <div class="noc-section">
+        <h4>② 设备明细 → 设备台账（每行一个型号 × 台数；提交后按台数生成占位行）<button id="nocAddDev" type="button" class="noc-mini">＋ 添加型号</button></h4>
+        <table class="noc-dev-table">
+          <thead><tr><th>设备型号</th><th style="width:64px">台数</th><th style="width:110px">未税单价</th><th>PO No</th><th style="width:80px">是否无偿</th><th style="width:36px"></th></tr></thead>
+          <tbody id="nocDevRows"></tbody>
+        </table>
+        <div id="nocDevSummary" class="muted"></div>
+      </div>
+
+      <div class="noc-section">
+        <h4>③ 发货 → 发货批次</h4>
+        <div class="noc-grid">
+          <label>发货批次名 <input id="nocBatch" value="1" autocomplete="off"></label>
+          <label>出荷日 <input id="nocShipDate" type="date"></label>
+        </div>
+      </div>
+
+      <div class="noc-section">
+        <h4>④ 付款条件（款类可选现有或新建 + 比例%；合计须 100%；全留空则建一条空占位）
+          <span class="noc-term-actions">
+            <button id="nocAddTerm" type="button" class="noc-mini">＋ 添加条款</button>
+            <button type="button" class="noc-mini noc-tmpl" data-tmpl="A">填A模板</button>
+            <button type="button" class="noc-mini noc-tmpl" data-tmpl="B">填B模板</button>
+            <button type="button" class="noc-mini noc-tmpl" data-tmpl="C">填C模板</button>
+          </span>
+        </h4>
+        <table class="noc-dev-table">
+          <thead><tr><th>款类</th><th style="width:88px">比例%</th><th style="width:88px">账期天数</th><th style="width:36px"></th></tr></thead>
+          <tbody id="nocTermRows"></tbody>
+        </table>
+        <div id="nocTermSummary" class="muted"></div>
+      </div>
+    </div>
+    <div class="modal-foot"><button id="nocCancel">取消</button><button id="nocOk" class="primary">创建订单</button></div>
+  </div>
+</div>
+
+<datalist id="dlCustomer"></datalist>
+<datalist id="dlAssist"></datalist>
+<datalist id="dlModel"></datalist>
+<datalist id="dlShipMethod"></datalist>
+<datalist id="dlShipFrom"></datalist>
+<datalist id="dlShipTo"></datalist>
+<datalist id="dlPo"></datalist>
+<datalist id="dlKind"></datalist>
 
 <div id="toast" class="toast hidden"></div>
 

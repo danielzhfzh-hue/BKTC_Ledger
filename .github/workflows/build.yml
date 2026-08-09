@@ -23,6 +23,8 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: pip install pywebview openpyxl pyinstaller
+      - name: Run reliability tests
+        run: python -m unittest discover -s tests -v
       - name: Build with PyInstaller (onedir)
         # separator: ';' on Windows, ':' on macOS
         run: pyinstaller --noconfirm --windowed --clean --name BKTC_Ledger --add-data "ui${{ runner.os == 'Windows' && ';' || ':' }}ui" --collect-all webview --hidden-import "webview.platforms.edgechromium" app.py

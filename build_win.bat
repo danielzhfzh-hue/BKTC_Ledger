@@ -20,6 +20,13 @@ python -m pip install -q -U pip
 echo === Install deps ===
 python -m pip install -q pywebview openpyxl pyinstaller
 
+echo === Run reliability tests ===
+python -m unittest discover -s tests -v
+if errorlevel 1 (
+  echo [X] Tests failed. Build stopped.
+  pause & exit /b 1
+)
+
 echo === PyInstaller build (onedir, unsigned) ===
 pyinstaller --noconfirm --windowed --clean --name BKTC_Ledger --add-data "ui;ui" --collect-all webview --hidden-import "webview.platforms.edgechromium" app.py
 

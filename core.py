@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """台账维护工具核心层（纯 Python，macOS / Windows 通用）。
 
-负责六表数据模型、records.json 读写、飞书导出导入、字段规范化/自动派生、
+负责六表数据模型、JSON/SQLite 读写、飞书导出导入、字段规范化/自动派生、
 业务校验，以及调用 build_ledger_main 生成完整台账 Excel。
 """
+import hashlib
 import json
 import os
 import re
@@ -129,7 +130,12 @@ def normalize(data):
 
 
 def coverage_count(text):
-    return len({x.strip() for x in s(text).split(";") if x.strip()})
+    return len(set(coverage_values(text)))
+
+
+def coverage_values(text):
+    """拆分覆盖批次/製造番号，同时接受中英文分号和换行。"""
+    return [x.strip() for x in re.split(r"[;；\r\n]+", s(text)) if x.strip()]
 
 
 def derive(data):
@@ -176,10 +182,11 @@ def derive(data):
         for x in data[table]:
             x["覆盖台数"] = coverage_count(x.get("覆盖製造番号"))
             if not s(x.get("覆盖批次")):
+                covered_serials = set(coverage_values(x.get("覆盖製造番号")))
                 batches = {s(d["发货批次"]) for d in data["设备台账"]
                            if s(d["JOB No"]) == s(x["JOB No"])
-                           and (not s(x.get("覆盖製造番号"))
-                               or s(d["製造番号"]) in s(x.get("覆盖製造番号")).split(";"))}
+                           and (not covered_serials
+                               or s(d["製造番号"]) in covered_serials)}
                 if len(batches) == 1:
                     x["覆盖批次"] = next(iter(batches))
             if table == "开票记录":
@@ -201,19 +208,46 @@ def _job_exists(data, job):
 def validate(data):
     """业务校验，返回 [{severity, msg}]；severity: error / warning / info。"""
     issues = []
-    jobs = {s(c["JOB No"]) for c in data["合同订单"]}
+    contract_jobs = [s(c.get("JOB No")) for c in data["合同订单"]]
+    jobs = set(contract_jobs)
+    seen_jobs = set()
     for c in data["合同订单"]:
         job = s(c["JOB No"])
         if not re.fullmatch(r"\d{2}(BS|DS)\d{3}", job):
             issues.append({"severity": "error", "msg": f"合同 JOB No 格式不正确：{job!r}"})
+        if job in seen_jobs:
+            issues.append({"severity": "error", "msg": f"合同 JOB No 重复：{job!r}"})
+        seen_jobs.add(job)
+    for table in TABLES:
+        seen_ids = set()
+        for rec in data[table]:
+            rid = s(rec.get("记录ID"))
+            if rid and rid in seen_ids:
+                issues.append({"severity": "error",
+                               "msg": f"{table} 记录ID重复：{rid!r}"})
+            if rid:
+                seen_ids.add(rid)
+        for field, field_type, *options in SCHEMA[table]:
+            if field_type != SELECT or not options:
+                continue
+            allowed = set(options[0])
+            for rec in data[table]:
+                value = s(rec.get(field))
+                if value and value not in allowed:
+                    issues.append({"severity": "error",
+                                   "msg": f"{table} {field}值不在允许列表中：{value!r}"})
     for table in ("付款条件", "设备台账", "发货批次", "开票记录", "回款记录"):
         for rec in data[table]:
             job = s(rec.get("JOB No"))
-            if job and job not in jobs:
+            if not job:
+                issues.append({"severity": "error", "msg": f"{table} 存在缺少 JOB No 的记录"})
+            elif job not in jobs:
                 issues.append({"severity": "error",
                                "msg": f"{table} 引用了不存在的 JOB No：{job!r}"})
     sums = {}
     for t in data["付款条件"]:
+        if not s(t.get("款类")):
+            continue  # 新建订单的空占位行不构成一组付款比例
         key = s(t.get("JOB No"))
         sums[key] = sums.get(key, 0.0) + float(t.get("比例%") or 0)
     for job, total in sorted(sums.items()):
@@ -261,7 +295,34 @@ def validate(data):
         if float(p.get("含税金额") or 0) <= 0:
             issues.append({"severity": "warning",
                            "msg": f"{s(p.get('JOB No'))} 回款金额 ≤ 0"})
+    shipment_seen = set()
+    for x in data["发货批次"]:
+        key = (s(x.get("JOB No")), s(x.get("发货批次")))
+        if not key[1]:
+            issues.append({"severity": "error", "msg": f"{key[0]} 发货批次名称不能为空"})
+        if key in shipment_seen:
+            issues.append({"severity": "error",
+                           "msg": f"发货批次业务键重复：{key[0]} {key[1]}"})
+        shipment_seen.add(key)
     dev_batches = {(s(d["JOB No"]), s(d["发货批次"])) for d in data["设备台账"]}
+    for d in data["设备台账"]:
+        job, batch = s(d.get("JOB No")), s(d.get("发货批次"))
+        if batch and (job, batch) not in shipment_seen:
+            issues.append({"severity": "error",
+                           "msg": f"{job} 设备引用了不存在的发货批次：{batch!r}"})
+    device_serials = {(s(d.get("JOB No")), s(d.get("製造番号")))
+                      for d in data["设备台账"] if s(d.get("製造番号"))}
+    for table in ("开票记录", "回款记录"):
+        for rec in data[table]:
+            job = s(rec.get("JOB No"))
+            for batch in coverage_values(rec.get("覆盖批次")):
+                if (job, batch) not in shipment_seen:
+                    issues.append({"severity": "error",
+                                   "msg": f"{table} {job} 覆盖了不存在的批次：{batch!r}"})
+            for serial in coverage_values(rec.get("覆盖製造番号")):
+                if (job, serial) not in device_serials:
+                    issues.append({"severity": "error",
+                                   "msg": f"{table} {job} 覆盖了不存在的製造番号：{serial!r}"})
     for x in data["发货批次"]:
         if (s(x["JOB No"]), s(x["发货批次"])) not in dev_batches:
             issues.append({"severity": "warning",
@@ -273,13 +334,19 @@ def validate(data):
             job = s(rec.get("JOB No"))
             for f in date_fields[t]:
                 v = s(rec.get(f))
-                if v and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
-                    issues.append({"severity": "warning",
-                                   "msg": f"{job} {f}={v!r} 不是 YYYY-MM-DD 格式"})
+                if v:
+                    try:
+                        datetime.strptime(v, "%Y-%m-%d")
+                    except ValueError:
+                        issues.append({"severity": "error",
+                                       "msg": f"{job} {f}={v!r} 不是有效日期 YYYY-MM-DD"})
     return issues
 
 
 def load_store(path):
+    if str(path).lower().endswith((".db", ".sqlite", ".sqlite3")):
+        import database
+        return database.load_database(path)
     with open(path, encoding="utf-8") as f:
         raw = json.load(f)
     data = empty_data()
@@ -289,6 +356,9 @@ def load_store(path):
 
 
 def get_rules(path):
+    if str(path).lower().endswith((".db", ".sqlite", ".sqlite3")):
+        import database
+        return database.get_rules(path)
     rules = {}
     if os.path.exists(path):
         try:
@@ -300,6 +370,9 @@ def get_rules(path):
 
 
 def save_store(path, data, rules=None):
+    if str(path).lower().endswith((".db", ".sqlite", ".sqlite3")):
+        import database
+        return database.save_database(path, data, rules)["path"]
     data = derive(data)
     if rules is None:
         rules = get_rules(path)
@@ -360,10 +433,12 @@ def generate_xlsx(data, out, rules=None):
     """规范化/派生后生成台账 Excel；返回 (out, issues, counts)。"""
     data = derive(data)
     issues = validate(data)
-    for recs in data.values():
+    for table, recs in data.items():
         for i, rec in enumerate(recs):
             if not rec.get("记录ID"):
-                rec["记录ID"] = f"rec-app-{i}-{abs(hash(json.dumps(rec, ensure_ascii=False))):x}"
+                raw = json.dumps(rec, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                digest = hashlib.sha256(f"{table}:{i}:{raw}".encode("utf-8")).hexdigest()[:20]
+                rec["记录ID"] = f"rec-app-{digest}"
     build_from_data(
         data["合同订单"], data["付款条件"], data["设备台账"],
         data["发货批次"], data["开票记录"], data["回款记录"], out, rules=rules,
@@ -402,17 +477,19 @@ def _exp_val(v, typ=None):
             from datetime import datetime
             return datetime.strptime(s(v)[:10], "%Y-%m-%d").date()
         except ValueError:
-            return s(v)
+            v = s(v)
     if typ == NUMBER:
         try:
             return float(v)
         except (TypeError, ValueError):
-            return s(v)
+            v = s(v)
     if typ == INT:
         try:
             return int(float(v))
         except (TypeError, ValueError):
-            return s(v)
+            v = s(v)
+    if isinstance(v, str) and v.startswith(("=", "+", "-", "@")):
+        return "'" + v
     return v
 
 
@@ -435,5 +512,3 @@ def export_filtered(path, table, rows, fields):
         ws.append([_exp_val(r.get(n), t) for n, t in norm])
     wb.save(path)
     return path
-
-

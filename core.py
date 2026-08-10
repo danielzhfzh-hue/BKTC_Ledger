@@ -123,8 +123,7 @@ def normalize(data):
         for rec in data.get(table, []):
             rec = dict(rec or {})
             for field, typ, *_opt in SCHEMA[table]:
-                if field in rec:
-                    rec[field] = _norm(rec[field], typ)
+                rec[field] = _norm(rec.get(field), typ)
             out[table].append(rec)
     return out
 
@@ -427,6 +426,20 @@ def summary(data):
     counts["未回收行数"] = len(unpaid)
     counts["未回收合计"] = round(sum(r["未回收金额"] for r in unpaid), 2)
     return counts
+
+
+def unpaid_report_rows(data, rules=None):
+    """Return JSON-safe rows using the same calculation as the generated unpaid sheet."""
+    data = derive(data)
+    rows = compute_unpaid_rows(
+        data["合同订单"], data["付款条件"], data["发货批次"],
+        data["开票记录"], data["回款记录"], data["设备台账"], rules,
+    )
+    public_fields = [
+        "客户", "JOB No", "批次", "款类", "预警等级", "开票日期",
+        "预定回收日期", "未回收金额", "未回收原因",
+    ]
+    return [{field: row.get(field) for field in public_fields} for row in rows]
 
 
 def generate_xlsx(data, out, rules=None):

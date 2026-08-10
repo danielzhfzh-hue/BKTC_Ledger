@@ -14,7 +14,7 @@ pywebview UI
 - `database.py`：关系表、JSON 迁移、事务、备份、修订、Excel 往返。
 - `core.py`：六表 schema、规范化、派生、业务校验、查询导出与台账入口。
 - `build_ledger_main.py`：导航页、未回收管理表、JOB 页生成。
-- `ui/`：纯 HTML/CSS/JS；大表行虚拟化。
+- `ui/`：纯 HTML/CSS/JS；大表行虚拟化，跨表查询包含「未付款订单」和「未回款明细」派生数据源。
 - `tests/`：SQLite、回导冲突和生成引擎边界回归。
 
 真实业务数据仍位于仓库外：

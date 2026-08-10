@@ -824,6 +824,21 @@ $("exportClose").addEventListener("click", closeExport);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeExport(); });
 
 // ============ 跨表查询导出（report builder）============
+const VIRTUAL_QUERY_TABLES = ["未付款订单", "未回款明细"];
+const VIRTUAL_QUERY_SCHEMAS = {
+  "未付款订单": [
+    { name: "客户", type: "text" }, { name: "JOB No", type: "text" },
+    { name: "未回款项数", type: "int" }, { name: "未回收合计", type: "number" },
+    { name: "预警等级", type: "text" }, { name: "未回款原因", type: "text" },
+  ],
+  "未回款明细": [
+    { name: "客户", type: "text" }, { name: "JOB No", type: "text" },
+    { name: "批次", type: "text" }, { name: "款类", type: "text" },
+    { name: "预警等级", type: "text" }, { name: "开票日期", type: "date" },
+    { name: "预定回收日期", type: "date" },
+    { name: "未回收金额", type: "number" }, { name: "未回收原因", type: "text" },
+  ],
+};
 const PARENTS = {
   "设备台账": ["合同订单", "发货批次"],
   "发货批次": ["合同订单"],
@@ -834,6 +849,45 @@ const PARENTS = {
 };
 const SHORT = { "合同订单": "合同", "发货批次": "批次", "付款条件": "条款", "设备台账": "设备", "开票记录": "开票", "回款记录": "回款" };
 let _contractByJob = {}, _batchByJobBatch = {}, _termByJobKind = {};
+let _unpaidRows = [];
+
+function querySchema(table) {
+  if (VIRTUAL_QUERY_SCHEMAS[table]) return VIRTUAL_QUERY_SCHEMAS[table];
+  return (state.schema[table] || []).map((f) => ({ name: f[0], type: f[1] }));
+}
+
+function queryRows(table) {
+  if (table === "未回款明细") return _unpaidRows;
+  if (table === "未付款订单") {
+    const groups = new Map();
+    const severity = { "①已逾期": 0, "②临近": 1, "③未到期": 2, "④待确认": 3 };
+    for (const row of _unpaidRows) {
+      const job = s(row["JOB No"]);
+      const key = `${job}\u0001${s(row["客户"])}`;
+      const group = groups.get(key) || {
+        "客户": row["客户"], "JOB No": job, "未回款项数": 0,
+        "未回收合计": 0, "预警等级": new Set(), "未回款原因": new Set(),
+      };
+      group["未回款项数"] += 1;
+      group["未回收合计"] += Number(row["未回收金额"]) || 0;
+      if (s(row["预警等级"])) group["预警等级"].add(s(row["预警等级"]));
+      if (s(row["未回收原因"])) group["未回款原因"].add(s(row["未回收原因"]));
+      groups.set(key, group);
+    }
+    return [...groups.values()].map((group) => ({
+      ...group,
+      "未回收合计": Math.round(group["未回收合计"] * 100) / 100,
+      "预警等级": [...group["预警等级"]].sort((a, b) => (severity[a] ?? 9) - (severity[b] ?? 9)).join(" / "),
+      "未回款原因": [...group["未回款原因"]].join("；"),
+    }));
+  }
+  return state.data[table] || [];
+}
+
+async function refreshUnpaidRows() {
+  const rows = await call("get_unpaid_rows", state.data, state.rules);
+  _unpaidRows = Array.isArray(rows) ? rows : (rows?.rows || []);
+}
 function buildLookups() {
   _contractByJob = {};
   for (const c of state.data["合同订单"]) _contractByJob[s(c["JOB No"])] = c;
@@ -848,13 +902,15 @@ function getJoined(base, parent, rec) {
   if (parent === "付款条件") return _termByJobKind[s(rec["JOB No"]) + "|" + s(rec["款类"])];
   return null;
 }
-function qbTables(base) { return [base, ...(PARENTS[base] || [])]; }
+function qbTables(base) {
+  return VIRTUAL_QUERY_SCHEMAS[base] ? [base] : [base, ...(PARENTS[base] || [])];
+}
 function qbFieldList(base) {
   const out = [];
   for (const t of qbTables(base)) {
     const isBase = (t === base);
-    for (const f of (state.schema[t] || [])) {
-      const name = f[0], type = f[1];
+    for (const f of querySchema(t)) {
+      const name = f.name, type = f.type;
       out.push({ table: t, name, type, label: isBase ? name : `${SHORT[t] || t}.${name}` });
     }
   }
@@ -863,18 +919,24 @@ function qbFieldList(base) {
 function openQueryBuilder() {
   if (!state.data) return;
   buildLookups();
-  const tables = Object.keys(state.schema);
+  const tables = [...VIRTUAL_QUERY_TABLES, ...Object.keys(state.schema)];
   $("qbBase").innerHTML = tables.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
-  if (tables.includes("设备台账")) $("qbBase").value = "设备台账";
+  $("qbBase").value = "未付款订单";
   renderQueryBuilder();
+  $("qbCount").textContent = "正在计算未回款口径…";
+  refreshUnpaidRows().then(() => renderQueryBuilder()).catch((err) => {
+    $("qbCount").textContent = "未回款数据加载失败";
+    toast(String(err), "error");
+  });
 }
 function renderQueryBuilder() {
   const base = $("qbBase").value;
   const fields = qbFieldList(base);
+  const defaultChecked = VIRTUAL_QUERY_SCHEMAS[base] ? " checked" : "";
   $("qbFields").innerHTML = qbTables(base).map((t) => {
     const isBase = (t === base);
     const items = fields.filter((f) => f.table === t).map((f) =>
-      `<label class="cf-item"><input type="checkbox" data-t="${esc(f.table)}" data-n="${esc(f.name)}" data-type="${f.type}" data-label="${esc(f.label)}"><span class="cf-v">${esc(f.label)}</span></label>`
+      `<label class="cf-item"><input type="checkbox"${defaultChecked} data-t="${esc(f.table)}" data-n="${esc(f.name)}" data-type="${f.type}" data-label="${esc(f.label)}"><span class="cf-v">${esc(f.label)}</span></label>`
     ).join("");
     return `<div class="qb-group"><div class="qb-group-h">${isBase ? esc(t) + "（基础表）" : "← " + esc(t)}</div><div class="qb-group-body">${items}</div></div>`;
   }).join("");
@@ -890,7 +952,7 @@ function qbAddFilterRow() {
   tr.className = "qb-filter";
   tr.innerHTML = `<select class="qb-f-field">${opts}</select>
     <select class="qb-f-op">
-      <option value="eq">等于</option><option value="ne">不等于</option>
+      <option value="eq">等于</option><option value="contains">包含</option><option value="ne">不等于</option>
       <option value="gt">大于</option><option value="lt">小于</option>
       <option value="empty">为空</option><option value="notempty">不为空</option>
     </select>
@@ -902,7 +964,7 @@ function qbAddFilterRow() {
 }
 function distinctValues(table, name) {
   const set = new Set();
-  for (const r of (state.data[table] || [])) {
+  for (const r of queryRows(table)) {
     const v = s(r[name]);
     if (v !== "") set.add(v);
   }
@@ -934,6 +996,7 @@ function matchFilter(value, flt) {
   const target = s(flt.value);
   if (target === "") return true;  // 未选值 → 该条件不生效（避免空筛）
   if (flt.op === "eq") return v === target;
+  if (flt.op === "contains") return v.toLocaleLowerCase().includes(target.toLocaleLowerCase());
   if (flt.op === "ne") return v !== target;
   if (flt.op === "gt") return _numOrStr(v) > _numOrStr(target);
   if (flt.op === "lt") return _numOrStr(v) < _numOrStr(target);
@@ -945,7 +1008,7 @@ function runQuery() {
     table: c.dataset.t, name: c.dataset.n, type: c.dataset.type, label: c.dataset.label,
   }));
   const filters = readFilters();
-  const recs = state.data[base] || [];
+  const recs = queryRows(base);
   const rows = [];
   for (const r of recs) {
     const get = (table, name) => (table === base ? r[name] : (getJoined(base, table, r) || {})[name]);
@@ -961,7 +1024,11 @@ function runQuery() {
   }
   return { fields: selFields, rows };
 }
-function qbDoPreview() {
+async function qbDoPreview() {
+  if (VIRTUAL_QUERY_SCHEMAS[$("qbBase").value]) {
+    try { await refreshUnpaidRows(); }
+    catch (err) { toast(String(err), "error"); return; }
+  }
   const { fields, rows } = runQuery();
   if (!fields.length) { toast("请至少勾选一个输出字段", "error"); return; }
   $("qbCount").textContent = `符合 ${rows.length} 行 × ${fields.length} 列`;
@@ -970,7 +1037,11 @@ function qbDoPreview() {
     `<tr>${fields.map((f) => `<td>${esc(r[f.label])}</td>`).join("")}</tr>`).join("");
   $("qbPreview").innerHTML = `<thead>${head}</thead><tbody>${body}</tbody>`;
 }
-function qbDoExport() {
+async function qbDoExport() {
+  if (VIRTUAL_QUERY_SCHEMAS[$("qbBase").value]) {
+    try { await refreshUnpaidRows(); }
+    catch (err) { toast(String(err), "error"); return; }
+  }
   const { fields, rows } = runQuery();
   if (!fields.length) { toast("请至少勾选一个输出字段", "error"); return; }
   if (!rows.length) { toast("查询结果为空", "error"); return; }
@@ -988,7 +1059,12 @@ $("btnQuery").addEventListener("click", () => {
   document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
   openQueryBuilder();
 });
-$("qbBase").addEventListener("change", renderQueryBuilder);
+$("qbBase").addEventListener("change", () => {
+  renderQueryBuilder();
+  if (VIRTUAL_QUERY_SCHEMAS[$("qbBase").value]) {
+    refreshUnpaidRows().then(() => renderQueryBuilder()).catch((err) => toast(String(err), "error"));
+  }
+});
 $("qbAddFilter").addEventListener("click", qbAddFilterRow);
 $("qbRun").addEventListener("click", qbDoPreview);
 $("qbExport").addEventListener("click", qbDoExport);

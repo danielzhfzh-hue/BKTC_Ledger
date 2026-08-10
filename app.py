@@ -126,6 +126,10 @@ class Api:
         return {"ok": True, "out": out, "issues": issues, "counts": counts,
                 "data": saved["data"], "revision": saved["revision"]}
 
+    def get_unpaid_rows(self, data, rules=None):
+        """Return the unpaid report using the same calculation as generated Excel."""
+        return core.unpaid_report_rows(data, rules)
+
     def export_xlsx(self, table, rows, fields):
         """把筛选后的行 + 选定字段导出到 ~/Downloads/<表>_导出_<时间>.xlsx。"""
         if not fields:

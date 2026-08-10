@@ -51,6 +51,25 @@ class ApiMigrationTests(unittest.TestCase):
             with self.assertRaises(app.database.StaleImportError):
                 second.save_data(second_state["data"], second_state["rules"])
 
+    def test_unpaid_rows_api_returns_json_safe_public_fields(self):
+        data = core.empty_data()
+        data["合同订单"] = [{"JOB No": "26BS001", "客户": "测试客户"}]
+        data["付款条件"] = [{"JOB No": "26BS001", "款类": "预付款", "比例%": 100}]
+        data["设备台账"] = [{
+            "JOB No": "26BS001", "製造番号": "26BS001-001", "機番": "A1",
+            "未税单价": 100, "是否无偿": "否", "发货批次": "1",
+        }]
+        data["发货批次"] = [{"JOB No": "26BS001", "发货批次": "1"}]
+
+        rows = app.Api("", "/tmp/bktc-query-test.db").get_unpaid_rows(data)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["客户"], "测试客户")
+        self.assertEqual(rows[0]["JOB No"], "26BS001")
+        self.assertEqual(rows[0]["未回收金额"], 113)
+        self.assertNotIn("inv_dt", rows[0])
+        json.dumps(rows, ensure_ascii=False)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -23,8 +24,8 @@ from openpyxl.worksheet.datavalidation import DataValidation
 import core
 
 
-DATABASE_VERSION = 1
-WORKBOOK_VERSION = 1
+DATABASE_VERSION = 2
+WORKBOOK_VERSION = 2
 META_SHEET = "_BKTC_META"
 HELP_SHEET = "使用说明"
 ID_HEADER = "_记录ID"
@@ -165,6 +166,14 @@ def _create_schema(conn):
                 "ON UPDATE CASCADE ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
             )
         conn.execute(f'CREATE TABLE IF NOT EXISTS {_q(table)} ({", ".join(columns)})')
+        existing_columns = {
+            row[1] for row in conn.execute(f'PRAGMA table_info({_q(table)})')
+        }
+        for field, field_type, *_ in core.SCHEMA[table]:
+            if field not in existing_columns:
+                conn.execute(
+                    f'ALTER TABLE {_q(table)} ADD COLUMN {_q(field)} {_sql_type(field_type)}'
+                )
         if table != "合同订单":
             conn.execute(
                 f'CREATE INDEX IF NOT EXISTS {_q("idx_" + table + "_job")} '
@@ -180,7 +189,8 @@ def _create_schema(conn):
     )
     conn.execute("INSERT OR IGNORE INTO _meta(key, value) VALUES('revision', '0')")
     conn.execute(
-        "INSERT OR IGNORE INTO _meta(key, value) VALUES('schema_version', ?)",
+        "INSERT INTO _meta(key, value) VALUES('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (str(DATABASE_VERSION),),
     )
     conn.execute(f"PRAGMA user_version = {DATABASE_VERSION}")
@@ -655,6 +665,104 @@ def _diff_data(before, after):
     return changes, action_counts, table_counts
 
 
+def _replace_coverage_token(value, old, new):
+    """替换覆盖串中的完整键，同时兼容调拨番号的箭头写法。"""
+    if not old or old == new:
+        return value
+    changed = False
+    result = []
+    for item in core.coverage_values(value):
+        pieces = re.split(r"([→⇒⟶➡➝])", item)
+        for index in range(0, len(pieces), 2):
+            if pieces[index] == old:
+                pieces[index] = new
+                changed = True
+        result.append("".join(pieces))
+    return ";".join(result) if changed else value
+
+
+def _propagate_import_relational_edits(current, incoming):
+    """用稳定记录 ID 识别 Excel 改名，同步仍保留旧键的关联行。"""
+    current_by_id = {
+        table: {core.s(rec.get("记录ID")): rec for rec in current[table]
+                if core.s(rec.get("记录ID"))}
+        for table in core.TABLES
+    }
+    incoming_by_id = {
+        table: {core.s(rec.get("记录ID")): rec for rec in incoming[table]
+                if core.s(rec.get("记录ID"))}
+        for table in core.TABLES
+    }
+
+    job_renames = {}
+    for rid, old in current_by_id["合同订单"].items():
+        new = incoming_by_id["合同订单"].get(rid)
+        if new and core.s(old.get("JOB No")) != core.s(new.get("JOB No")):
+            job_renames[core.s(old.get("JOB No"))] = core.s(new.get("JOB No"))
+    for table in ("付款条件", "设备台账", "发货批次", "开票记录", "回款记录"):
+        for rec in incoming[table]:
+            old_job = core.s(rec.get("JOB No"))
+            if old_job in job_renames:
+                rec["JOB No"] = job_renames[old_job]
+
+    for rid, old in current_by_id["发货批次"].items():
+        new = incoming_by_id["发货批次"].get(rid)
+        if not new:
+            continue
+        old_batch = core.s(old.get("发货批次"))
+        new_batch = core.s(new.get("发货批次"))
+        if not old_batch or old_batch == new_batch:
+            continue
+        job = core.s(new.get("JOB No"))
+        for dev in incoming["设备台账"]:
+            if (core.s(dev.get("JOB No")) == job
+                    and core.s(dev.get("发货批次")) == old_batch):
+                dev["发货批次"] = new_batch
+        for table in ("开票记录", "回款记录"):
+            for rec in incoming[table]:
+                if core.s(rec.get("JOB No")) == job:
+                    rec["覆盖批次"] = _replace_coverage_token(
+                        rec.get("覆盖批次"), old_batch, new_batch
+                    )
+
+    for rid, old in current_by_id["设备台账"].items():
+        new = incoming_by_id["设备台账"].get(rid)
+        if not new:
+            continue
+        old_serial = core.s(old.get("製造番号"))
+        new_serial = core.s(new.get("製造番号"))
+        if not old_serial or old_serial == new_serial:
+            continue
+        job = core.s(new.get("JOB No"))
+        for table in ("开票记录", "回款记录"):
+            for rec in incoming[table]:
+                if core.s(rec.get("JOB No")) == job:
+                    rec["覆盖製造番号"] = _replace_coverage_token(
+                        rec.get("覆盖製造番号"), old_serial, new_serial
+                    )
+
+    for rid, old in current_by_id["付款条件"].items():
+        new = incoming_by_id["付款条件"].get(rid)
+        if not new:
+            continue
+        old_kind = core.s(old.get("款类"))
+        new_kind = core.s(new.get("款类"))
+        if not old_kind or old_kind == new_kind:
+            continue
+        job = core.s(new.get("JOB No"))
+        if any(rec is not new and core.s(rec.get("JOB No")) == job
+               and core.s(rec.get("款类")) == old_kind
+               for rec in incoming["付款条件"]):
+            continue
+        for table in ("开票记录", "回款记录"):
+            for rec in incoming[table]:
+                if (core.s(rec.get("JOB No")) == job
+                        and core.s(rec.get("款类")) == old_kind):
+                    rec["款类"] = new_kind
+
+    return incoming
+
+
 def prepare_editable_import(database_path, workbook_path):
     database_path = os.path.abspath(os.fspath(database_path))
     workbook_path = os.path.abspath(os.fspath(workbook_path))
@@ -726,6 +834,7 @@ def prepare_editable_import(database_path, workbook_path):
                 rec[field] = _cell_value(cell, field, field_type, table, row_number)
             incoming[table].append(rec)
 
+    incoming = _propagate_import_relational_edits(current, incoming)
     prepared_data, issues = _prepare_data(incoming)
     changes, action_counts, table_counts = _diff_data(current, prepared_data)
     stat = os.stat(workbook_path)

@@ -1,4 +1,4 @@
-# BKTC Ledger 工程交接（v1.2.0）
+# BKTC Ledger 工程交接（v1.3.0）
 
 ## 当前架构
 
@@ -52,7 +52,10 @@ pywebview UI
 - 切表必须清空 `selection`/`anchor`，避免索引跨表复用。
 - 合同删除由 `tryCascadeDelete` 独占；取消任一次确认不得退回普通删除。
 - 所有新行/复制行/拆分批次必须生成新 `记录ID`；后端仍会补齐缺失或重复 ID。
-- 修改合同 JOB No 时同步五个子表；修改发货批次名时同步设备和覆盖批次。
+- 合同客户自动映射到五个子表；客户与 JOB 筛选在六表间保持，并可交叉筛选。
+- 修改合同 JOB No、发货批次名、设备番号或付款条款款类时同步关联表；Excel 回导按稳定记录 ID 做同样传播。
+- 开票/回款覆盖使用按批次分组的设备多选；同设备范围的多笔开票/回款金额累计计算。
+- 设置页选择的 DB/XLSX 路径保存在当前用户配置目录，启动参数与环境变量仍可覆盖。
 - 切换数据库前处理未保存状态；窗口关闭使用 `beforeunload` 保护。
 
 ## 验证
@@ -60,7 +63,7 @@ pywebview UI
 ```bash
 cd /Users/danielzhu/projects/订单整理/BKTC_Ledger
 .venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m py_compile app.py core.py database.py build_ledger_main.py
+.venv/bin/python -m py_compile app.py core.py database.py build_ledger_main.py create_portable_starter.py
 node --check ui/app.js
 ```
 
@@ -68,9 +71,9 @@ node --check ui/app.js
 
 ## 打包与发布
 
-`.github/workflows/build.yml` 在 `windows-latest` / `macos-latest` 上安装依赖、运行 unittest，再用 PyInstaller onedir 打包。push 到主分支触发构建；tag `v*` 还会创建 Release。
+`.github/workflows/build.yml` 在 `windows-latest` / `macos-latest` 上安装依赖、运行 unittest，再用 PyInstaller onedir 打包。PR 与 push 到主分支触发构建；产物内含空白启动 DB/XLSX，tag `v*` 还会创建 Release（Windows zip、macOS tar.gz）。
 
-发布流程使用 `github:yeet`：从 `agent/*` 分支提交并推送，创建 draft PR。版本升级时再由维护者决定是否打 `v1.2.0` tag；本任务不自动创建 Release tag。
+发布流程使用 `github:yeet`：从 `agent/*` 分支提交并推送，创建 draft PR。版本升级时再由维护者决定是否打 `v1.3.0` tag；本任务不自动创建 Release tag。
 
 ## 外部同步
 

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """BKTC 台账维护工具（pywebview 桌面壳，macOS / Windows 通用）。"""
 import argparse
+import json
 import os
 import re
 import shutil
@@ -14,7 +15,7 @@ import urllib.request
 import uuid
 import zipfile
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 
 IS_FROZEN = bool(getattr(sys, "frozen", False))
@@ -40,17 +41,80 @@ def _tag_from_location(url):
     m = re.search(r"/releases/tag/(?:v|V)?([0-9][0-9.]*)", url or "")
     return m.group(1) if m else ""
 
+
+def _default_config_path():
+    if os.name == "nt":
+        root = os.environ.get("APPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Roaming"
+        )
+    elif sys.platform == "darwin":
+        root = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        root = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+            os.path.expanduser("~"), ".config"
+        )
+    return os.path.join(root, "BKTC_Ledger", "config.json")
+
+
+def _load_config(path=None):
+    try:
+        with open(path or _default_config_path(), encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: os.path.abspath(os.path.expanduser(value))
+        for key in ("database_path", "xlsx_path")
+        if isinstance((value := raw.get(key)), str) and value.strip()
+    }
+
+
+def _save_config(database_path, xlsx_path, path=None):
+    path = os.path.abspath(os.path.expanduser(path or _default_config_path()))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "database_path": os.path.abspath(database_path),
+                "xlsx_path": os.path.abspath(xlsx_path),
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    os.replace(temporary, path)
+
 def _portable_default(filename, executable=None):
-    """Find bundled data beside the executable, then beside its parent folder."""
+    """Find portable data beside an exe or beside a macOS .app bundle."""
     executable_dir = os.path.dirname(os.path.abspath(executable or sys.executable))
-    candidates = [
-        os.path.join(executable_dir, filename),
-        os.path.join(os.path.dirname(executable_dir), filename),
-    ]
+    candidates = []
+    directory = executable_dir
+    for _ in range(4):
+        candidate = os.path.join(directory, filename)
+        if candidate not in candidates:
+            candidates.append(candidate)
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
     for candidate in candidates:
         if os.path.exists(candidate):
             return candidate
+    for directory in [executable_dir, *[os.path.dirname(x) for x in candidates]]:
+        if directory.lower().endswith(".app"):
+            return os.path.join(os.path.dirname(directory), filename)
     return candidates[0]
+
+
+def _source_default(filename, legacy_path, platform=None):
+    """Keep the existing macOS workspace default; use project-local files elsewhere."""
+    platform = sys.platform if platform is None else platform
+    if platform == "darwin" and os.path.exists(legacy_path):
+        return legacy_path
+    return os.path.join(APP_DIR, filename)
 
 
 if IS_FROZEN:
@@ -58,9 +122,18 @@ if IS_FROZEN:
     DEFAULT_DATABASE = _portable_default("BKTC_Ledger.db")
     DEFAULT_LEGACY_JSON = _portable_default("BKTC_Ledger.records.json")
 else:
-    DEFAULT_XLSX = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx"
-    DEFAULT_DATABASE = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.db"
-    DEFAULT_LEGACY_JSON = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.records.json"
+    DEFAULT_XLSX = _source_default(
+        "BKTC_Ledger.xlsx",
+        r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx",
+    )
+    DEFAULT_DATABASE = _source_default(
+        "BKTC_Ledger.db",
+        r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.db",
+    )
+    DEFAULT_LEGACY_JSON = _source_default(
+        "BKTC_Ledger.records.json",
+        r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.records.json",
+    )
 
 
 def schema_for_js():
@@ -75,11 +148,12 @@ def schema_for_js():
 
 
 class Api:
-    def __init__(self, xlsx_path, data_path, legacy_json_path=None):
+    def __init__(self, xlsx_path, data_path, legacy_json_path=None, config_path=None):
         self.xlsx_path = xlsx_path
         self.database_path = ""
         self.database_revision = None
         self.legacy_json_path = None
+        self.config_path = config_path
         self._pending_imports = {}
         self._set_data_path(data_path)
         if legacy_json_path and not str(data_path).lower().endswith(".json"):
@@ -115,6 +189,12 @@ class Api:
         data = database.load_database(self.database_path)
         info = database.get_database_info(self.database_path)
         self.database_revision = info["revision"]
+        config_warning = None
+        if self.config_path:
+            try:
+                _save_config(self.database_path, self.xlsx_path, self.config_path)
+            except OSError as exc:
+                config_warning = f"路径已切换，但无法保存下次启动设置：{exc}"
         return {"store_path": self.database_path, "database_path": self.database_path,
                 "xlsx_path": self.xlsx_path,
                 "data": data, "schema": schema_for_js(),
@@ -122,6 +202,7 @@ class Api:
                 "database_info": info,
                 "migration": bool(migration and migration.get("migrated")),
                 "migration_source": migration.get("source") if migration else None,
+                "config_warning": config_warning,
                 "version": __version__}
 
     def save_data(self, data, rules=None):
@@ -245,7 +326,8 @@ class Api:
         避开 API 匿名 60 次/时限流；资产下载 URL 直接构造（公开库免鉴权）。"""
         latest_url = f"https://github.com/{REPO}/releases/latest"
         want = "macOS" if sys.platform == "darwin" else "Windows"
-        asset_name = f"BKTC_Ledger-{want}.tar.gz"
+        asset_name = (f"BKTC_Ledger-{want}.tar.gz" if sys.platform == "darwin"
+                      else f"BKTC_Ledger-{want}.zip")
         try:
             req = urllib.request.Request(latest_url, headers={"User-Agent": "BKTC_Ledger"})
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -303,19 +385,31 @@ class Api:
 
 
 def main():
+    config_path = _default_config_path()
+    config = _load_config(config_path)
     ap = argparse.ArgumentParser(description="BKTC 台账维护工具")
-    ap.add_argument("--xlsx", default=os.environ.get("BKTC_XLSX", DEFAULT_XLSX),
+    ap.add_argument("--xlsx",
                     help="台账 Excel 路径（可用 --xlsx 或界面选择）")
-    ap.add_argument("--database", default=os.environ.get("BKTC_DATABASE"),
+    ap.add_argument("--database",
                     help="SQLite 数据库路径")
-    ap.add_argument("--store", default=os.environ.get("BKTC_STORE"),
+    ap.add_argument("--store",
                     help="兼容旧版：records.json 路径（首次启动迁移为同目录 .db）")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
-    data_path = args.database or args.store or DEFAULT_DATABASE
+    xlsx_path = (
+        args.xlsx or os.environ.get("BKTC_XLSX")
+        or config.get("xlsx_path") or DEFAULT_XLSX
+    )
+    data_path = (
+        args.database or args.store or os.environ.get("BKTC_DATABASE")
+        or os.environ.get("BKTC_STORE") or config.get("database_path")
+        or DEFAULT_DATABASE
+    )
     legacy_json = DEFAULT_LEGACY_JSON if data_path == DEFAULT_DATABASE else None
-    api = Api(args.xlsx, data_path, legacy_json_path=legacy_json)
+    api = Api(
+        xlsx_path, data_path, legacy_json_path=legacy_json, config_path=config_path
+    )
     webview.create_window(
         "BKTC 台账维护工具",
         os.path.join(APP_DIR, "ui", "index.html"),

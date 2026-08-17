@@ -13,10 +13,10 @@
 
 ## 日常工作流
 
-1. macOS 双击 `启动.command`；Windows 双击 `启动.bat` 或已打包的 `BKTC_Ledger.exe`。
-2. 首次使用在「设置」选择本地 `.db`；也可选择旧 `*.records.json` 自动迁移。再选择生成用 `.xlsx` 路径。
+1. macOS 双击 `启动.command`；Windows Release 完整解压后双击 `BKTC_Ledger.exe`，源码包双击 `启动.bat`（会在缺失时创建空白 DB/XLSX）。
+2. 首次使用可直接打开发布包内的空白 DB/XLSX，或在「设置」选择本地 `.db`（也可选择旧 `*.records.json` 自动迁移）及生成用 `.xlsx`；选择会保存到当前用户配置并在下次启动恢复。
 3. 推荐点「＋ 新建订单」，一次填写订单头、设备、首批发货和付款条件，自动建立六表记录与稳定记录 ID。
-4. 在六个业务页编辑；设备/条款变更后，批次合计、合同汇总、验收状态、应收回款日等自动重算。
+4. 在六个业务页编辑；五张子表的客户由 JOB 自动带入，批次合计、合同汇总、验收状态、应收日、回款状态和超期天数都会自动重算。
 5. 点「保存数据库」；有错误时应用会切回摘要页并拒绝写入。
 6. 点「生成台账」重建 Excel；旧台账自动进入 `备份/`。
 
@@ -34,9 +34,11 @@
 
 ## 主要操作
 
-- 筛选/排序：点列名排序；点 `▾` 勾选值；JOB No 筛选跨六表同步。
+- 筛选/排序：点列名排序；点 `▾` 勾选值；客户与 JOB No 筛选都跨六表保留，两者可交叉缩小范围。
 - 批量录入：在单元格直接粘贴 Excel TSV，多行自动扩展。
-- 关联改名：修改合同 JOB No 会同步六表；修改发货批次名会同步设备及开票/回款覆盖批次。
+- 回款覆盖：按批次分组勾选设备，可一次选几十台；已选番号和批次自动回写。有设备的有效回款不允许空覆盖保存。
+- 金额口径：同款类、同设备范围的多笔开票/回款会累计，番号明细仍优先于历史批次兜底，避免重复计算。
+- 关联改名：修改合同 JOB、批次名、设备番号或付款条款款类，会同步相关表；Excel 回导也根据稳定记录 ID 执行同样的关系传播。
 - 拆分批次：按型号或单台选择设备移入新批次，自动重算汇总。
 - 删除订单：合同页选择 JOB 后两次确认，六表级联删除；取消确认不会发生任何删除。
 - 跨表查询：按任意基础表查询并带出合同、批次或付款条件字段，可预览和导出。
@@ -51,6 +53,7 @@ database.py            SQLite、JSON 迁移、事务、备份、Excel 差异导�
 build_ledger_main.py   导航页/未回收表/JOB 页生成引擎
 ui/                    HTML / CSS / JavaScript 界面
 tests/                 数据库、回导和生成引擎回归测试
+create_portable_starter.py  发布包空白 DB/XLSX 生成器
 ```
 
 依赖为 Python 3.11+、pywebview 与 openpyxl。应用界面使用 Kanken 参考色：主蓝 `#004494`、青绿 `#13BCBC`、近黑 `#1C1C1C`，字体优先 `Noto Sans SC` 并提供系统中文字体回退。
@@ -67,6 +70,6 @@ node --check ui/app.js
 
 ## 数据与发布
 
-`.db`、`.db-wal`、`.db-shm`、`*.records.json`、`.xlsx` 与 `备份/` 已被 `.gitignore` 排除，不会上传 GitHub。GitHub Actions 在 macOS/Windows 上先执行回归测试，再打包应用；tag `v*` 会创建 Release。
+真实 `.db`、`.db-wal`、`.db-shm`、`*.records.json`、`.xlsx` 与 `备份/` 已被 `.gitignore` 排除，客户数据不会上传 GitHub。Release 会在构建时放入可直接打开的空白 `BKTC_Ledger.db` 和 `BKTC_Ledger.xlsx`；正式使用时在设置页选择本机真实数据文件。GitHub Actions 在 macOS/Windows 上先执行回归测试，再打包应用；tag `v*` 会创建 Release。
 
 完整审计结论见 [AUDIT.md](AUDIT.md)。Windows 说明见 [README_win.md](README_win.md)。

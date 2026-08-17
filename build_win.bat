@@ -29,8 +29,13 @@ if errorlevel 1 (
 
 echo === PyInstaller build (onedir, unsigned) ===
 pyinstaller --noconfirm --windowed --clean --name BKTC_Ledger --add-data "ui;ui" --collect-all webview --hidden-import "webview.platforms.edgechromium" app.py
+python create_portable_starter.py dist\BKTC_Ledger
+if errorlevel 1 (
+  echo [X] Failed to create starter DB/XLSX.
+  pause & exit /b 1
+)
 
 echo.
-echo === Done. Output: dist\BKTC_Ledger\ (copy the WHOLE folder to users) ===
+echo === Done. Output: dist\BKTC_Ledger\ (includes starter DB/XLSX) ===
 echo See README_win.md for SmartScreen / antivirus / data-file notes.
 pause

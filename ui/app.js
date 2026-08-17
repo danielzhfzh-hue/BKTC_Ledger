@@ -4,6 +4,7 @@ const state = {
   storePath: "", xlsxPath: "", data: null, schema: null,
   tab: "摘要", dirty: false, selection: new Set(), anchor: null,
   filter: "", colFilters: {}, sortBy: {}, rules: {}, jobFilter: null,
+  customerFilter: null,
   version: "?", update: null, databaseInfo: null, pendingImport: null,
 };
 
@@ -11,17 +12,29 @@ const ROW_H = 31, BUFFER = 20;
 
 const TAB_HINTS = {
   "合同订单": "本页 = 合同头信息。总台数、设备型号和付款条件文本自动汇总；修改 JOB No 会同步更新六表关联。推荐用顶部“新建订单”。",
-  "付款条件": "本页 = 结构化付款方式（款类/比例/账期/触发条件/说明），比例合计须 100%。说明会自动汇总到合同页的付款条件文本。",
+  "付款条件": "本页 = 结构化付款方式（款类/比例/账期/触发条件/说明），比例合计须 100%。客户由合同自动带入；条款款类改名会同步对应开票/回款。",
   "设备台账": "本页 = 每台设备一行（含发货批次归属、质保时间、验收状态）。改设备属于哪个批次就在这里改“发货批次”列。",
   "发货批次": "本页改出荷日或批次名；直接改名与“重命名批次”都会同步设备及开票/回款覆盖批次。台数、合计和覆盖番号自动计算。",
-  "开票记录": "本页 = 每笔开票一行（款类/开票日/金额/覆盖批次/覆盖番号/账期/应收回款日/回款状态）。覆盖台数自动算。",
-  "回款记录": "本页 = 每笔回款一行（款类/回款日/金额/覆盖批次/覆盖番号）。覆盖台数自动算。",
+  "开票记录": "每笔开票一行。点“覆盖批次/覆盖製造番号”按批次批量勾设备；客户、覆盖台数、应收回款日和回款状态自动计算。",
+  "回款记录": "每笔回款一行。填款类/回款日/金额后，点覆盖列按批次勾选设备；到期日、是否超期、超期天数自动计算。",
 };
 
 const $ = (id) => document.getElementById(id);
 function s(v) { return v === null || v === undefined ? "" : String(v); }
 function coverageValues(value) {
   return s(value).split(/[;；\r\n]+/).map((x) => x.trim()).filter(Boolean);
+}
+function replaceCoverageValue(value, previous, next) {
+  if (!previous || previous === next) return value;
+  let changed = false;
+  const items = coverageValues(value).map((item) => {
+    const pieces = item.split(/([→⇒⟶➡➝])/);
+    for (let i = 0; i < pieces.length; i += 2) {
+      if (pieces[i] === previous) { pieces[i] = next; changed = true; }
+    }
+    return pieces.join("");
+  });
+  return changed ? items.join(";") : value;
 }
 let _localIdCounter = 0;
 function newLocalId() {
@@ -90,9 +103,8 @@ function currentContext() {
   const cf = state.colFilters[state.tab] || {};
   const ctx = { job: "", customer: "" };
   if (state.jobFilter && state.jobFilter.size === 1) ctx.job = [...state.jobFilter][0];
-  if (state.tab === "合同订单") {
-    const cs = cf["客户"];
-    if (cs && cs.size === 1) ctx.customer = [...cs][0];
+  if (state.customerFilter && state.customerFilter.size === 1) {
+    ctx.customer = [...state.customerFilter][0];
   }
   return ctx;
 }
@@ -214,9 +226,18 @@ function validateAll() {
   const deviceSerials = new Set(state.data["设备台账"]
     .filter((d) => s(d["製造番号"]))
     .map((d) => s(d["JOB No"]) + "|" + s(d["製造番号"])));
+  const jobsWithDevices = new Set(state.data["设备台账"].map((d) => s(d["JOB No"])));
   for (const table of ["开票记录", "回款记录"]) {
     for (const rec of state.data[table]) {
       const job = s(rec["JOB No"]);
+      if (table === "回款记录") {
+        const meaningful = s(rec["款类"]) || s(rec["回款日"])
+          || ![null, undefined, "", 0].includes(rec["含税金额"]);
+        if (meaningful && jobsWithDevices.has(job)
+            && !s(rec["覆盖批次"]) && !s(rec["覆盖製造番号"])) {
+          issues.push({ severity: "error", msg: `${job} 回款必须选择覆盖批次或设备，否则该笔金额不会参与未回收计算` });
+        }
+      }
       for (const batch of coverageValues(rec["覆盖批次"])) {
         if (!shipmentKeys.has(job + "|" + batch)) {
           issues.push({ severity: "error", msg: `${table} ${job} 覆盖了不存在的批次：${batch}` });
@@ -318,11 +339,12 @@ function visibleRows(table) {
     const rec = recs[i];
     let keep = true;
     for (const f in cf) {
-      if (f === "JOB No") continue; // JOB 走全局 jobFilter，跨表共享
+      if (f === "JOB No" || f === "客户") continue;
       const set = cf[f];
       if (set && !set.has(String(rec[f] ?? ""))) { keep = false; break; }
     }
     if (keep && state.jobFilter && !state.jobFilter.has(String(rec["JOB No"] ?? ""))) keep = false;
+    if (keep && state.customerFilter && !state.customerFilter.has(String(rec["客户"] ?? ""))) keep = false;
     if (keep && q && !Object.values(rec).join(" ").toLowerCase().includes(q)) keep = false;
     if (keep) idxs.push(i);
   }
@@ -340,52 +362,165 @@ function visibleRows(table) {
   return idxs;
 }
 
+function coverageContains(text, serial) {
+  return coverageValues(text).some((item) =>
+    item === serial || item.split(/[→⇒⟶➡➝]/).includes(serial));
+}
+
+function coverageMatches(record, device) {
+  const serialText = s(record["覆盖製造番号"]);
+  const serial = s(device["製造番号"]);
+  const batch = s(device["发货批次"]);
+  const batches = new Set(coverageValues(record["覆盖批次"]));
+  if (serialText && serial) return coverageContains(serialText, serial) && (!batches.size || batches.has(batch));
+  return batches.size > 0 && batches.has(batch);
+}
+
+function matchingCoverageRecords(records, device) {
+  const explicit = records.filter((r) => s(r["覆盖製造番号"]) && coverageMatches(r, device));
+  return explicit.length ? explicit
+    : records.filter((r) => !s(r["覆盖製造番号"]) && coverageMatches(r, device));
+}
+
+function isoDateValue(value) {
+  const m = s(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const dt = new Date(ms);
+  if (dt.getUTCFullYear() !== Number(m[1]) || dt.getUTCMonth() !== Number(m[2]) - 1 || dt.getUTCDate() !== Number(m[3])) return null;
+  return ms;
+}
+
+function isoFromMs(ms) {
+  const dt = new Date(ms);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+}
+
 function recomputeDerived() {
-  // 镜像 core.derive() 的派生聚合（仅显示用；save 时后端 derive 仍权威落盘）
+  // 镜像 core.derive()：前端即时显示，保存时后端再权威计算。
   const d = state.data;
   if (!d) return;
-  const devBy = {};
+  const customerByJob = {};
+  for (const c of d["合同订单"]) customerByJob[s(c["JOB No"])] = s(c["客户"]);
+  for (const table of ["付款条件", "设备台账", "发货批次", "开票记录", "回款记录"]) {
+    for (const rec of d[table]) rec["客户"] = customerByJob[s(rec["JOB No"])] || "";
+  }
+
+  const devBy = {}, devicesByJob = {};
   for (const dev of d["设备台账"]) {
-    const k = s(dev["JOB No"]) + "" + s(dev["发货批次"]);
-    (devBy[k] ||= []).push(dev);
+    const job = s(dev["JOB No"]);
+    (devBy[job + "\u0001" + s(dev["发货批次"])] ||= []).push(dev);
+    (devicesByJob[job] ||= []).push(dev);
   }
   for (const x of d["发货批次"]) {
-    const devs = devBy[s(x["JOB No"]) + "" + s(x["发货批次"])] || [];
+    const devs = devBy[s(x["JOB No"]) + "\u0001" + s(x["发货批次"])] || [];
     x["台数"] = devs.length;
     x["未税合计"] = Math.round(devs.reduce((a, v) => a + (Number(v["未税单价"]) || 0), 0) * 1000) / 1000;
     x["含税合计"] = Math.round(x["未税合计"] * 1.13 * 100) / 100;
     x["覆盖製造番号"] = devs.map((v) => s(v["製造番号"])).filter(Boolean).join(";");
   }
-  const cnt = {}, models = {};
-  const termsByJob = {};
+
+  const cnt = {}, models = {}, termsByJob = {};
   for (const t of d["付款条件"]) (termsByJob[s(t["JOB No"])] ||= []).push(t);
   for (const dev of d["设备台账"]) {
-    const j = s(dev["JOB No"]);
-    cnt[j] = (cnt[j] || 0) + 1;
-    (models[j] ||= new Set()).add(s(dev["设备型号"]));
+    const job = s(dev["JOB No"]);
+    cnt[job] = (cnt[job] || 0) + 1;
+    (models[job] ||= new Set()).add(s(dev["设备型号"]));
     dev["验收状态"] = s(dev["质保开始日"]) ? "已验收" : "未验收";
   }
   for (const c of d["合同订单"]) {
-    const j = s(c["JOB No"]);
-    c["总台数"] = cnt[j] || 0;
-    if (!s(c["设备型号"])) c["设备型号"] = [...(models[j] || new Set())].filter((m) => m).sort().join(";");
-    const terms = termsByJob[j] || [];
-    if (terms.length) {
-      const desc = terms.map((t) => s(t["说明"]).trim()).filter(Boolean).join("；");
-      if (desc) c["付款条件"] = desc;
+    const job = s(c["JOB No"]);
+    c["总台数"] = cnt[job] || 0;
+    if (!s(c["设备型号"])) c["设备型号"] = [...(models[job] || new Set())].filter(Boolean).sort().join(";");
+    const desc = (termsByJob[job] || []).map((t) => s(t["说明"]).trim()).filter(Boolean).join("；");
+    if (desc) c["付款条件"] = desc;
+  }
+
+  for (const table of ["开票记录", "回款记录"]) {
+    for (const rec of d[table]) {
+      const serials = new Set(coverageValues(rec["覆盖製造番号"]));
+      rec["覆盖台数"] = serials.size;
+      if (serials.size) {
+        const batches = [];
+        let safeToRebuild = true;
+        const jobDevices = devicesByJob[s(rec["JOB No"])] || [];
+        for (const token of serials) {
+          const parts = new Set(token.split(/[→⇒⟶➡➝]/).filter(Boolean));
+          const matches = jobDevices.filter((dev) =>
+            s(dev["製造番号"]) === token || parts.has(s(dev["製造番号"])));
+          if (matches.length !== 1) { safeToRebuild = false; break; }
+          const batch = s(matches[0]["发货批次"]);
+          if (batch && !batches.includes(batch)) batches.push(batch);
+        }
+        const blankSerialBatches = new Set(jobDevices
+          .filter((dev) => !s(dev["製造番号"]))
+          .map((dev) => s(dev["发货批次"])));
+        const removesBlankSerialBatch = coverageValues(rec["覆盖批次"])
+          .some((batch) => !batches.includes(batch) && blankSerialBatches.has(batch));
+        if (removesBlankSerialBatch) safeToRebuild = false;
+        if (safeToRebuild && batches.length) rec["覆盖批次"] = batches.join(";");
+      }
+      if (table === "开票记录") {
+        const opened = isoDateValue(rec["开票日"]);
+        rec["应收回款日"] = opened === null ? ""
+          : isoFromMs(opened + (parseInt(rec["账期天数"], 10) || 0) * 86400000);
+      }
     }
   }
-  for (const t of ["开票记录", "回款记录"]) {
-    for (const x of d[t]) {
-      const set = new Set(coverageValues(x["覆盖製造番号"]));
-      x["覆盖台数"] = set.size;
-      if (t === "开票记录") {
-        const m = s(x["开票日"]).match(/^(\d{4})-(\d{2})-(\d{2})/);
-        if (m) {
-          const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + (parseInt(x["账期天数"], 10) || 0));
-          x["应收回款日"] = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
-        }
+
+  const invoicesByJob = {}, paymentsByJob = {};
+  for (const inv of d["开票记录"]) (invoicesByJob[s(inv["JOB No"])] ||= []).push(inv);
+  for (const pay of d["回款记录"]) (paymentsByJob[s(pay["JOB No"])] ||= []).push(pay);
+  const coveredDevices = (rec, jobDevices) => jobDevices.filter((dev) =>
+    s(dev["是否无偿"]) !== "是" && coverageMatches(rec, dev));
+  const allocatedAmount = (rec, selectedDevices, jobDevices) => {
+    const covered = coveredDevices(rec, jobDevices);
+    const coveredSet = new Set(covered);
+    const total = covered.reduce((sum, dev) => sum + (Number(dev["未税单价"]) || 0), 0);
+    const selected = selectedDevices.reduce((sum, dev) =>
+      sum + (coveredSet.has(dev) ? (Number(dev["未税单价"]) || 0) : 0), 0);
+    return total ? (Number(rec["含税金额"]) || 0) * selected / total : 0;
+  };
+  const today = Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+  for (const inv of d["开票记录"]) {
+    const meaningful = s(inv["款类"]) || s(inv["开票日"]) || Number(inv["含税金额"]) || s(inv["覆盖批次"]) || s(inv["覆盖製造番号"]);
+    if (!meaningful) { inv["回款状态"] = ""; continue; }
+    const job = s(inv["JOB No"]), kind = s(inv["款类"]), jobDevices = devicesByJob[job] || [];
+    const candidates = (paymentsByJob[job] || []).filter((p) => kind === "全额" || s(p["款类"]) === kind);
+    const relatedInvoices = (invoicesByJob[job] || []).filter((other) => s(other["款类"]) === kind);
+    const invDevices = coveredDevices(inv, jobDevices);
+    const paid = jobDevices.length
+      ? candidates.reduce((sum, p) => sum + allocatedAmount(p, invDevices, jobDevices), 0)
+      : candidates.reduce((sum, p) => sum + (Number(p["含税金额"]) || 0), 0);
+    const invoiced = jobDevices.length
+      ? relatedInvoices.reduce((sum, other) => sum + allocatedAmount(other, invDevices, jobDevices), 0)
+      : relatedInvoices.reduce((sum, other) => sum + (Number(other["含税金额"]) || 0), 0);
+    const amount = invoiced || Number(inv["含税金额"]) || 0;
+    const due = isoDateValue(inv["应收回款日"]);
+    inv["回款状态"] = amount > 0 && paid >= amount - 0.01 ? "已回款"
+      : paid > 0.01 ? "部分回款" : due !== null && due < today ? "超期未回" : "未回款";
+  }
+  for (const pay of d["回款记录"]) {
+    const job = s(pay["JOB No"]), kind = s(pay["款类"]), jobDevices = devicesByJob[job] || [];
+    const candidates = (invoicesByJob[job] || []).filter((inv) => [kind, "全额"].includes(s(inv["款类"])));
+    let relevant = candidates;
+    if (jobDevices.length) {
+      relevant = [];
+      for (const dev of coveredDevices(pay, jobDevices)) {
+        for (const inv of matchingCoverageRecords(candidates, dev)) if (!relevant.includes(inv)) relevant.push(inv);
       }
+    }
+    const dues = relevant.map((inv) => isoDateValue(inv["应收回款日"])).filter((v) => v !== null);
+    const due = dues.length ? Math.min(...dues) : null;
+    pay["对应应收回款日"] = due === null ? "" : isoFromMs(due);
+    const paidOn = isoDateValue(pay["回款日"]);
+    if (due !== null && paidOn !== null) {
+      const days = Math.max(0, Math.round((paidOn - due) / 86400000));
+      pay["是否超期"] = days ? "是" : "否";
+      pay["超期天数"] = days;
+    } else {
+      pay["是否超期"] = "";
+      pay["超期天数"] = null;
     }
   }
 }
@@ -401,7 +536,9 @@ function renderGrid() {
   const head = `<tr><th class="cb"></th>` +
     fields.map((f) => {
       const ind = (so && so.field === f.name) ? (so.dir === 1 ? "▲" : "▼") : "";
-      const act = (f.name === "JOB No" ? state.jobFilter : cfT[f.name]) ? " filt-on" : "";
+      const activeFilter = f.name === "JOB No" ? state.jobFilter
+        : (f.name === "客户" ? state.customerFilter : cfT[f.name]);
+      const act = activeFilter ? " filt-on" : "";
       return `<th class="col-h${act}" data-field="${esc(f.name)}" title="${esc(f.name)}（点击排序）">` +
         `<span class="col-h-name">${esc(f.name)}${f.derived ? " (自动)" : ""}</span>` +
         `<span class="sort-ind">${ind}</span>` +
@@ -427,6 +564,14 @@ function renderGrid() {
       if (f.derived) {
         return `<td class="auto" title="自动计算"><span>${esc(v)}</span></td>`;
       }
+      if (["开票记录", "回款记录"].includes(table)
+          && ["覆盖批次", "覆盖製造番号"].includes(f.name)) {
+        const values = coverageValues(v);
+        const label = f.name === "覆盖批次"
+          ? (values.length ? values.join("、") : "选择批次")
+          : (values.length ? `${values.length} 台设备` : "勾选设备");
+        return `<td class="coverage-cell"><button type="button" class="coverage-picker" data-coverage-field="${esc(f.name)}" title="按批次或设备批量勾选">${esc(label)} <span>▾</span></button></td>`;
+      }
       if (f.type === "select") {
         const opts = ["", ...f.options].map((o) =>
           `<option value="${esc(o)}" ${String(v) === String(o) ? "selected" : ""}>${esc(o || "（空）")}</option>`).join("");
@@ -451,6 +596,7 @@ function renderGrid() {
   $("gridHead").innerHTML = head;
   const hint = $("tabHint");
   let h = TAB_HINTS[table] || "";
+  if (state.customerFilter) h += `　［跨表客户筛选：${[...state.customerFilter].map(esc).join("、")}］`;
   if (state.jobFilter) h += `　［跨表 JOB 筛选：${[...state.jobFilter].map(esc).join("、")}］`;
   hint.textContent = h;
 }
@@ -465,7 +611,7 @@ function applySelectionClasses() {
   });
 }
 
-function updateRec(table, ri, field, raw) {
+function updateRec(table, ri, field, raw, deferRecompute = false) {
   const f = fieldsOf(table).find((x) => x.name === field);
   if (!f || f.derived) return;
   const rec = state.data[table][ri];
@@ -493,14 +639,39 @@ function updateRec(table, ri, field, raw) {
     for (const child of ["开票记录", "回款记录"]) {
       for (const row of state.data[child]) {
         if (s(row["JOB No"]) !== job) continue;
-        const batches = coverageValues(row["覆盖批次"]);
-        if (batches.includes(previous)) row["覆盖批次"] = batches.map((x) => x === previous ? next : x).join(";");
+        row["覆盖批次"] = replaceCoverageValue(row["覆盖批次"], previous, next);
+      }
+    }
+  }
+  if (table === "设备台账" && field === "製造番号" && previous !== s(v)) {
+    const job = s(rec["JOB No"]), next = s(v);
+    for (const child of ["开票记录", "回款记录"]) {
+      for (const row of state.data[child]) {
+        if (s(row["JOB No"]) === job) {
+          row["覆盖製造番号"] = replaceCoverageValue(
+            row["覆盖製造番号"], previous, next
+          );
+        }
+      }
+    }
+  }
+  if (table === "付款条件" && field === "款类" && previous !== s(v)) {
+    const job = s(rec["JOB No"]), next = s(v);
+    const oldKindStillExists = state.data["付款条件"].some((row) =>
+      row !== rec && s(row["JOB No"]) === job && s(row["款类"]) === previous);
+    if (!oldKindStillExists) {
+      for (const child of ["开票记录", "回款记录"]) {
+        for (const row of state.data[child]) {
+          if (s(row["JOB No"]) === job && s(row["款类"]) === previous) row["款类"] = next;
+        }
       }
     }
   }
   state.dirty = true;
-  recomputeDerived();
-  renderCounts();
+  if (!deferRecompute) {
+    recomputeDerived();
+    renderCounts();
+  }
 }
 
 $("gridBody").addEventListener("input", (e) => {
@@ -549,7 +720,7 @@ $("gridWrap").addEventListener("scroll", () => {
 
 $("gridBody").addEventListener("mousedown", (e) => {
   if (e.target.closest("td.cb") || e.target.tagName === "INPUT" || e.target.tagName === "SELECT"
-      || e.target.closest("td.date-cell.empty")) return;
+      || e.target.closest("td.date-cell.empty") || e.target.closest(".coverage-picker")) return;
   const tr = e.target.closest("tr");
   if (!tr) return;
   e.preventDefault();
@@ -558,6 +729,12 @@ $("gridBody").addEventListener("mousedown", (e) => {
 
 // 空日期单元格：点击才挂日期选择器（macOS 原生 picker 会把空值显示成"今天"，造成"假数据"错觉）
 $("gridBody").addEventListener("click", (e) => {
+  const picker = e.target.closest(".coverage-picker");
+  if (picker) {
+    const tr = picker.closest("tr[data-ri]");
+    if (tr) openCoverageModal(state.tab, Number(tr.dataset.ri));
+    return;
+  }
   const td = e.target.closest("td.date-cell.empty");
   if (!td) return;
   const field = td.dataset.datefield;
@@ -640,6 +817,7 @@ function tryCascadeDelete(idxs) {
   }
   state.selection = new Set();
   state.jobFilter = null; // 删除的 JOB 可能正被筛，清筛选看全貌
+  state.customerFilter = null;
   state.dirty = true;
   recomputeDerived(); renderGrid(); renderCounts(); renderSummary();
   toast("已删除 " + jobs.length + " 个订单（六表全部数据）");
@@ -782,6 +960,150 @@ $("splitCancel").addEventListener("click", closeSplit);
 $("splitClose").addEventListener("click", closeSplit);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSplit(); });
 
+// 开票/回款覆盖范围：按批次分组的设备多选，避免手输几十个番号。
+function openCoverageModal(table, ri) {
+  if (!["开票记录", "回款记录"].includes(table)) return;
+  const rec = state.data[table]?.[ri];
+  if (!rec) return;
+  const job = s(rec["JOB No"]);
+  const devices = state.data["设备台账"]
+    .map((device, index) => ({ device, index }))
+    .filter(({ device }) => s(device["JOB No"]) === job);
+  const selectedSerials = new Set(coverageValues(rec["覆盖製造番号"]));
+  const selectedBatches = new Set(coverageValues(rec["覆盖批次"]));
+  const groups = new Map();
+  for (const item of devices) {
+    const batch = s(item.device["发货批次"]) || "（无批次）";
+    if (!groups.has(batch)) groups.set(batch, []);
+    groups.get(batch).push(item);
+  }
+  $("coverageTitle").textContent = `${table === "回款记录" ? "回款" : "开票"}覆盖设备`;
+  $("coverageContext").textContent = `${job || "（未填 JOB）"} · ${s(rec["客户"]) || "（无客户）"} · ${s(rec["款类"]) || "（未选款类）"}`;
+  $("coverageSearch").value = "";
+  $("coverageManualBatch").value = s(rec["覆盖批次"]);
+  $("coverageManualSerial").value = s(rec["覆盖製造番号"]);
+  $("coverageList").innerHTML = groups.size ? [...groups.entries()].map(([batch, items]) => {
+    const selectable = items.filter(({ device }) => s(device["製造番号"]));
+    const rows = items.map(({ device, index }) => {
+      const serial = s(device["製造番号"]);
+      const checked = serial && (coverageContains(rec["覆盖製造番号"], serial)
+        || (!selectedSerials.size && selectedBatches.has(s(device["发货批次"]))));
+      const search = [batch, serial, device["機番"], device["设备型号"], device["PO No"]].map(s).join(" ").toLowerCase();
+      return `<label class="coverage-device" data-search="${esc(search)}">` +
+        `<input type="checkbox" class="coverage-device-check" data-index="${index}" ${checked ? "checked" : ""} ${serial ? "" : "disabled"}>` +
+        `<span class="serial">${esc(serial || "（无番号，不可勾选）")}</span>` +
+        `<span>${esc(s(device["设备型号"]) || "—")}</span>` +
+        `<span class="meta">机番 ${esc(s(device["機番"]) || "—")} · ${Number(device["未税单价"] || 0).toLocaleString()}</span></label>`;
+    }).join("");
+    const allChecked = selectable.length && selectable.every(({ device }) =>
+      coverageContains(rec["覆盖製造番号"], s(device["製造番号"]))
+      || (!selectedSerials.size && selectedBatches.has(s(device["发货批次"]))));
+    return `<div class="coverage-group"><label class="coverage-group-head">` +
+      `<input type="checkbox" class="coverage-group-all" ${allChecked ? "checked" : ""}>` +
+      `<b>批次 ${esc(batch)}</b><span class="coverage-group-meta">${items.length} 台</span></label>${rows}</div>`;
+  }).join("") : '<div class="coverage-empty">该 JOB 尚无设备。请展开下方“手工输入”填批次，或先到设备台账建设备。</div>';
+  state._coverage = { table, ri, job, deviceIndexes: devices.map((x) => x.index) };
+  updateCoverageSummary();
+  $("coverageModal").classList.remove("hidden");
+}
+
+function coverageSelectedIndexes() {
+  return [...document.querySelectorAll("#coverageList .coverage-device-check:checked")]
+    .map((box) => Number(box.dataset.index));
+}
+
+function updateCoverageGroupChecks() {
+  document.querySelectorAll("#coverageList .coverage-group").forEach((group) => {
+    const boxes = [...group.querySelectorAll(".coverage-device-check:not(:disabled)")];
+    const all = group.querySelector(".coverage-group-all");
+    if (all) {
+      all.checked = boxes.length > 0 && boxes.every((box) => box.checked);
+      all.indeterminate = boxes.some((box) => box.checked) && !all.checked;
+    }
+  });
+}
+
+function updateCoverageSummary() {
+  const indexes = coverageSelectedIndexes();
+  const batches = new Set(indexes.map((index) => s(state.data["设备台账"][index]?.["发货批次"])));
+  $("coverageSummary").textContent = indexes.length
+    ? `已选 ${indexes.length} 台 · ${[...batches].filter(Boolean).length} 个批次`
+    : "尚未勾选设备；可使用下方手工输入。";
+}
+
+function closeCoverageModal() {
+  $("coverageModal").classList.add("hidden");
+  state._coverage = null;
+}
+
+$("coverageList").addEventListener("change", (e) => {
+  const groupAll = e.target.closest(".coverage-group-all");
+  if (groupAll) {
+    groupAll.closest(".coverage-group").querySelectorAll(".coverage-device-check:not(:disabled)")
+      .forEach((box) => { box.checked = groupAll.checked; });
+  }
+  updateCoverageGroupChecks();
+  updateCoverageSummary();
+});
+$("coverageSearch").addEventListener("input", (e) => {
+  const query = e.target.value.trim().toLowerCase();
+  document.querySelectorAll("#coverageList .coverage-device").forEach((row) => {
+    row.classList.toggle("hidden-by-search", !!query && !row.dataset.search.includes(query));
+  });
+  document.querySelectorAll("#coverageList .coverage-group").forEach((group) => {
+    group.style.display = [...group.querySelectorAll(".coverage-device")]
+      .some((row) => !row.classList.contains("hidden-by-search")) ? "" : "none";
+  });
+});
+$("coverageSelectVisible").addEventListener("click", () => {
+  document.querySelectorAll("#coverageList .coverage-device:not(.hidden-by-search) .coverage-device-check:not(:disabled)")
+    .forEach((box) => { box.checked = true; });
+  updateCoverageGroupChecks();
+  updateCoverageSummary();
+});
+$("coverageClear").addEventListener("click", () => {
+  document.querySelectorAll("#coverageList .coverage-device-check").forEach((box) => { box.checked = false; });
+  $("coverageManualBatch").value = "";
+  $("coverageManualSerial").value = "";
+  updateCoverageGroupChecks();
+  updateCoverageSummary();
+});
+$("coverageApply").addEventListener("click", () => {
+  const context = state._coverage;
+  if (!context) return;
+  const rec = state.data[context.table]?.[context.ri];
+  if (!rec) return closeCoverageModal();
+  const indexes = coverageSelectedIndexes();
+  let serials, batches;
+  if (indexes.length) {
+    serials = [...new Set(indexes.map((index) => s(state.data["设备台账"][index]["製造番号"])).filter(Boolean))];
+    batches = [...new Set(indexes.map((index) => s(state.data["设备台账"][index]["发货批次"])).filter(Boolean))];
+  } else {
+    serials = coverageValues($("coverageManualSerial").value);
+    batches = coverageValues($("coverageManualBatch").value);
+  }
+  const meaningfulPayment = context.table === "回款记录"
+    && (s(rec["款类"]) || s(rec["回款日"]) || Number(rec["含税金额"]));
+  if (meaningfulPayment && context.deviceIndexes.length && !serials.length && !batches.length) {
+    toast("该 JOB 有设备，回款必须勾选设备或填覆盖批次", "error");
+    return;
+  }
+  rec["覆盖製造番号"] = serials.join(";");
+  rec["覆盖批次"] = batches.join(";");
+  state.dirty = true;
+  recomputeDerived();
+  closeCoverageModal();
+  renderGrid();
+  renderCounts();
+  renderSummary();
+  toast(`已应用 ${serials.length ? serials.length + " 台设备" : batches.length + " 个批次"}`, "ok");
+});
+$("coverageCancel").addEventListener("click", closeCoverageModal);
+$("coverageClose").addEventListener("click", closeCoverageModal);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("coverageModal").classList.contains("hidden")) closeCoverageModal();
+});
+
 // 导出筛选结果到 Excel（可选字段）
 function openExportModal() {
   const table = state.tab;
@@ -913,10 +1235,12 @@ function qbTables(base) {
 }
 function qbFieldList(base) {
   const out = [];
+  const baseNames = new Set(querySchema(base).map((field) => field.name));
   for (const t of qbTables(base)) {
     const isBase = (t === base);
     for (const f of querySchema(t)) {
       const name = f.name, type = f.type;
+      if (!isBase && baseNames.has(name)) continue;
       out.push({ table: t, name, type, label: isBase ? name : `${SHORT[t] || t}.${name}` });
     }
   }
@@ -1152,14 +1476,7 @@ function pasteGrid(table, row0, col0, text) {
         field = fields[col0 - 1 + c];
       }
       if (!field || field.derived) continue;
-      if ((table === "合同订单" && field.name === "JOB No") ||
-          (table === "发货批次" && field.name === "发货批次")) {
-        updateRec(table, r, field.name, row[c]);
-      } else {
-        state.data[table][r][field.name] = field.type === "number"
-          ? (row[c] === "" ? null : Number(row[c]))
-          : field.type === "int" ? (row[c] === "" ? null : Math.round(Number(row[c]))) : row[c];
-      }
+      updateRec(table, r, field.name, row[c], true);
     }
     r += 1;
   }
@@ -1171,12 +1488,13 @@ function pasteGrid(table, row0, col0, text) {
 $("btnClearFilter").addEventListener("click", () => {
   state.colFilters[state.tab] = {};
   state.jobFilter = null;
+  state.customerFilter = null;
   delete state.sortBy[state.tab];
   state.filter = "";
   $("filterKeyword").value = "";
   closeColFilter();
   renderGrid();
-  toast("已清除筛选/排序（含 JOB 跨表筛选）");
+  toast("已清除筛选/排序（含客户与 JOB 跨表筛选）");
 });
 
 // 表头：点列名=排序(升→降→取消)；点 ▾=打开该列筛选
@@ -1199,7 +1517,16 @@ $("gridHead").addEventListener("click", (e) => {
 let _cfAllVals = [];
 function openColFilter(field) {
   const table = state.tab;
-  const recs = state.data[table];
+  const isJob = field === "JOB No";
+  const isCustomer = field === "客户";
+  let recs = state.data[table];
+  if (isJob || isCustomer) {
+    recs = state.data["合同订单"].filter((rec) => {
+      if (isJob && state.customerFilter && !state.customerFilter.has(s(rec["客户"]))) return false;
+      if (isCustomer && state.jobFilter && !state.jobFilter.has(s(rec["JOB No"]))) return false;
+      return true;
+    });
+  }
   const dist = new Map();
   for (const r of recs) {
     const k = String(r[field] ?? "");
@@ -1207,11 +1534,11 @@ function openColFilter(field) {
   }
   _cfAllVals = [...dist.keys()].sort((a, b) => a.localeCompare(b, "zh"));
   const allCount = _cfAllVals.length;
-  const isJob = field === "JOB No";
   state.colFilters[table] = state.colFilters[table] || {};
   const set = isJob ? (state.jobFilter || new Set(_cfAllVals))
-                    : (state.colFilters[table][field] || new Set(_cfAllVals));
-  $("colfiltTitle").textContent = `${field}（${allCount} 个值${isJob ? "；此列跨表共享" : ""}）`;
+    : isCustomer ? (state.customerFilter || new Set(_cfAllVals))
+      : (state.colFilters[table][field] || new Set(_cfAllVals));
+  $("colfiltTitle").textContent = `${field}（${allCount} 个值${isJob || isCustomer ? "；此列跨表共享" : ""}）`;
   $("colfiltSearch").value = "";
   $("colfiltAll").checked = set.size >= allCount;
   $("colfiltList").innerHTML = _cfAllVals.map((v) => {
@@ -1232,11 +1559,12 @@ function openColFilter(field) {
 }
 function cfApply(field, value, checked) {
   const table = state.tab;
-  if (field === "JOB No") {
-    let set = state.jobFilter ? new Set(state.jobFilter) : new Set(_cfAllVals);
+  if (field === "JOB No" || field === "客户") {
+    const prop = field === "JOB No" ? "jobFilter" : "customerFilter";
+    let set = state[prop] ? new Set(state[prop]) : new Set(_cfAllVals);
     if (checked) set.add(value); else set.delete(value);
-    state.jobFilter = set.size >= _cfAllVals.length ? null : set;
-    $("colfiltAll").checked = !state.jobFilter;
+    state[prop] = set.size >= _cfAllVals.length ? null : set;
+    $("colfiltAll").checked = !state[prop];
     renderGrid();
     return;
   }
@@ -1259,8 +1587,9 @@ $("colfiltSearch").addEventListener("input", (e) => {
 $("colfiltAll").addEventListener("change", (e) => {
   const field = $("colFilterPop").dataset.field;
   const checked = e.target.checked;
-  if (field === "JOB No") {
-    state.jobFilter = checked ? null : new Set();
+  if (field === "JOB No" || field === "客户") {
+    const prop = field === "JOB No" ? "jobFilter" : "customerFilter";
+    state[prop] = checked ? null : new Set();
     document.querySelectorAll("#colfiltList .cf-item input").forEach((c) => { c.checked = checked; });
     renderGrid();
     return;
@@ -1279,6 +1608,7 @@ $("colfiltList").addEventListener("change", (e) => {
 $("colfiltClear").addEventListener("click", () => {
   const field = $("colFilterPop").dataset.field;
   if (field === "JOB No") state.jobFilter = null;
+  else if (field === "客户") state.customerFilter = null;
   else if (state.colFilters[state.tab]) delete state.colFilters[state.tab][field];
   closeColFilter();
   renderGrid();
@@ -1321,6 +1651,7 @@ function applyBackendState(r) {
     state.databaseInfo = { ...(state.databaseInfo || {}), revision: r.revision,
       integrity: "ok", last_saved_at: new Date().toISOString().slice(0, 19) };
   }
+  if (r.data) recomputeDerived();
 }
 
 async function saveCurrent(silent = false) {
@@ -1576,7 +1907,10 @@ async function refresh(store, xlsx) {
   renderAll();
   renderRules();
   switchTab("摘要");
-  setStatus(r.migration ? `已从旧 JSON 迁移到本地数据库：${r.store_path}` : "就绪");
+  setStatus(r.config_warning || (r.migration
+    ? `已从旧 JSON 迁移到本地数据库：${r.store_path}` : "就绪"),
+    r.config_warning ? "error" : "");
+  if (r.config_warning) toast(r.config_warning, "error");
   if (r.migration) toast("JSON 已无损迁移；原文件保留不动", "ok");
 }
 
@@ -1588,7 +1922,10 @@ window.addEventListener("pywebviewready", async () => {
     renderAll();
     renderRules();
     switchTab("摘要");
-    setStatus(r.migration ? `已从旧 JSON 迁移到本地数据库：${r.store_path}` : "就绪");
+    setStatus(r.config_warning || (r.migration
+      ? `已从旧 JSON 迁移到本地数据库：${r.store_path}` : "就绪"),
+      r.config_warning ? "error" : "");
+    if (r.config_warning) toast(r.config_warning, "error");
     if (r.migration) toast("JSON 已无损迁移；原文件保留不动", "ok");
   } catch (err) {
     setStatus("加载失败：" + err, "error");

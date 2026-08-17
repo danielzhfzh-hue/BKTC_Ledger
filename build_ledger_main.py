@@ -137,15 +137,24 @@ def cov_match(x, ser, batch):
     return bool(bs) and batch in bs
 
 
+def matching_records(cands, ser, batch):
+    """返回设备覆盖到的全部记录，保留番号优先的兜底语义。
+
+    只要有显式製造番号匹配，就不再同时计入纯批次记录，
+    避免历史的批次兜底行与精确分配行重复计金额。
+    """
+    explicit = [x for x in cands
+                if s(x['覆盖製造番号']) and cov_match(x, ser, batch)]
+    if explicit:
+        return explicit
+    return [x for x in cands
+            if not s(x['覆盖製造番号']) and cov_match(x, ser, batch)]
+
+
 def first_match(cands, ser, batch):
-    """优先匹配有制造番号覆盖的发票/回款；批次回退只作兜底。"""
-    for x in cands:
-        if s(x['覆盖製造番号']) and cov_match(x, ser, batch):
-            return x
-    for x in cands:
-        if not s(x['覆盖製造番号']) and cov_match(x, ser, batch):
-            return x
-    return None
+    """兼容旧调用；新的金额计算应使用 matching_records。"""
+    matches = matching_records(cands, ser, batch)
+    return matches[0] if matches else None
 
 
 def to_dt(v):
@@ -222,6 +231,18 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
     inv_by = {t: [x for x in invs if s(x['款类']) == t] for t in types}
     pay_by = {t: [x for x in pays if s(x['款类']) == t] for t in types}
 
+    matched_sets = {}
+
+    def match_summary(records, date_field, prefix):
+        if not records:
+            return None, None, None
+        ids = [s(x['记录ID']) for x in records]
+        key = ids[0] if len(ids) == 1 else f"{prefix}:" + ";".join(ids)
+        matched_sets[key] = records
+        latest = max(records, key=lambda x: to_dt(x.get(date_field)) or datetime.min)
+        amount = sum(num(x.get('含税金额')) or 0 for x in records)
+        return key, latest.get(date_field), amount
+
     rows = []
     for d in devs:
         ser = s(d['製造番号'])
@@ -239,35 +260,42 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
         dues = []
         free = s(d['是否无偿']) == '是'
         for t in types:
-            inv = first_match(inv_by[t], ser, batch)
-            pay = first_match(pay_by[t], ser, batch)
-            if inv is not None:
-                dues.append(to_dt(inv.get('应收回款日')))
-                row[t + '·开票日'] = inv['开票日']
-                row[t + '·开票金额'] = inv['含税金额']
+            matched_invoices = matching_records(inv_by[t], ser, batch)
+            matched_payments = matching_records(pay_by[t], ser, batch)
+            inv_key, inv_date, inv_amount = match_summary(
+                matched_invoices, '开票日', f'invoice:{t}'
+            )
+            pay_key, pay_date, pay_amount = match_summary(
+                matched_payments, '回款日', f'payment:{t}'
+            )
+            if matched_invoices:
+                dues.extend(to_dt(inv.get('应收回款日')) for inv in matched_invoices)
+                row[t + '·开票日'] = inv_date
+                row[t + '·开票金额'] = inv_amount
                 row[t + '·开票状况'] = '已开票'
-                row[t + '·开票键'] = s(inv['记录ID'])
+                row[t + '·开票键'] = inv_key
             else:
                 row[t + '·开票日'] = None
                 row[t + '·开票金额'] = None
                 row[t + '·开票状况'] = '无偿不开票' if free else '未开票'
                 row[t + '·开票键'] = None
-            if pay is not None:
-                row[t + '·回款日'] = pay['回款日']
-                row[t + '·回款金额'] = pay['含税金额']
-                row[t + '·回款键'] = s(pay['记录ID'])
+            if matched_payments:
+                row[t + '·回款日'] = pay_date
+                row[t + '·回款金额'] = pay_amount
+                row[t + '·回款键'] = pay_key
             else:
                 row[t + '·回款日'] = None
                 row[t + '·回款金额'] = None
                 row[t + '·回款键'] = None
         # 全额发票块
-        invf = first_match(full_invs, ser, batch)
-        if invf is not None:
-            dues.append(to_dt(invf.get('应收回款日')))
-            row['全额·开票日'] = invf['开票日']
-            row['全额·开票金额'] = invf['含税金额']
+        matched_full = matching_records(full_invs, ser, batch)
+        full_key, full_date, full_amount = match_summary(matched_full, '开票日', 'invoice:全额')
+        if matched_full:
+            dues.extend(to_dt(invf.get('应收回款日')) for invf in matched_full)
+            row['全额·开票日'] = full_date
+            row['全额·开票金额'] = full_amount
             row['全额·开票状况'] = '已开票'
-            row['全额·开票键'] = s(invf['记录ID'])
+            row['全额·开票键'] = full_key
         else:
             row['全额·开票日'] = None
             row['全额·开票金额'] = None
@@ -549,19 +577,37 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
                     amt_c = col_letter[t + '·开票金额']
                     denom = inv_price[t].get(row.get(t + '·开票键'), 0.0)
                     anchor = inv_anchor.get((t, row.get(t + '·开票键')), idx)
-                formula = (f'=IF({st_c}{6 + anchor}="已开票",'
-                           f'{amt_c}{6 + anchor}*{price_c}{r}/{denom},0)'
-                           if denom else '=0')
-                set_cell(ws, r, cidx, formula, align=AL_R, fmt='0.00', trusted_formula=True)
+                records = matched_sets.get(row.get('全额·开票键' if t == '全额'
+                                                   else t + '·开票键'), [])
+                if len(records) > 1:
+                    prices = full_price if t == '全额' else inv_price[t]
+                    allocated = sum((num(x.get('含税金额')) or 0)
+                                    * (num(row.get('未税单价')) or 0)
+                                    / prices.get(s(x['记录ID']), 1)
+                                    for x in records if prices.get(s(x['记录ID']), 0))
+                    set_cell(ws, r, cidx, allocated, align=AL_R, fmt='0.00')
+                else:
+                    formula = (f'=IF({st_c}{6 + anchor}="已开票",'
+                               f'{amt_c}{6 + anchor}*{price_c}{r}/{denom},0)'
+                               if denom else '=0')
+                    set_cell(ws, r, cidx, formula, align=AL_R, fmt='0.00', trusted_formula=True)
             elif kind == '回款':
                 d_c = col_letter[t + '·回款日']
                 a_c = col_letter[t + '·回款金额']
                 denom = pay_price[t].get(row.get(t + '·回款键'), 0.0)
                 anchor = pay_anchor.get((t, row.get(t + '·回款键')), idx)
-                formula = (f'=IF({d_c}{6 + anchor}="",0,'
-                           f'{a_c}{6 + anchor}*{price_c}{r}/{denom})'
-                           if denom else '=0')
-                set_cell(ws, r, cidx, formula, align=AL_R, fmt='0.00', trusted_formula=True)
+                records = matched_sets.get(row.get(t + '·回款键'), [])
+                if len(records) > 1:
+                    allocated = sum((num(x.get('含税金额')) or 0)
+                                    * (num(row.get('未税单价')) or 0)
+                                    / pay_price[t].get(s(x['记录ID']), 1)
+                                    for x in records if pay_price[t].get(s(x['记录ID']), 0))
+                    set_cell(ws, r, cidx, allocated, align=AL_R, fmt='0.00')
+                else:
+                    formula = (f'=IF({d_c}{6 + anchor}="",0,'
+                               f'{a_c}{6 + anchor}*{price_c}{r}/{denom})'
+                               if denom else '=0')
+                    set_cell(ws, r, cidx, formula, align=AL_R, fmt='0.00', trusted_formula=True)
             elif kind == 'due':
                 set_cell(ws, r, cidx, row.get('_max_due'), align=AL_C, fmt='yyyy/mm/dd')
             elif kind == 'warn':
@@ -638,12 +684,21 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
 
         # 无设备但有回款/条款（如 26BS009）：按已付款比例反推合同总额
         if not devs and (pays or invs):
-            total = None
-            for p in pays:
-                rt = rates.get(s(p['款类']))
-                if rt:
-                    total = (num(p['含税金额']) or 0) / rt
-                    break
+            estimates = []
+            full_invoice_total = sum(num(x.get('含税金额')) or 0 for x in full_invs)
+            if full_invoice_total:
+                estimates.append(full_invoice_total)
+            for t in types:
+                rt = rates.get(t)
+                if not rt:
+                    continue
+                invoiced_t = sum(num(x.get('含税金额')) or 0 for x in inv_by_t[t])
+                paid_t = sum(num(x.get('含税金额')) or 0 for x in pay_by_t[t])
+                if invoiced_t:
+                    estimates.append(invoiced_t / rt)
+                if paid_t:
+                    estimates.append(paid_t / rt)
+            total = max(estimates, default=None)
             if total:
                 for t in types:
                     paid_t = sum(num(p['含税金额']) or 0 for p in pay_by_t[t])
@@ -680,6 +735,7 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
                 out[s(x['记录ID'])] = tp
             return out
         inv_price = {t: cover_price(inv_by_t[t], devs) for t in types}
+        full_inv_price = cover_price(full_invs, devs)
         pay_price = {t: cover_price(pay_by_t[t], devs) for t in types}
 
         agg = {}
@@ -705,13 +761,15 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
                                          'inv_dates': [], 'dues': [], 'inv_bad': False})
                 recv = price * 1.13 * rt
                 a['应收'] += recv
-                inv = first_match(inv_by_t[t], ser, batch)
-                if inv is None and full_invs:
-                    inv = first_match(full_invs, ser, batch)
-                if inv is not None:
+                matched_invoices = matching_records(inv_by_t[t], ser, batch)
+                if not matched_invoices and full_invs:
+                    matched_invoices = matching_records(full_invs, ser, batch)
+                for inv in matched_invoices:
                     rid = s(inv['记录ID'])
                     if s(inv['款类']) == '全额':
-                        a['已开'] += recv
+                        tp = full_inv_price.get(rid, 0.0)
+                        a['已开'] += ((num(inv['含税金额']) or 0) * price / tp * rt
+                                    if tp else 0.0)
                     else:
                         tp = inv_price[t].get(rid, 0.0)
                         a['已开'] += (num(inv['含税金额']) or 0) * price / tp if tp else 0.0
@@ -719,8 +777,7 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
                     a['dues'].append(to_dt(inv.get('应收回款日')))
                     if s(inv.get('状态')) != '已开':
                         a['inv_bad'] = True
-                pay = first_match(pay_by_t[t], ser, batch)
-                if pay is not None:
+                for pay in matching_records(pay_by_t[t], ser, batch):
                     rid = s(pay['记录ID'])
                     tp = pay_price[t].get(rid, 0.0)
                     a['已回'] += (num(pay['含税金额']) or 0) * price / tp if tp else 0.0

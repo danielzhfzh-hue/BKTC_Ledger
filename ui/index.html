@@ -111,9 +111,9 @@
           <tr><td>修改发货信息（出荷日）</td><td>发货批次</td>
               <td>直接改“出荷日”；台数/金额不要手改，保存时自动重算。</td></tr>
           <tr><td>添加/修改开票</td><td>开票记录</td>
-              <td>填 JOB No/款类/开票日/状态=已开/含税金额/覆盖批次/覆盖製造番号/账期/应收回款日/回款状态；覆盖台数是自动列。</td></tr>
+              <td>填 JOB No/款类/开票日/状态=已开/含税金额/账期；点覆盖列按批次勾选设备。客户、覆盖台数、应收回款日、回款状态自动计算。</td></tr>
           <tr><td>添加/修改回款</td><td>回款记录</td>
-              <td>填 JOB No/款类/回款日/含税金额/覆盖批次/覆盖製造番号；覆盖台数是自动列。</td></tr>
+              <td>填 JOB No/款类/回款日/含税金额，再点覆盖列按批次一次勾选几十台设备。客户、覆盖台数、对应应收日、超期标记/天数自动计算。</td></tr>
           <tr><td>修改待回收预警条件</td><td>预警规则</td>
               <td>可配置临近天数（默认 30）、金额容差（默认 0.01）、未验收/发票异常是否归④待确认；保存后重新「生成台账」生效。</td></tr>
           <tr><td>看首页/待回收页效果</td><td>摘要 + 生成台账</td>
@@ -125,8 +125,8 @@
       所以：<b>改批次归属 → 设备台账页改“发货批次”列</b>（或发货批次页「✎ 重命名批次」）；
       <b>改出荷日 → 发货批次页</b>。只改发货批次页的批次名、设备没跟着改，表格自然不显示。</p>
       <h3>自动计算列（只读，别手改）</h3>
-      <p>合同订单：设备型号、总台数、付款条件；设备台账：验收状态；发货批次：台数、未税合计、含税合计、覆盖製造番号；
-      开票：覆盖台数、应收回款日；回款：覆盖台数。编辑源字段后实时重算，保存时后端再次统一计算。</p>
+      <p>五张子表的客户都由合同 JOB 自动关联。合同订单：设备型号、总台数、付款条件；设备台账：验收状态；发货批次：台数、金额合计、覆盖番号；
+      开票：覆盖台数、应收回款日、回款状态；回款：覆盖台数、对应应收日、超期标记/天数。编辑源字段后实时重算，保存时后端再次统一计算。</p>
     </div>
   </section>
 
@@ -210,6 +210,7 @@
       <h3>说明</h3>
       <p>· <b>保存数据库</b>：在一个事务内校验并写入本地 <code>.db</code>；失败会整体回滚，写入前自动在 <code>备份/</code> 保留数据库快照。<br>
          · <b>旧 JSON 迁移</b>：选择 <code>*.records.json</code> 时会在同目录创建 <code>.db</code>，原 JSON 保留不动。<br>
+         · <b>文件路径</b>：在上方选择或粘贴 DB/XLSX 路径后立即生效，并保存为当前 Windows/macOS 用户的下次启动设置。<br>
          · <b>外部表格编辑</b>：先「导出编辑副本」，在 Excel/WPS 修改六表，再「导入变更」；应用会展示新增/修改/删除明细，必须二次确认才写入。旧修订副本会被拒绝。<br>
          · <b>生成台账</b>：按数据库重写 <code>xlsx</code>（导航页 / 未回收管理表 / 各 JOB 页），旧版自动进同目录 <code>备份/</code>（留近 10 份）。<br>
          · <b>检查更新</b>：联网查 GitHub 最新版本；有新版可点「下载并打开」，解压到下载目录后，<b>请退出本程序，用其中的新版本替换旧文件夹</b>（未签名，首开仍需 Mac 右键打开 / Windows SmartScreen「仍要运行」）。</p>
@@ -240,7 +241,7 @@
       <div class="split-sub">勾选要移出的设备（按型号分组，可整型号全选或挑个别机）：</div>
       <div id="splitDevList" class="split-dev-list"></div>
       <div id="splitPreview" class="split-preview muted"></div>
-      <p class="split-note muted">注：本操作只调整设备的「发货批次」归属；开票/回款的「覆盖批次」不自动改动，如需请另行核对。</p>
+      <p class="split-note muted">注：本操作调整设备的「发货批次」归属；已按製造番号覆盖的开票/回款批次会自动重算，仅历史“纯批次”记录需人工核对。</p>
     </div>
     <div class="modal-foot"><button id="splitCancel">取消</button><button id="splitOk" class="primary">确认拆分</button></div>
   </div>
@@ -255,6 +256,35 @@
       <div id="exportCount" class="export-count muted"></div>
     </div>
     <div class="modal-foot"><button id="exportCancel">取消</button><button id="exportOk" class="primary">导出到 Excel</button></div>
+  </div>
+</div>
+
+<div id="coverageModal" class="modal hidden">
+  <div class="modal-card coverage-card">
+    <div class="modal-head">
+      <div><span class="modal-kicker">PAYMENT ALLOCATION</span><strong id="coverageTitle">选择覆盖设备</strong></div>
+      <button id="coverageClose" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="coverageContext" class="coverage-context"></div>
+      <div class="coverage-tools">
+        <input id="coverageSearch" placeholder="搜索批次 / 番号 / 机番 / 型号…">
+        <button id="coverageSelectVisible" type="button">勾选当前结果</button>
+        <button id="coverageClear" type="button">清空</button>
+      </div>
+      <div id="coverageList" class="coverage-list"></div>
+      <div id="coverageSummary" class="coverage-summary"></div>
+      <details class="coverage-manual">
+        <summary>无设备订单 / 历史数据：手工输入</summary>
+        <label>覆盖批次 <input id="coverageManualBatch" placeholder="用分号分隔"></label>
+        <label>覆盖製造番号 <textarea id="coverageManualSerial" rows="2" placeholder="用分号或换行分隔"></textarea></label>
+      </details>
+    </div>
+    <div class="modal-foot">
+      <span class="modal-safety">勾选设备后，批次会自动生成；保存前还会再做关联校验。</span>
+      <button id="coverageCancel">取消</button>
+      <button id="coverageApply" class="primary">应用覆盖范围</button>
+    </div>
   </div>
 </div>
 

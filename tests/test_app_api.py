@@ -5,6 +5,7 @@ from pathlib import Path
 
 import app
 import core
+from create_portable_starter import create_starter_files
 
 
 class ApiMigrationTests(unittest.TestCase):
@@ -54,6 +55,48 @@ class ApiMigrationTests(unittest.TestCase):
             self.assertEqual(
                 app._portable_default("BKTC_Ledger.db", str(executable)),
                 str(local_db),
+            )
+
+    def test_source_mode_uses_project_local_data_paths_on_windows(self):
+        legacy = "/Users/example/production.db"
+
+        path = app._source_default("BKTC_Ledger.db", legacy, platform="win32")
+
+        self.assertEqual(path, str(Path(app.APP_DIR) / "BKTC_Ledger.db"))
+
+    def test_portable_starter_contains_openable_database_and_workbook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path, workbook_path = create_starter_files(tmp)
+
+            self.assertTrue(Path(database_path).is_file())
+            self.assertTrue(Path(workbook_path).is_file())
+            self.assertEqual(app.database.get_revision(database_path), 1)
+            self.assertEqual(app.database.load_database(database_path), core.empty_data())
+
+    def test_selected_database_and_workbook_paths_are_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            database_path = root / "chosen.db"
+            workbook_path = root / "chosen.xlsx"
+            api = app.Api(
+                str(root / "initial.xlsx"),
+                str(root / "initial.db"),
+                config_path=str(config_path),
+            )
+
+            state = api.load_state(
+                store=str(database_path), xlsx=str(workbook_path)
+            )
+
+            self.assertEqual(state["database_path"], str(database_path))
+            self.assertEqual(state["xlsx_path"], str(workbook_path))
+            self.assertEqual(
+                app._load_config(str(config_path)),
+                {
+                    "database_path": str(database_path),
+                    "xlsx_path": str(workbook_path),
+                },
             )
 
     def test_second_app_instance_cannot_overwrite_a_newer_revision(self):

@@ -2,6 +2,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -73,7 +74,8 @@ class DatabaseTests(unittest.TestCase):
         loaded = database.load_database(self.db)
         self.assertEqual(loaded["合同订单"][0]["关联合同"], ["remote-link"])
         self.assertEqual(database.get_rules(self.db), self.rules)
-        with sqlite3.connect(self.db) as conn:
+        with closing(sqlite3.connect(self.db)) as conn:
+            conn.row_factory = sqlite3.Row
             tables = {row[0] for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )}
@@ -154,9 +156,10 @@ class DatabaseTests(unittest.TestCase):
         book = self.root / "editable.xlsx"
         database.export_editable_workbook(self.db, book)
         prepared = database.prepare_editable_import(self.db, book)
-        with sqlite3.connect(self.db) as conn:
+        with closing(sqlite3.connect(self.db)) as conn:
             conn.execute('UPDATE "合同订单" SET "客户" = ? WHERE "JOB No" = ?',
                          ("外部直接修改", "26BS001"))
+            conn.commit()
 
         with self.assertRaises(database.StaleImportError):
             database.apply_editable_import(self.db, prepared)

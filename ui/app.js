@@ -4,22 +4,30 @@ const state = {
   storePath: "", xlsxPath: "", data: null, schema: null,
   tab: "摘要", dirty: false, selection: new Set(), anchor: null,
   filter: "", colFilters: {}, sortBy: {}, rules: {}, jobFilter: null,
-  version: "?", update: null,
+  version: "?", update: null, databaseInfo: null, pendingImport: null,
 };
 
 const ROW_H = 31, BUFFER = 20;
 
 const TAB_HINTS = {
-  "合同订单": "本页 = 合同头信息。总台数/设备型号自动算。新建订单先在这里加 JOB，再补付款条件/设备/发货/开票/回款。",
-  "付款条件": "本页 = 结构化付款方式（款类/比例/账期/触发条件/说明），比例合计须 100%。合同页展示的“付款条件”文本在合同订单页改。",
+  "合同订单": "本页 = 合同头信息。总台数、设备型号和付款条件文本自动汇总；修改 JOB No 会同步更新六表关联。推荐用顶部“新建订单”。",
+  "付款条件": "本页 = 结构化付款方式（款类/比例/账期/触发条件/说明），比例合计须 100%。说明会自动汇总到合同页的付款条件文本。",
   "设备台账": "本页 = 每台设备一行（含发货批次归属、质保时间、验收状态）。改设备属于哪个批次就在这里改“发货批次”列。",
-  "发货批次": "本页只改“出荷日”和批次名（✎ 重命名批次）。台数/合计/覆盖番号为自动列；新增批次后要把设备台账里设备的“发货批次”改成同名。",
+  "发货批次": "本页改出荷日或批次名；直接改名与“重命名批次”都会同步设备及开票/回款覆盖批次。台数、合计和覆盖番号自动计算。",
   "开票记录": "本页 = 每笔开票一行（款类/开票日/金额/覆盖批次/覆盖番号/账期/应收回款日/回款状态）。覆盖台数自动算。",
   "回款记录": "本页 = 每笔回款一行（款类/回款日/金额/覆盖批次/覆盖番号）。覆盖台数自动算。",
 };
 
 const $ = (id) => document.getElementById(id);
 function s(v) { return v === null || v === undefined ? "" : String(v); }
+function coverageValues(value) {
+  return s(value).split(/[;；\r\n]+/).map((x) => x.trim()).filter(Boolean);
+}
+let _localIdCounter = 0;
+function newLocalId() {
+  _localIdCounter += 1;
+  return `local-${Date.now()}-${_localIdCounter}`;
+}
 
 function esc(x) {
   return String(x ?? "").replace(/[&<>"']/g, (c) => (
@@ -51,14 +59,27 @@ function val(rec, field) {
 }
 
 function renderAll() {
-  const setBadge = (id, ok) => {
-    const b = $(id); b.textContent = ok ? "✓" : "✗"; b.className = ok ? "ok" : "no";
+  const setBadge = (id, ok, yes, no) => {
+    const b = $(id); b.textContent = ok ? yes : no; b.className = ok ? "ok" : "no";
   };
-  setBadge("badgeStore", !!state.storePath);
-  setBadge("badgeXlsx", !!state.xlsxPath);
+  setBadge("badgeStore", !!state.storePath, "已连接", "未连接");
+  setBadge("badgeXlsx", !!state.xlsxPath, "已选择", "未选择");
   $("setStore").textContent = state.storePath || "（未选择）";
   $("setXlsx").textContent = state.xlsxPath || "（未选择）";
+  if (document.activeElement !== $("setStoreInput")) {
+    $("setStoreInput").value = state.storePath || "";
+  }
+  if (document.activeElement !== $("setXlsxInput")) {
+    $("setXlsxInput").value = state.xlsxPath || "";
+  }
   $("setVersion").textContent = "v" + state.version;
+  const db = state.databaseInfo || {};
+  $("setRevision").textContent = db.revision ?? "—";
+  $("setIntegrity").textContent = db.integrity === "ok" ? "正常" : (db.integrity || "—");
+  $("setLastSaved").textContent = db.last_saved_at ? db.last_saved_at.replace("T", " ") : "—";
+  $("databaseSummary").textContent = db.integrity === "ok"
+    ? `本地关系数据库完整性正常 · 修订 ${db.revision ?? 0} · 六表关联已启用外键保护`
+    : "数据库尚未完成完整性检查";
   renderSummary();
   renderGrid();
   renderCounts();
@@ -90,7 +111,11 @@ function renderSummary() {
     ["设备台账", counts["设备台账"]], ["发货批次", counts["发货批次"]],
     ["开票记录", counts["开票记录"]], ["回款记录", counts["回款记录"]],
     ["错误", errs], ["警告", warns],
-  ].map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  ].map(([k, v]) => {
+    const jump = state.schema[k] ? ` data-jump="${esc(k)}"` : "";
+    const cls = k === "错误" && v ? " alert" : (k === "警告" && v ? " warn" : "");
+    return `<div class="card${cls}"${jump}><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  }).join("");
   cards.innerHTML = cardsHtml;
   const ul = $("summaryIssues");
   ul.innerHTML = issues.slice(0, 200).map((i) =>
@@ -102,16 +127,47 @@ function renderCounts() {
   if (!state.data) return;
   const parts = [];
   for (const t of Object.keys(state.schema)) parts.push(`${t} ${state.data[t].length}`);
-  $("counts").textContent = parts.join(" ｜ ") + (state.dirty ? " ｜ ● 未保存" : "");
+  const revision = state.databaseInfo?.revision;
+  $("counts").textContent = parts.join(" ｜ ") +
+    (revision !== undefined ? ` ｜ DB r${revision}` : "") +
+    (state.dirty ? " ｜ ● 未保存" : "");
+  const saveState = $("saveState");
+  if (saveState) {
+    saveState.classList.toggle("dirty", state.dirty);
+    saveState.classList.toggle("saved", !state.dirty);
+    saveState.lastChild.textContent = state.dirty ? "有未保存更改" : "已保存";
+  }
 }
 
 function validateAll() {
   const issues = [];
   if (!state.data) return issues;
-  const jobs = new Set(state.data["合同订单"].map((c) => String(c["JOB No"] || "")));
+  const jobs = new Set();
   for (const c of state.data["合同订单"]) {
-    if (!/^\d{2}(BS|DS)\d{3}$/.test(String(c["JOB No"] || ""))) {
+    const job = String(c["JOB No"] || "");
+    if (!/^\d{2}(BS|DS)\d{3}$/.test(job)) {
       issues.push({ severity: "error", msg: `合同 JOB No 格式不正确：${c["JOB No"]}` });
+    }
+    if (jobs.has(job)) issues.push({ severity: "error", msg: `合同 JOB No 重复：${job}` });
+    jobs.add(job);
+  }
+  for (const table of ["付款条件", "设备台账", "发货批次", "开票记录", "回款记录"]) {
+    for (const rec of state.data[table]) {
+      const job = String(rec["JOB No"] || "");
+      if (!job) issues.push({ severity: "error", msg: `${table} 存在缺少 JOB No 的记录` });
+      else if (!jobs.has(job)) issues.push({ severity: "error", msg: `${table} 引用了不存在的 JOB No：${job}` });
+    }
+  }
+  for (const table of Object.keys(state.schema)) {
+    for (const field of fieldsOf(table)) {
+      if (field.type !== "select" || !field.options?.length) continue;
+      const allowed = new Set(field.options);
+      for (const rec of state.data[table]) {
+        const value = s(rec[field.name]);
+        if (value && !allowed.has(value)) {
+          issues.push({ severity: "error", msg: `${table} ${field.name}值不在允许列表中：${value}` });
+        }
+      }
     }
   }
   const sums = {};
@@ -141,16 +197,66 @@ function validateAll() {
     }
     seenFull.add(k2);
   }
+  const shipmentKeys = new Set();
+  for (const x of state.data["发货批次"]) {
+    const key = s(x["JOB No"]) + "|" + s(x["发货批次"]);
+    if (!s(x["发货批次"])) issues.push({ severity: "error", msg: `${s(x["JOB No"])} 发货批次名称不能为空` });
+    if (shipmentKeys.has(key)) issues.push({ severity: "error", msg: `发货批次业务键重复：${s(x["JOB No"])} ${s(x["发货批次"])}` });
+    shipmentKeys.add(key);
+  }
   const devBatches = new Set(state.data["设备台账"].map((d) => d["JOB No"] + "|" + d["发货批次"]));
+  for (const d of state.data["设备台账"]) {
+    const batch = s(d["发货批次"]), key = s(d["JOB No"]) + "|" + batch;
+    if (batch && !shipmentKeys.has(key)) {
+      issues.push({ severity: "error", msg: `${s(d["JOB No"])} 设备引用了不存在的发货批次：${batch}` });
+    }
+  }
+  const deviceSerials = new Set(state.data["设备台账"]
+    .filter((d) => s(d["製造番号"]))
+    .map((d) => s(d["JOB No"]) + "|" + s(d["製造番号"])));
+  for (const table of ["开票记录", "回款记录"]) {
+    for (const rec of state.data[table]) {
+      const job = s(rec["JOB No"]);
+      for (const batch of coverageValues(rec["覆盖批次"])) {
+        if (!shipmentKeys.has(job + "|" + batch)) {
+          issues.push({ severity: "error", msg: `${table} ${job} 覆盖了不存在的批次：${batch}` });
+        }
+      }
+      for (const serial of coverageValues(rec["覆盖製造番号"])) {
+        if (!deviceSerials.has(job + "|" + serial)) {
+          issues.push({ severity: "error", msg: `${table} ${job} 覆盖了不存在的製造番号：${serial}` });
+        }
+      }
+    }
+  }
   for (const x of state.data["发货批次"]) {
     if (!devBatches.has(x["JOB No"] + "|" + x["发货批次"])) {
       issues.push({ severity: "warning", msg: `${x["JOB No"]} 批次 ${x["发货批次"]} 无设备，生成后不会显示（请补设备或删除）` });
+    }
+  }
+  for (const table of Object.keys(state.schema)) {
+    const dateFields = fieldsOf(table).filter((f) => f.type === "date").map((f) => f.name);
+    for (const rec of state.data[table]) {
+      for (const field of dateFields) {
+        const value = s(rec[field]);
+        if (!value) continue;
+        const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        const dt = match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : null;
+        if (!dt || dt.getFullYear() !== Number(match[1]) || dt.getMonth() !== Number(match[2]) - 1 || dt.getDate() !== Number(match[3])) {
+          issues.push({ severity: "error", msg: `${s(rec["JOB No"])} ${field}=${value} 不是有效日期 YYYY-MM-DD` });
+        }
+      }
     }
   }
   return issues;
 }
 
 function switchTab(tab) {
+  if (state.tab !== tab) {
+    state.selection = new Set();
+    state.anchor = null;
+    closeColFilter();
+  }
   state.tab = tab;
   $("panel-设置").classList.add("hidden");
   $("panel-跨表查询").classList.add("hidden");
@@ -164,6 +270,11 @@ function switchTab(tab) {
     b.classList.toggle("hidden", tab !== "发货批次"));
   if (tab !== "摘要" && tab !== "使用指南" && tab !== "预警规则") renderGrid();
 }
+
+$("summaryCards").addEventListener("click", (e) => {
+  const card = e.target.closest(".card[data-jump]");
+  if (card) switchTab(card.dataset.jump);
+});
 
 function renderRules() {
   const r = state.rules || {};
@@ -266,7 +377,7 @@ function recomputeDerived() {
   }
   for (const t of ["开票记录", "回款记录"]) {
     for (const x of d[t]) {
-      const set = new Set(s(x["覆盖製造番号"]).split(";").map((p) => p.trim()).filter(Boolean));
+      const set = new Set(coverageValues(x["覆盖製造番号"]));
       x["覆盖台数"] = set.size;
       if (t === "开票记录") {
         const m = s(x["开票日"]).match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -357,10 +468,36 @@ function applySelectionClasses() {
 function updateRec(table, ri, field, raw) {
   const f = fieldsOf(table).find((x) => x.name === field);
   if (!f || f.derived) return;
+  const rec = state.data[table][ri];
+  const previous = s(rec[field]);
   let v = raw;
   if (f.type === "number") v = raw === "" ? null : Number(raw);
   else if (f.type === "int") v = raw === "" ? null : Math.round(Number(raw));
-  state.data[table][ri][field] = v;
+  rec[field] = v;
+  if (table === "合同订单" && field === "JOB No" && previous !== s(v)) {
+    for (const child of ["付款条件", "设备台账", "发货批次", "开票记录", "回款记录"]) {
+      for (const row of state.data[child]) {
+        if (s(row["JOB No"]) === previous) row["JOB No"] = v;
+      }
+    }
+    if (state.jobFilter?.has(previous)) {
+      state.jobFilter.delete(previous);
+      state.jobFilter.add(s(v));
+    }
+  }
+  if (table === "发货批次" && field === "发货批次" && previous !== s(v)) {
+    const job = s(rec["JOB No"]), next = s(v);
+    for (const device of state.data["设备台账"]) {
+      if (s(device["JOB No"]) === job && s(device["发货批次"]) === previous) device["发货批次"] = next;
+    }
+    for (const child of ["开票记录", "回款记录"]) {
+      for (const row of state.data[child]) {
+        if (s(row["JOB No"]) !== job) continue;
+        const batches = coverageValues(row["覆盖批次"]);
+        if (batches.includes(previous)) row["覆盖批次"] = batches.map((x) => x === previous ? next : x).join(";");
+      }
+    }
+  }
   state.dirty = true;
   recomputeDerived();
   renderCounts();
@@ -386,6 +523,8 @@ $("gridBody").addEventListener("change", (e) => {
   if (tr) {
     const ri = Number(tr.dataset.ri);
     updateRec(state.tab, ri, e.target.dataset.f, e.target.value);
+    renderGrid();
+    renderSummary();
   }
 });
 
@@ -443,7 +582,7 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
     const table = state.tab;
     if (act === "add") {
       const ctx = currentContext();
-      const rec = {};
+      const rec = { "记录ID": newLocalId() };
       if (ctx.job) rec["JOB No"] = ctx.job;
       if (table === "合同订单" && ctx.customer) rec["客户"] = ctx.customer;
       state.data[table].push(rec);
@@ -453,15 +592,17 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
       $("gridWrap").scrollTop = $("gridWrap").scrollHeight;
     } else if (act === "del") {
       const idxs = [...state.selection].sort((a, b) => b - a);
-      if (table === "合同订单" && tryCascadeDelete(idxs)) return;
+      if (!idxs.length) { toast("请先选择要删除的行", "error"); return; }
+      if (table === "合同订单") { tryCascadeDelete(idxs); return; }
       for (const i of idxs) state.data[table].splice(i, 1);
       state.selection = new Set();
       state.dirty = true;
       recomputeDerived(); renderGrid(); renderCounts();
     } else if (act === "dup") {
       const idxs = [...state.selection].sort((a, b) => a - b);
+      if (!idxs.length) { toast("请先选择要重复的行", "error"); return; }
       const news = [];
-      for (const i of idxs) news.push({ ...state.data[table][i] });
+      for (const i of idxs) news.push({ ...state.data[table][i], "记录ID": newLocalId() });
       const at = idxs.length ? idxs[idxs.length - 1] + 1 : state.data[table].length;
       state.data[table].splice(at, 0, ...news);
       state.selection = new Set(news.map((_, k) => at + k));
@@ -482,10 +623,17 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
 
 function tryCascadeDelete(idxs) {
   const jobs = [...new Set(idxs.map((i) => String(state.data["合同订单"][i]?.["JOB No"] || "")).filter(Boolean))];
-  if (!jobs.length) return false; // 选中行无 JOB No，走普通删
+  if (!jobs.length) {
+    for (const i of idxs) state.data["合同订单"].splice(i, 1);
+    state.selection = new Set();
+    state.dirty = true;
+    recomputeDerived(); renderGrid(); renderCounts(); renderSummary();
+    toast("已删除无 JOB No 的合同草稿行");
+    return true;
+  }
   const list = jobs.join("、");
-  if (!confirm("确定删除订单 " + list + "？\n这将删除该 JOB 在【全部六表】的所有数据（合同/付款条件/设备台账/发货批次/开票/回款），不可恢复。")) return false;
-  if (!confirm("再次确认：彻底删除 " + list + " 的全部数据？")) return false;
+  if (!confirm("确定删除订单 " + list + "？\n这将删除该 JOB 在【全部六表】的所有数据（合同/付款条件/设备台账/发货批次/开票/回款）。")) return false;
+  if (!confirm("再次确认：删除 " + list + " 的全部数据？保存数据库前仍可通过关闭程序放弃本次更改。")) return false;
   const jset = new Set(jobs);
   for (const t of Object.keys(state.schema)) {
     state.data[t] = state.data[t].filter((r) => !jset.has(String(r["JOB No"] || "")));
@@ -493,7 +641,7 @@ function tryCascadeDelete(idxs) {
   state.selection = new Set();
   state.jobFilter = null; // 删除的 JOB 可能正被筛，清筛选看全貌
   state.dirty = true;
-  recomputeDerived(); renderGrid(); renderCounts();
+  recomputeDerived(); renderGrid(); renderCounts(); renderSummary();
   toast("已删除 " + jobs.length + " 个订单（六表全部数据）");
   return true;
 }
@@ -520,7 +668,7 @@ function renameBatch() {
   for (const t of ["开票记录", "回款记录"]) {
     for (const r of state.data[t]) {
       if (!fix(r)) continue;
-      const bs = String(r["覆盖批次"] || "").split(";").map((b) => b.trim()).filter(Boolean);
+      const bs = coverageValues(r["覆盖批次"]);
       if (bs.includes(oldName)) {
         r["覆盖批次"] = bs.map((b) => (b === oldName ? nw : b)).join(";");
         touched++;
@@ -620,7 +768,7 @@ $("splitOk").addEventListener("click", () => {
   for (const i of sel) state.data["设备台账"][i]["发货批次"] = target;
   let targetRow = state.data["发货批次"].find((b) => s(b["JOB No"]) === sp.job && s(b["发货批次"]) === target);
   if (!targetRow) {
-    state.data["发货批次"].push({ "JOB No": sp.job, "发货批次": target, "出荷日": shipDate });
+    state.data["发货批次"].push({ "记录ID": newLocalId(), "JOB No": sp.job, "发货批次": target, "出荷日": shipDate });
   } else if (shipDate) {
     targetRow["出荷日"] = shipDate;
   }
@@ -682,6 +830,21 @@ $("exportClose").addEventListener("click", closeExport);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeExport(); });
 
 // ============ 跨表查询导出（report builder）============
+const VIRTUAL_QUERY_TABLES = ["未付款订单", "未回款明细"];
+const VIRTUAL_QUERY_SCHEMAS = {
+  "未付款订单": [
+    { name: "客户", type: "text" }, { name: "JOB No", type: "text" },
+    { name: "未回款项数", type: "int" }, { name: "未回收合计", type: "number" },
+    { name: "预警等级", type: "text" }, { name: "未回款原因", type: "text" },
+  ],
+  "未回款明细": [
+    { name: "客户", type: "text" }, { name: "JOB No", type: "text" },
+    { name: "批次", type: "text" }, { name: "款类", type: "text" },
+    { name: "预警等级", type: "text" }, { name: "开票日期", type: "date" },
+    { name: "预定回收日期", type: "date" },
+    { name: "未回收金额", type: "number" }, { name: "未回收原因", type: "text" },
+  ],
+};
 const PARENTS = {
   "设备台账": ["合同订单", "发货批次"],
   "发货批次": ["合同订单"],
@@ -692,6 +855,45 @@ const PARENTS = {
 };
 const SHORT = { "合同订单": "合同", "发货批次": "批次", "付款条件": "条款", "设备台账": "设备", "开票记录": "开票", "回款记录": "回款" };
 let _contractByJob = {}, _batchByJobBatch = {}, _termByJobKind = {};
+let _unpaidRows = [];
+
+function querySchema(table) {
+  if (VIRTUAL_QUERY_SCHEMAS[table]) return VIRTUAL_QUERY_SCHEMAS[table];
+  return (state.schema[table] || []).map((f) => ({ name: f[0], type: f[1] }));
+}
+
+function queryRows(table) {
+  if (table === "未回款明细") return _unpaidRows;
+  if (table === "未付款订单") {
+    const groups = new Map();
+    const severity = { "①已逾期": 0, "②临近": 1, "③未到期": 2, "④待确认": 3 };
+    for (const row of _unpaidRows) {
+      const job = s(row["JOB No"]);
+      const key = `${job}\u0001${s(row["客户"])}`;
+      const group = groups.get(key) || {
+        "客户": row["客户"], "JOB No": job, "未回款项数": 0,
+        "未回收合计": 0, "预警等级": new Set(), "未回款原因": new Set(),
+      };
+      group["未回款项数"] += 1;
+      group["未回收合计"] += Number(row["未回收金额"]) || 0;
+      if (s(row["预警等级"])) group["预警等级"].add(s(row["预警等级"]));
+      if (s(row["未回收原因"])) group["未回款原因"].add(s(row["未回收原因"]));
+      groups.set(key, group);
+    }
+    return [...groups.values()].map((group) => ({
+      ...group,
+      "未回收合计": Math.round(group["未回收合计"] * 100) / 100,
+      "预警等级": [...group["预警等级"]].sort((a, b) => (severity[a] ?? 9) - (severity[b] ?? 9)).join(" / "),
+      "未回款原因": [...group["未回款原因"]].join("；"),
+    }));
+  }
+  return state.data[table] || [];
+}
+
+async function refreshUnpaidRows() {
+  const rows = await call("get_unpaid_rows", state.data, state.rules);
+  _unpaidRows = Array.isArray(rows) ? rows : (rows?.rows || []);
+}
 function buildLookups() {
   _contractByJob = {};
   for (const c of state.data["合同订单"]) _contractByJob[s(c["JOB No"])] = c;
@@ -706,13 +908,15 @@ function getJoined(base, parent, rec) {
   if (parent === "付款条件") return _termByJobKind[s(rec["JOB No"]) + "|" + s(rec["款类"])];
   return null;
 }
-function qbTables(base) { return [base, ...(PARENTS[base] || [])]; }
+function qbTables(base) {
+  return VIRTUAL_QUERY_SCHEMAS[base] ? [base] : [base, ...(PARENTS[base] || [])];
+}
 function qbFieldList(base) {
   const out = [];
   for (const t of qbTables(base)) {
     const isBase = (t === base);
-    for (const f of (state.schema[t] || [])) {
-      const name = f[0], type = f[1];
+    for (const f of querySchema(t)) {
+      const name = f.name, type = f.type;
       out.push({ table: t, name, type, label: isBase ? name : `${SHORT[t] || t}.${name}` });
     }
   }
@@ -721,18 +925,24 @@ function qbFieldList(base) {
 function openQueryBuilder() {
   if (!state.data) return;
   buildLookups();
-  const tables = Object.keys(state.schema);
+  const tables = [...VIRTUAL_QUERY_TABLES, ...Object.keys(state.schema)];
   $("qbBase").innerHTML = tables.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
-  if (tables.includes("设备台账")) $("qbBase").value = "设备台账";
+  $("qbBase").value = "未付款订单";
   renderQueryBuilder();
+  $("qbCount").textContent = "正在计算未回款口径…";
+  refreshUnpaidRows().then(() => renderQueryBuilder()).catch((err) => {
+    $("qbCount").textContent = "未回款数据加载失败";
+    toast(String(err), "error");
+  });
 }
 function renderQueryBuilder() {
   const base = $("qbBase").value;
   const fields = qbFieldList(base);
+  const defaultChecked = VIRTUAL_QUERY_SCHEMAS[base] ? " checked" : "";
   $("qbFields").innerHTML = qbTables(base).map((t) => {
     const isBase = (t === base);
     const items = fields.filter((f) => f.table === t).map((f) =>
-      `<label class="cf-item"><input type="checkbox" data-t="${esc(f.table)}" data-n="${esc(f.name)}" data-type="${f.type}" data-label="${esc(f.label)}"><span class="cf-v">${esc(f.label)}</span></label>`
+      `<label class="cf-item"><input type="checkbox"${defaultChecked} data-t="${esc(f.table)}" data-n="${esc(f.name)}" data-type="${f.type}" data-label="${esc(f.label)}"><span class="cf-v">${esc(f.label)}</span></label>`
     ).join("");
     return `<div class="qb-group"><div class="qb-group-h">${isBase ? esc(t) + "（基础表）" : "← " + esc(t)}</div><div class="qb-group-body">${items}</div></div>`;
   }).join("");
@@ -748,7 +958,7 @@ function qbAddFilterRow() {
   tr.className = "qb-filter";
   tr.innerHTML = `<select class="qb-f-field">${opts}</select>
     <select class="qb-f-op">
-      <option value="eq">等于</option><option value="ne">不等于</option>
+      <option value="eq">等于</option><option value="contains">包含</option><option value="ne">不等于</option>
       <option value="gt">大于</option><option value="lt">小于</option>
       <option value="empty">为空</option><option value="notempty">不为空</option>
     </select>
@@ -760,7 +970,7 @@ function qbAddFilterRow() {
 }
 function distinctValues(table, name) {
   const set = new Set();
-  for (const r of (state.data[table] || [])) {
+  for (const r of queryRows(table)) {
     const v = s(r[name]);
     if (v !== "") set.add(v);
   }
@@ -792,6 +1002,7 @@ function matchFilter(value, flt) {
   const target = s(flt.value);
   if (target === "") return true;  // 未选值 → 该条件不生效（避免空筛）
   if (flt.op === "eq") return v === target;
+  if (flt.op === "contains") return v.toLocaleLowerCase().includes(target.toLocaleLowerCase());
   if (flt.op === "ne") return v !== target;
   if (flt.op === "gt") return _numOrStr(v) > _numOrStr(target);
   if (flt.op === "lt") return _numOrStr(v) < _numOrStr(target);
@@ -803,7 +1014,7 @@ function runQuery() {
     table: c.dataset.t, name: c.dataset.n, type: c.dataset.type, label: c.dataset.label,
   }));
   const filters = readFilters();
-  const recs = state.data[base] || [];
+  const recs = queryRows(base);
   const rows = [];
   for (const r of recs) {
     const get = (table, name) => (table === base ? r[name] : (getJoined(base, table, r) || {})[name]);
@@ -819,7 +1030,11 @@ function runQuery() {
   }
   return { fields: selFields, rows };
 }
-function qbDoPreview() {
+async function qbDoPreview() {
+  if (VIRTUAL_QUERY_SCHEMAS[$("qbBase").value]) {
+    try { await refreshUnpaidRows(); }
+    catch (err) { toast(String(err), "error"); return; }
+  }
   const { fields, rows } = runQuery();
   if (!fields.length) { toast("请至少勾选一个输出字段", "error"); return; }
   $("qbCount").textContent = `符合 ${rows.length} 行 × ${fields.length} 列`;
@@ -828,7 +1043,11 @@ function qbDoPreview() {
     `<tr>${fields.map((f) => `<td>${esc(r[f.label])}</td>`).join("")}</tr>`).join("");
   $("qbPreview").innerHTML = `<thead>${head}</thead><tbody>${body}</tbody>`;
 }
-function qbDoExport() {
+async function qbDoExport() {
+  if (VIRTUAL_QUERY_SCHEMAS[$("qbBase").value]) {
+    try { await refreshUnpaidRows(); }
+    catch (err) { toast(String(err), "error"); return; }
+  }
   const { fields, rows } = runQuery();
   if (!fields.length) { toast("请至少勾选一个输出字段", "error"); return; }
   if (!rows.length) { toast("查询结果为空", "error"); return; }
@@ -846,7 +1065,12 @@ $("btnQuery").addEventListener("click", () => {
   document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
   openQueryBuilder();
 });
-$("qbBase").addEventListener("change", renderQueryBuilder);
+$("qbBase").addEventListener("change", () => {
+  renderQueryBuilder();
+  if (VIRTUAL_QUERY_SCHEMAS[$("qbBase").value]) {
+    refreshUnpaidRows().then(() => renderQueryBuilder()).catch((err) => toast(String(err), "error"));
+  }
+});
 $("qbAddFilter").addEventListener("click", qbAddFilterRow);
 $("qbRun").addEventListener("click", qbDoPreview);
 $("qbExport").addEventListener("click", qbDoExport);
@@ -913,7 +1137,7 @@ function pasteGrid(table, row0, col0, text) {
   for (const row of rows) {
     if (!state.data[table][r]) {
       const ctx = currentContext();
-      const rec = {};
+      const rec = { "记录ID": newLocalId() };
       if (ctx.job) rec["JOB No"] = ctx.job;
       if (table === "合同订单" && ctx.customer) rec["客户"] = ctx.customer;
       state.data[table].push(rec);
@@ -928,8 +1152,14 @@ function pasteGrid(table, row0, col0, text) {
         field = fields[col0 - 1 + c];
       }
       if (!field || field.derived) continue;
-      state.data[table][r][field.name] = field.type === "number" ? Number(row[c] || 0)
-        : field.type === "int" ? Math.round(Number(row[c] || 0)) : row[c];
+      if ((table === "合同订单" && field.name === "JOB No") ||
+          (table === "发货批次" && field.name === "发货批次")) {
+        updateRec(table, r, field.name, row[c]);
+      } else {
+        state.data[table][r][field.name] = field.type === "number"
+          ? (row[c] === "" ? null : Number(row[c]))
+          : field.type === "int" ? (row[c] === "" ? null : Math.round(Number(row[c]))) : row[c];
+      }
     }
     r += 1;
   }
@@ -1079,37 +1309,109 @@ async function call(name, ...args) {
   return window.pywebview.api[name](...args);
 }
 
-$("btnSave").addEventListener("click", async () => {
+function applyBackendState(r) {
+  if (r.store_path || r.database_path) state.storePath = r.database_path || r.store_path;
+  if (r.xlsx_path) state.xlsxPath = r.xlsx_path;
+  if (r.data) state.data = r.data;
+  if (r.schema) state.schema = r.schema;
+  if (r.rules) state.rules = r.rules;
+  if (r.version) state.version = r.version;
+  if (r.database_info) state.databaseInfo = r.database_info;
+  if (r.revision !== undefined) {
+    state.databaseInfo = { ...(state.databaseInfo || {}), revision: r.revision,
+      integrity: "ok", last_saved_at: new Date().toISOString().slice(0, 19) };
+  }
+}
+
+async function saveCurrent(silent = false) {
+  if (state._saving) return false;
+  state._saving = true;
   try {
-    setStatus("保存中…");
+    if (!silent) setStatus("正在校验并保存数据库…");
     const r = await call("save_data", state.data, state.rules);
+    applyBackendState(r);
     state.dirty = false;
-    setStatus("已保存：" + r.path);
-    toast("数据已保存", "ok");
-    renderCounts();
-  } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
+    setStatus(`数据库已保存：${r.path}（修订 ${r.revision}）`);
+    if (!silent) toast("数据库已通过校验并保存", "ok");
+    renderAll();
+    return true;
+  } catch (err) {
+    setStatus(String(err), "error");
+    toast(String(err), "error");
+    switchTab("摘要");
+    renderSummary();
+    return false;
+  } finally {
+    state._saving = false;
+  }
+}
+
+$("btnSave").addEventListener("click", async () => {
+  await saveCurrent(false);
 });
 
 $("btnGenerate").addEventListener("click", async () => {
   try {
     setStatus("生成台账中…");
     const r = await call("generate", state.data, state.rules);
+    applyBackendState(r);
     state.dirty = false;
     const msg = `已生成：${r.out}（未回收 ${r.counts["未回收行数"]} 行，合计 ${Number(r.counts["未回收合计"]).toLocaleString()}）`;
     setStatus(msg);
     toast("台账已生成", "ok");
-    renderCounts();
+    renderAll();
   } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
 });
 
+async function refreshWithFeedback(store, xlsx) {
+  try {
+    await refresh(store, xlsx);
+  } catch (err) {
+    setStatus("路径切换失败：" + String(err), "error");
+    toast("路径切换失败：" + String(err), "error");
+  }
+}
+
 $("btnPickStore").addEventListener("click", async () => {
-  const p = await call("pick_store");
-  if (p) { await refresh(p, null); }
+  if (state.dirty && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
+  try {
+    let p = await call("pick_store");
+    if (!p) p = window.prompt("请输入 SQLite 或 JSON 文件的完整路径：", state.storePath || "");
+    if (p) {
+      $("setStoreInput").value = p;
+      await refreshWithFeedback(p, null);
+    }
+  } catch (err) {
+    setStatus("无法打开文件选择器，请粘贴完整路径：" + String(err), "error");
+    toast("无法打开文件选择器，请使用下方输入框", "error");
+  }
 });
 
 $("btnPickXlsx").addEventListener("click", async () => {
-  const p = await call("pick_xlsx");
-  if (p) { await refresh(null, p); }
+  try {
+    let p = await call("pick_xlsx");
+    if (!p) p = window.prompt("请输入 XLSX 文件的完整路径：", state.xlsxPath || "");
+    if (p) {
+      $("setXlsxInput").value = p;
+      await refreshWithFeedback(null, p);
+    }
+  } catch (err) {
+    setStatus("无法打开文件选择器，请粘贴完整路径：" + String(err), "error");
+    toast("无法打开文件选择器，请使用下方输入框", "error");
+  }
+});
+
+$("btnApplyStorePath").addEventListener("click", async () => {
+  if (state.dirty && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
+  const p = $("setStoreInput").value.trim();
+  if (!p) return toast("请先输入数据库路径", "error");
+  await refreshWithFeedback(p, null);
+});
+
+$("btnApplyXlsxPath").addEventListener("click", async () => {
+  const p = $("setXlsxInput").value.trim();
+  if (!p) return toast("请先输入 XLSX 路径", "error");
+  await refreshWithFeedback(null, p);
 });
 
 $("btnSettings").addEventListener("click", () => {
@@ -1156,37 +1458,147 @@ $("btnOpenXlsx").addEventListener("click", async () => {
   if (state.xlsxPath) await call("open_path", state.xlsxPath);
 });
 
+function diffValue(value) {
+  if (value === null || value === undefined || value === "") return "（空）";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function closeImportPreview() {
+  $("importModal").classList.add("hidden");
+  $("importConfirm").checked = false;
+  $("importApply").disabled = true;
+  state.pendingImport = null;
+}
+
+function renderImportPreview(result) {
+  state.pendingImport = result;
+  const total = result.changes_total || 0;
+  const blocked = result.stale || total === 0;
+  const status = $("importStatus");
+  status.classList.toggle("stale", result.stale);
+  status.textContent = result.stale
+    ? `此工作簿基于数据库修订 ${result.base_revision}，当前已是修订 ${result.current_revision}。为防止覆盖新数据，不能应用；请重新导出编辑副本。`
+    : total ? `工作簿与数据库修订 ${result.current_revision} 匹配。请逐项核对后完成二次确认。`
+      : "工作簿与当前数据库没有差异，无需导入。";
+  const ac = result.action_counts || {};
+  $("importCounts").innerHTML = [
+    ["新增", ac["新增"] || 0, "add"], ["修改", ac["修改"] || 0, "change"],
+    ["删除", ac["删除"] || 0, "delete"],
+  ].map(([label, value, cls]) => `<div class="import-count ${cls}"><span>${label}</span><b>${value}</b></div>`).join("");
+  $("importTableCounts").innerHTML = Object.entries(result.table_counts || {}).map(([table, counts]) => {
+    const parts = ["新增", "修改", "删除"].filter((key) => counts[key]).map((key) => `${key}${counts[key]}`);
+    return parts.length ? `<span>${esc(table)} · ${parts.join(" / ")}</span>` : "";
+  }).join("");
+  $("importFile").textContent = result.path || "";
+  $("importChanges").innerHTML = (result.changes || []).map((change) => {
+    const cls = change.action === "新增" ? "add" : (change.action === "删除" ? "delete" : "change");
+    const fields = (change.fields || []).slice(0, 12).map((field) =>
+      `<div><code>${esc(field.field)}${field.derived ? "（自动）" : ""}</code>：` +
+      `${esc(diffValue(field.before))} → ${esc(diffValue(field.after))}</div>`).join("");
+    return `<div class="import-change"><div class="import-change-head">` +
+      `<span class="import-action ${cls}">${change.action}</span><b>${esc(change.table)}</b>` +
+      `<span>${esc(change.label)}</span></div>` +
+      (fields ? `<div class="import-change-fields">${fields}</div>` : "") + `</div>`;
+  }).join("") || '<div class="import-change muted">没有变更</div>';
+  if (result.changes_truncated) {
+    $("importChanges").insertAdjacentHTML("beforeend", `<div class="import-change muted">仅展示前 500 项，共 ${total} 项；统计数量为完整结果。</div>`);
+  }
+  if (result.warnings?.length) {
+    $("importChanges").insertAdjacentHTML("beforeend", result.warnings.slice(0, 20).map((warning) =>
+      `<div class="import-change"><span class="import-action change">提示</span> ${esc(warning.msg)}</div>`).join(""));
+  }
+  $("importConfirm").checked = false;
+  $("importConfirm").disabled = blocked;
+  $("importConfirmLabel").classList.toggle("disabled", blocked);
+  $("importApply").disabled = true;
+  $("importModal").classList.remove("hidden");
+}
+
+$("btnExportEditable").addEventListener("click", async () => {
+  try {
+    setStatus("正在保存并生成可编辑副本…");
+    const r = await call("export_editable", state.data, state.rules, state.dirty);
+    applyBackendState(r);
+    state.dirty = false;
+    renderAll();
+    setStatus(`已导出编辑副本：${r.path}（数据库修订 ${r.revision}）`);
+    toast("六表编辑副本已导出到 Downloads", "ok");
+    await call("open_path", r.path);
+  } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
+});
+
+$("btnImportChanges").addEventListener("click", async () => {
+  try {
+    if (state.dirty) {
+      if (!confirm("导入差异基于已保存数据库。当前有未保存更改，是否先保存再选择 Excel？")) return;
+      if (!await saveCurrent(true)) return;
+    }
+    const path = await call("pick_import_xlsx");
+    if (!path) return;
+    setStatus("正在读取 Excel 并计算差异…");
+    const result = await call("preview_import", path);
+    renderImportPreview(result);
+    setStatus(`差异预览完成：新增 ${result.action_counts["新增"]} / 修改 ${result.action_counts["修改"]} / 删除 ${result.action_counts["删除"]}`);
+  } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
+});
+
+$("importConfirm").addEventListener("change", (e) => {
+  $("importApply").disabled = !e.target.checked || !state.pendingImport || state.pendingImport.stale;
+});
+$("importApply").addEventListener("click", async () => {
+  if (!state.pendingImport || !$("importConfirm").checked) return;
+  try {
+    $("importApply").disabled = true;
+    setStatus("正在复核修订并应用 Excel 差异…");
+    const r = await call("apply_import", state.pendingImport.token);
+    applyBackendState(r);
+    state.dirty = false;
+    closeImportPreview();
+    renderRules();
+    renderAll();
+    switchTab("摘要");
+    setStatus(`Excel 变更已写入数据库（修订 ${r.revision}）`);
+    toast("差异已通过二次确认并写入，原数据库已备份", "ok");
+  } catch (err) {
+    setStatus(String(err), "error");
+    toast(String(err), "error");
+    $("importApply").disabled = false;
+  }
+});
+$("importCancel").addEventListener("click", closeImportPreview);
+$("importClose").addEventListener("click", closeImportPreview);
+
 async function refresh(store, xlsx) {
   const r = await call("load_state", store, xlsx);
-  state.storePath = r.store_path;
-  state.xlsxPath = r.xlsx_path;
-  state.data = r.data;
-  state.schema = r.schema;
-  state.rules = r.rules || {};
-  state.version = r.version || "?";
+  applyBackendState(r);
   state.dirty = false;
   renderAll();
   renderRules();
   switchTab("摘要");
-  setStatus("就绪");
+  setStatus(r.migration ? `已从旧 JSON 迁移到本地数据库：${r.store_path}` : "就绪");
+  if (r.migration) toast("JSON 已无损迁移；原文件保留不动", "ok");
 }
 
 window.addEventListener("pywebviewready", async () => {
   try {
     const r = await call("load_state", null, null);
-    state.storePath = r.store_path;
-    state.xlsxPath = r.xlsx_path;
-    state.data = r.data;
-    state.schema = r.schema;
-    state.rules = r.rules || {};
+    applyBackendState(r);
     state.dirty = false;
     renderAll();
     renderRules();
     switchTab("摘要");
-    setStatus("就绪");
+    setStatus(r.migration ? `已从旧 JSON 迁移到本地数据库：${r.store_path}` : "就绪");
+    if (r.migration) toast("JSON 已无损迁移；原文件保留不动", "ok");
   } catch (err) {
     setStatus("加载失败：" + err, "error");
   }
+});
+
+window.addEventListener("beforeunload", (e) => {
+  if (!state.dirty) return;
+  e.preventDefault();
+  e.returnValue = "";
 });
 
 // ========== 新建订单 modal ==========

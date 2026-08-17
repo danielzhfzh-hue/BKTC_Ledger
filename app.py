@@ -11,15 +11,18 @@ import tarfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 import zipfile
 
-__version__ = "1.1.12"
+__version__ = "1.2.0"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 
-APP_DIR = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+APP_DIR = sys._MEIPASS if IS_FROZEN else os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
 import core  # noqa: E402
+import database  # noqa: E402
 import webview  # noqa: E402
 
 
@@ -37,54 +40,114 @@ def _tag_from_location(url):
     m = re.search(r"/releases/tag/(?:v|V)?([0-9][0-9.]*)", url or "")
     return m.group(1) if m else ""
 
-DEFAULT_XLSX = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx"
-DEFAULT_STORE = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.records.json"
-FALLBACK_EXPORT = "/tmp/export_20260803_fixed"
+def _portable_default(filename, executable=None):
+    """Find bundled data beside the executable, then beside its parent folder."""
+    executable_dir = os.path.dirname(os.path.abspath(executable or sys.executable))
+    candidates = [
+        os.path.join(executable_dir, filename),
+        os.path.join(os.path.dirname(executable_dir), filename),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
+
+
+if IS_FROZEN:
+    DEFAULT_XLSX = _portable_default("BKTC_Ledger.xlsx")
+    DEFAULT_DATABASE = _portable_default("BKTC_Ledger.db")
+    DEFAULT_LEGACY_JSON = _portable_default("BKTC_Ledger.records.json")
+else:
+    DEFAULT_XLSX = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx"
+    DEFAULT_DATABASE = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.db"
+    DEFAULT_LEGACY_JSON = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.records.json"
 
 
 def schema_for_js():
     out = {}
     for t in core.TABLES:
         derived = set(core.DERIVED.get(t, []))
-        out[t] = [list(f) + [f[0] in derived] for f in core.SCHEMA[t]]
+        out[t] = [
+            [field, field_type, options[0] if options else [], field in derived]
+            for field, field_type, *options in core.SCHEMA[t]
+        ]
     return out
 
 
 class Api:
-    def __init__(self, xlsx_path, store_path):
+    def __init__(self, xlsx_path, data_path, legacy_json_path=None):
         self.xlsx_path = xlsx_path
-        self.store_path = store_path
+        self.database_path = ""
+        self.database_revision = None
+        self.legacy_json_path = None
+        self._pending_imports = {}
+        self._set_data_path(data_path)
+        if legacy_json_path and not str(data_path).lower().endswith(".json"):
+            self.legacy_json_path = legacy_json_path
 
-    def _init_store(self):
-        if os.path.isdir(FALLBACK_EXPORT):
-            core.save_store(self.store_path, core.import_from_export_dir(FALLBACK_EXPORT))
-            return
-        core.save_store(self.store_path, core.empty_data())
+    def _set_data_path(self, path):
+        path = os.path.abspath(os.path.expanduser(path))
+        if path.lower().endswith(".json"):
+            self.legacy_json_path = path
+        else:
+            self.legacy_json_path = None
+        self.database_path = database.database_path_for(path)
+        self.database_revision = None
+
+    def _init_database(self):
+        if self.legacy_json_path and os.path.exists(self.legacy_json_path):
+            return database.migrate_json_to_database(
+                self.legacy_json_path, self.database_path
+            )
+        return database.save_database(
+            self.database_path, core.empty_data(), reason="database_created", backup=False
+        )
 
     def load_state(self, store=None, xlsx=None):
         if store:
-            self.store_path = store
+            self._set_data_path(store)
+            self._pending_imports.clear()
         if xlsx:
-            self.xlsx_path = xlsx
-        if not os.path.exists(self.store_path):
-            self._init_store()
-        data = core.load_store(self.store_path)
-        return {"store_path": self.store_path, "xlsx_path": self.xlsx_path,
+            self.xlsx_path = os.path.abspath(os.path.expanduser(xlsx))
+        migration = None
+        if not os.path.exists(self.database_path):
+            migration = self._init_database()
+        data = database.load_database(self.database_path)
+        info = database.get_database_info(self.database_path)
+        self.database_revision = info["revision"]
+        return {"store_path": self.database_path, "database_path": self.database_path,
+                "xlsx_path": self.xlsx_path,
                 "data": data, "schema": schema_for_js(),
-                "rules": core.get_rules(self.store_path),
+                "rules": database.get_rules(self.database_path),
+                "database_info": info,
+                "migration": bool(migration and migration.get("migrated")),
+                "migration_source": migration.get("source") if migration else None,
                 "version": __version__}
 
     def save_data(self, data, rules=None):
-        core.save_store(self.store_path, data, rules)
-        return {"ok": True, "path": self.store_path}
+        result = database.save_database(
+            self.database_path, data, rules, expected_revision=self.database_revision
+        )
+        self.database_revision = result["revision"]
+        return {"ok": True, "path": self.database_path,
+                "data": result["data"], "revision": result["revision"],
+                "backup": result["backup"], "issues": result["issues"]}
 
     def generate(self, data, rules=None):
         if not self.xlsx_path or not os.path.isdir(os.path.dirname(self.xlsx_path)):
             raise RuntimeError("请先选择台账 Excel 文件")
+        saved = database.save_database(
+            self.database_path, data, rules, expected_revision=self.database_revision
+        )
+        self.database_revision = saved["revision"]
         core.backup_xlsx(self.xlsx_path)
-        core.save_store(self.store_path, data, rules)
-        out, issues, counts = core.generate_xlsx(data, self.xlsx_path, rules)
-        return {"ok": True, "out": out, "issues": issues, "counts": counts}
+        out, issues, counts = core.generate_xlsx(saved["data"], self.xlsx_path, rules)
+        return {"ok": True, "out": out, "issues": issues, "counts": counts,
+                "data": saved["data"], "revision": saved["revision"]}
+
+    def get_unpaid_rows(self, data, rules=None):
+        """Return the unpaid report using the same calculation as generated Excel."""
+        return core.unpaid_report_rows(data, rules)
 
     def export_xlsx(self, table, rows, fields):
         """把筛选后的行 + 选定字段导出到 ~/Downloads/<表>_导出_<时间>.xlsx。"""
@@ -99,10 +162,76 @@ class Api:
         core.export_filtered(path, table, rows, fields)
         return {"ok": True, "path": path, "rows": len(rows), "fields": len(fields)}
 
+    def export_editable(self, data, rules=None, dirty=True):
+        """Save current edits, then export a revision-bound six-table workbook."""
+        if dirty:
+            saved = database.save_database(
+                self.database_path, data, rules, expected_revision=self.database_revision
+            )
+            self.database_revision = saved["revision"]
+        else:
+            saved = {
+                "data": database.load_database(self.database_path),
+                "revision": database.get_revision(self.database_path),
+            }
+            self.database_revision = saved["revision"]
+        dl = os.path.join(os.path.expanduser("~"), "Downloads")
+        os.makedirs(dl, exist_ok=True)
+        path = os.path.join(
+            dl, f"BKTC_订单编辑_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        )
+        result = database.export_editable_workbook(self.database_path, path)
+        result.update({"data": saved["data"], "revision": saved["revision"]})
+        return result
+
+    def preview_import(self, path):
+        prepared = database.prepare_editable_import(self.database_path, path)
+        token = uuid.uuid4().hex
+        self._pending_imports = {token: prepared}  # 仅保留最后一次预览，避免误用旧令牌
+        warnings = [x for x in prepared.issues if x.get("severity") == "warning"]
+        return {
+            "ok": True,
+            "token": token,
+            "path": prepared.workbook_path,
+            "base_revision": prepared.base_revision,
+            "current_revision": prepared.current_revision,
+            "stale": prepared.stale,
+            "action_counts": prepared.action_counts,
+            "table_counts": prepared.table_counts,
+            "changes": prepared.changes[:500],
+            "changes_total": len(prepared.changes),
+            "changes_truncated": len(prepared.changes) > 500,
+            "warnings": warnings[:100],
+        }
+
+    def apply_import(self, token):
+        prepared = self._pending_imports.get(token)
+        if not prepared:
+            raise RuntimeError("差异预览已失效，请重新选择 Excel 并预览")
+        result = database.apply_editable_import(self.database_path, prepared)
+        self._pending_imports.clear()
+        self.database_revision = result["revision"]
+        return {
+            "ok": True,
+            "path": self.database_path,
+            "data": result["data"],
+            "rules": database.get_rules(self.database_path),
+            "revision": result["revision"],
+            "backup": result["backup"],
+        }
+
     def pick_store(self):
         w = webview.windows[0]
         res = w.create_file_dialog(webview.OPEN_DIALOG,
-                                   file_types=("JSON (*.json)", "All files (*.*)"))
+                                   file_types=("SQLite (*.db;*.sqlite;*.sqlite3)",
+                                               "Legacy JSON (*.json)",
+                                               "All files (*.*)"))
+        return res[0] if res else None
+
+    def pick_import_xlsx(self):
+        w = webview.windows[0]
+        res = w.create_file_dialog(webview.OPEN_DIALOG,
+                                   file_types=("Excel (*.xlsx)", "All files (*.*)"))
         return res[0] if res else None
 
     def pick_xlsx(self):
@@ -177,12 +306,16 @@ def main():
     ap = argparse.ArgumentParser(description="BKTC 台账维护工具")
     ap.add_argument("--xlsx", default=os.environ.get("BKTC_XLSX", DEFAULT_XLSX),
                     help="台账 Excel 路径（可用 --xlsx 或界面选择）")
-    ap.add_argument("--store", default=os.environ.get("BKTC_STORE", DEFAULT_STORE),
-                    help="records.json 数据文件路径")
+    ap.add_argument("--database", default=os.environ.get("BKTC_DATABASE"),
+                    help="SQLite 数据库路径")
+    ap.add_argument("--store", default=os.environ.get("BKTC_STORE"),
+                    help="兼容旧版：records.json 路径（首次启动迁移为同目录 .db）")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
-    api = Api(args.xlsx, args.store)
+    data_path = args.database or args.store or DEFAULT_DATABASE
+    legacy_json = DEFAULT_LEGACY_JSON if data_path == DEFAULT_DATABASE else None
+    api = Api(args.xlsx, data_path, legacy_json_path=legacy_json)
     webview.create_window(
         "BKTC 台账维护工具",
         os.path.join(APP_DIR, "ui", "index.html"),

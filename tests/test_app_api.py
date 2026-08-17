@@ -37,6 +37,25 @@ class ApiMigrationTests(unittest.TestCase):
             self.assertEqual(state["database_path"], str(root / "another.db"))
             self.assertFalse(state["migration"])
 
+    def test_portable_default_finds_data_next_to_executable_or_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_dir = root / "BKTC_Ledger"
+            app_dir.mkdir()
+            executable = app_dir / "BKTC_Ledger.exe"
+            parent_db = root / "BKTC_Ledger.db"
+            parent_db.write_bytes(b"db")
+            self.assertEqual(
+                app._portable_default("BKTC_Ledger.db", str(executable)),
+                str(parent_db),
+            )
+            local_db = app_dir / "BKTC_Ledger.db"
+            local_db.write_bytes(b"db")
+            self.assertEqual(
+                app._portable_default("BKTC_Ledger.db", str(executable)),
+                str(local_db),
+            )
+
     def test_second_app_instance_cannot_overwrite_a_newer_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

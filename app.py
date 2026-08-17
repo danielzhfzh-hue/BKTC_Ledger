@@ -17,7 +17,8 @@ import zipfile
 __version__ = "1.2.0"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 
-APP_DIR = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+APP_DIR = sys._MEIPASS if IS_FROZEN else os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
 import core  # noqa: E402
@@ -39,9 +40,27 @@ def _tag_from_location(url):
     m = re.search(r"/releases/tag/(?:v|V)?([0-9][0-9.]*)", url or "")
     return m.group(1) if m else ""
 
-DEFAULT_XLSX = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx"
-DEFAULT_DATABASE = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.db"
-DEFAULT_LEGACY_JSON = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.records.json"
+def _portable_default(filename, executable=None):
+    """Find bundled data beside the executable, then beside its parent folder."""
+    executable_dir = os.path.dirname(os.path.abspath(executable or sys.executable))
+    candidates = [
+        os.path.join(executable_dir, filename),
+        os.path.join(os.path.dirname(executable_dir), filename),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
+
+
+if IS_FROZEN:
+    DEFAULT_XLSX = _portable_default("BKTC_Ledger.xlsx")
+    DEFAULT_DATABASE = _portable_default("BKTC_Ledger.db")
+    DEFAULT_LEGACY_JSON = _portable_default("BKTC_Ledger.records.json")
+else:
+    DEFAULT_XLSX = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx"
+    DEFAULT_DATABASE = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.db"
+    DEFAULT_LEGACY_JSON = r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.records.json"
 
 
 def schema_for_js():
@@ -89,7 +108,7 @@ class Api:
             self._set_data_path(store)
             self._pending_imports.clear()
         if xlsx:
-            self.xlsx_path = xlsx
+            self.xlsx_path = os.path.abspath(os.path.expanduser(xlsx))
         migration = None
         if not os.path.exists(self.database_path):
             migration = self._init_database()

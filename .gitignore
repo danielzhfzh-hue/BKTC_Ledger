@@ -7,6 +7,11 @@ __pycache__/
 .DS_Store
 # 销售数据绝不上传（数据在父目录 订单整理/，这里是双保险）
 *.records.json
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 *.xlsx
 ledger.records.json
 备份/

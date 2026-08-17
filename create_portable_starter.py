@@ -25,5 +25,4 @@ def create_starter_files(output_dir):
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         raise SystemExit("usage: create_portable_starter.py OUTPUT_DIR")
-    for path in create_starter_files(sys.argv[1]):
-        print(path)
+    create_starter_files(sys.argv[1])

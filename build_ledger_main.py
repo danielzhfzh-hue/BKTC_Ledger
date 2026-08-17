@@ -1079,8 +1079,6 @@ def build_from_data(contracts, terms, devices, shipments, invoices, payments, ou
             formula=['ISNUMBER(SEARCH("已回款",L3))'], fill=FILL_WARN_GRN, font=F_WARN_GRN))
 
     wb.save(out)
-    print('saved:', out)
-    print('sheets:', wb.sheetnames)
     return out
 
 

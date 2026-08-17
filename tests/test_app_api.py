@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -66,7 +68,11 @@ class ApiMigrationTests(unittest.TestCase):
 
     def test_portable_starter_contains_openable_database_and_workbook(self):
         with tempfile.TemporaryDirectory() as tmp:
-            database_path, workbook_path = create_starter_files(tmp)
+            cp1252_stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+            with contextlib.redirect_stdout(cp1252_stdout):
+                database_path, workbook_path = create_starter_files(
+                    Path(tmp) / "中文目录"
+                )
 
             self.assertTrue(Path(database_path).is_file())
             self.assertTrue(Path(workbook_path).is_file())

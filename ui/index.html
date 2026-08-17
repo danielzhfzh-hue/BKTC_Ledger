@@ -190,14 +190,18 @@
         <thead><tr><th style="width:120px">项目</th><th>当前</th><th style="width:220px">操作</th></tr></thead>
         <tbody>
           <tr><td>本地数据库</td>
-              <td><span id="setStore" class="path">（未选择）</span></td>
-              <td><button id="btnPickStore">打开 / 迁移…</button></td></tr>
+              <td><span id="setStore" class="path">（未选择）</span><br>
+                <input id="setStoreInput" class="path-input" placeholder="也可粘贴 .db / .json 路径"></td>
+              <td><button id="btnPickStore">打开 / 迁移…</button>
+                <button id="btnApplyStorePath">应用路径</button></td></tr>
           <tr><td>数据库状态</td>
               <td>修订 <b id="setRevision">—</b>　·　完整性 <b id="setIntegrity">—</b>　·　最近保存 <span id="setLastSaved">—</span></td>
               <td><span class="muted">SQLite + 外键 + WAL</span></td></tr>
           <tr><td>台账文件</td>
-              <td><span id="setXlsx" class="path">（未选择）</span></td>
-              <td><button id="btnPickXlsx">更换…</button></td></tr>
+              <td><span id="setXlsx" class="path">（未选择）</span><br>
+                <input id="setXlsxInput" class="path-input" placeholder="也可粘贴 .xlsx 路径"></td>
+              <td><button id="btnPickXlsx">更换…</button>
+                <button id="btnApplyXlsxPath">应用路径</button></td></tr>
           <tr><td>当前版本</td>
               <td><span id="setVersion">v?</span>　<span id="updateInfo" class="muted"></span></td>
               <td><button id="btnCheckUpdate">检查更新</button>　<button id="btnDownloadUpdate" class="primary hidden">下载并打开</button></td></tr>

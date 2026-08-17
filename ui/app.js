@@ -66,6 +66,12 @@ function renderAll() {
   setBadge("badgeXlsx", !!state.xlsxPath, "已选择", "未选择");
   $("setStore").textContent = state.storePath || "（未选择）";
   $("setXlsx").textContent = state.xlsxPath || "（未选择）";
+  if (document.activeElement !== $("setStoreInput")) {
+    $("setStoreInput").value = state.storePath || "";
+  }
+  if (document.activeElement !== $("setXlsxInput")) {
+    $("setXlsxInput").value = state.xlsxPath || "";
+  }
   $("setVersion").textContent = "v" + state.version;
   const db = state.databaseInfo || {};
   $("setRevision").textContent = db.revision ?? "—";
@@ -1357,15 +1363,55 @@ $("btnGenerate").addEventListener("click", async () => {
   } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
 });
 
+async function refreshWithFeedback(store, xlsx) {
+  try {
+    await refresh(store, xlsx);
+  } catch (err) {
+    setStatus("路径切换失败：" + String(err), "error");
+    toast("路径切换失败：" + String(err), "error");
+  }
+}
+
 $("btnPickStore").addEventListener("click", async () => {
   if (state.dirty && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
-  const p = await call("pick_store");
-  if (p) { await refresh(p, null); }
+  try {
+    let p = await call("pick_store");
+    if (!p) p = window.prompt("请输入 SQLite 或 JSON 文件的完整路径：", state.storePath || "");
+    if (p) {
+      $("setStoreInput").value = p;
+      await refreshWithFeedback(p, null);
+    }
+  } catch (err) {
+    setStatus("无法打开文件选择器，请粘贴完整路径：" + String(err), "error");
+    toast("无法打开文件选择器，请使用下方输入框", "error");
+  }
 });
 
 $("btnPickXlsx").addEventListener("click", async () => {
-  const p = await call("pick_xlsx");
-  if (p) { await refresh(null, p); }
+  try {
+    let p = await call("pick_xlsx");
+    if (!p) p = window.prompt("请输入 XLSX 文件的完整路径：", state.xlsxPath || "");
+    if (p) {
+      $("setXlsxInput").value = p;
+      await refreshWithFeedback(null, p);
+    }
+  } catch (err) {
+    setStatus("无法打开文件选择器，请粘贴完整路径：" + String(err), "error");
+    toast("无法打开文件选择器，请使用下方输入框", "error");
+  }
+});
+
+$("btnApplyStorePath").addEventListener("click", async () => {
+  if (state.dirty && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
+  const p = $("setStoreInput").value.trim();
+  if (!p) return toast("请先输入数据库路径", "error");
+  await refreshWithFeedback(p, null);
+});
+
+$("btnApplyXlsxPath").addEventListener("click", async () => {
+  const p = $("setXlsxInput").value.trim();
+  if (!p) return toast("请先输入 XLSX 路径", "error");
+  await refreshWithFeedback(null, p);
 });
 
 $("btnSettings").addEventListener("click", () => {

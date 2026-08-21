@@ -276,12 +276,12 @@
       <div id="coverageSummary" class="coverage-summary"></div>
       <details class="coverage-manual">
         <summary>无设备订单 / 历史数据：手工输入</summary>
-        <label>覆盖批次 <input id="coverageManualBatch" placeholder="用分号分隔"></label>
-        <label>覆盖製造番号 <textarea id="coverageManualSerial" rows="2" placeholder="用分号或换行分隔"></textarea></label>
+        <label id="coverageManualBatchLabel">覆盖批次 <input id="coverageManualBatch" placeholder="用分号分隔"></label>
+        <label id="coverageManualSerialLabel">覆盖製造番号 <textarea id="coverageManualSerial" rows="2" placeholder="用分号或换行分隔"></textarea></label>
       </details>
     </div>
     <div class="modal-foot">
-      <span class="modal-safety">勾选设备后，批次会自动生成；保存前还会再做关联校验。</span>
+      <span id="coverageSafety" class="modal-safety">勾选设备后，批次会自动生成；保存前还会再做关联校验。</span>
       <button id="coverageCancel">取消</button>
       <button id="coverageApply" class="primary">应用覆盖范围</button>
     </div>

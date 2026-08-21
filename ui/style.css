@@ -386,6 +386,8 @@ th.col-h.filt-on .col-filt { color: #fff; background: rgba(255,255,255,.18); }
   border-top: 1px solid #edf1f4; cursor: pointer;
 }
 .coverage-device:hover { background: var(--teal-soft); }
+.coverage-device-readonly { cursor: default; }
+.coverage-device-marker { color: var(--teal-deep); text-align: center; }
 .coverage-device.hidden-by-search { display: none; }
 .coverage-device .serial { color: #263d4f; font-family: ui-monospace, Menlo, Consolas, monospace; }
 .coverage-device .meta { color: var(--muted); font-size: 11px; }

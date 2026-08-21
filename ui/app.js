@@ -15,8 +15,8 @@ const TAB_HINTS = {
   "付款条件": "本页 = 结构化付款方式（款类/比例/账期/触发条件/说明），比例合计须 100%。客户由合同自动带入；条款款类改名会同步对应开票/回款。",
   "设备台账": "本页 = 每台设备一行（含发货批次归属、质保时间、验收状态）。改设备属于哪个批次就在这里改“发货批次”列。",
   "发货批次": "本页改出荷日或批次名；直接改名与“重命名批次”都会同步设备及开票/回款覆盖批次。台数、合计和覆盖番号自动计算。",
-  "开票记录": "每笔开票一行。点“覆盖批次/覆盖製造番号”按批次批量勾设备；客户、覆盖台数、应收回款日和回款状态自动计算。",
-  "回款记录": "每笔回款一行。填款类/回款日/金额后，点覆盖列按批次勾选设备；到期日、是否超期、超期天数自动计算。",
+  "开票记录": "每笔开票一行。“覆盖批次”整批带入设备；“覆盖製造番号”逐台勾选，适合拆分开票。客户、覆盖台数、应收回款日和回款状态自动计算。",
+  "回款记录": "每笔回款一行。“覆盖批次”整批带入设备；“覆盖製造番号”逐台勾选，适合拆分回款。到期日、是否超期、超期天数自动计算。",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -329,7 +329,7 @@ $("btnRulesDefault").addEventListener("click", () => {
   renderCounts();
 });
 
-function visibleRows(table) {
+function visibleRows(table, excludedField = "") {
   const q = state.filter.trim().toLowerCase();
   const cf = state.colFilters[table] || {};
   const so = state.sortBy[table];
@@ -340,11 +340,14 @@ function visibleRows(table) {
     let keep = true;
     for (const f in cf) {
       if (f === "JOB No" || f === "客户") continue;
+      if (f === excludedField) continue;
       const set = cf[f];
       if (set && !set.has(String(rec[f] ?? ""))) { keep = false; break; }
     }
-    if (keep && state.jobFilter && !state.jobFilter.has(String(rec["JOB No"] ?? ""))) keep = false;
-    if (keep && state.customerFilter && !state.customerFilter.has(String(rec["客户"] ?? ""))) keep = false;
+    if (keep && excludedField !== "JOB No" && state.jobFilter
+        && !state.jobFilter.has(String(rec["JOB No"] ?? ""))) keep = false;
+    if (keep && excludedField !== "客户" && state.customerFilter
+        && !state.customerFilter.has(String(rec["客户"] ?? ""))) keep = false;
     if (keep && q && !Object.values(rec).join(" ").toLowerCase().includes(q)) keep = false;
     if (keep) idxs.push(i);
   }
@@ -570,7 +573,8 @@ function renderGrid() {
         const label = f.name === "覆盖批次"
           ? (values.length ? values.join("、") : "选择批次")
           : (values.length ? `${values.length} 台设备` : "勾选设备");
-        return `<td class="coverage-cell"><button type="button" class="coverage-picker" data-coverage-field="${esc(f.name)}" title="按批次或设备批量勾选">${esc(label)} <span>▾</span></button></td>`;
+        const pickerTitle = f.name === "覆盖批次" ? "按批次选择并带入整批设备" : "按单台设备逐一勾选";
+        return `<td class="coverage-cell"><button type="button" class="coverage-picker" data-coverage-field="${esc(f.name)}" title="${pickerTitle}">${esc(label)} <span>▾</span></button></td>`;
       }
       if (f.type === "select") {
         const opts = ["", ...f.options].map((o) =>
@@ -732,7 +736,7 @@ $("gridBody").addEventListener("click", (e) => {
   const picker = e.target.closest(".coverage-picker");
   if (picker) {
     const tr = picker.closest("tr[data-ri]");
-    if (tr) openCoverageModal(state.tab, Number(tr.dataset.ri));
+    if (tr) openCoverageModal(state.tab, Number(tr.dataset.ri), picker.dataset.coverageField);
     return;
   }
   const td = e.target.closest("td.date-cell.empty");
@@ -960,11 +964,12 @@ $("splitCancel").addEventListener("click", closeSplit);
 $("splitClose").addEventListener("click", closeSplit);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSplit(); });
 
-// 开票/回款覆盖范围：按批次分组的设备多选，避免手输几十个番号。
-function openCoverageModal(table, ri) {
+// 开票/回款覆盖范围：批次入口整批选择，製造番号入口逐台选择。
+function openCoverageModal(table, ri, field) {
   if (!["开票记录", "回款记录"].includes(table)) return;
   const rec = state.data[table]?.[ri];
   if (!rec) return;
+  const mode = field === "覆盖批次" ? "batch" : "serial";
   const job = s(rec["JOB No"]);
   const devices = state.data["设备台账"]
     .map((device, index) => ({ device, index }))
@@ -977,9 +982,18 @@ function openCoverageModal(table, ri) {
     if (!groups.has(batch)) groups.set(batch, []);
     groups.get(batch).push(item);
   }
-  $("coverageTitle").textContent = `${table === "回款记录" ? "回款" : "开票"}覆盖设备`;
-  $("coverageContext").textContent = `${job || "（未填 JOB）"} · ${s(rec["客户"]) || "（无客户）"} · ${s(rec["款类"]) || "（未选款类）"}`;
+  $("coverageTitle").textContent = mode === "batch"
+    ? `${table === "回款记录" ? "回款" : "开票"}覆盖批次`
+    : `${table === "回款记录" ? "回款" : "开票"}覆盖製造番号`;
+  $("coverageContext").textContent = `${job || "（未填 JOB）"} · ${s(rec["客户"]) || "（无客户）"} · ${s(rec["款类"]) || "（未选款类）"} · ${mode === "batch" ? "勾选批次后带入该批全部设备" : "每个勾选框仅代表一台设备"}`;
   $("coverageSearch").value = "";
+  $("coverageSelectVisible").classList.toggle("hidden", mode === "serial");
+  $("coverageSelectVisible").textContent = "勾选当前批次";
+  $("coverageManualBatchLabel").classList.toggle("hidden", mode !== "batch");
+  $("coverageManualSerialLabel").classList.toggle("hidden", mode !== "serial");
+  $("coverageSafety").textContent = mode === "batch"
+    ? "每个批次会带入该批全部设备；保存前还会再做关联校验。"
+    : "请按实际开票/回款范围逐台勾选；覆盖批次会自动生成。";
   $("coverageManualBatch").value = s(rec["覆盖批次"]);
   $("coverageManualSerial").value = s(rec["覆盖製造番号"]);
   $("coverageList").innerHTML = groups.size ? [...groups.entries()].map(([batch, items]) => {
@@ -989,30 +1003,44 @@ function openCoverageModal(table, ri) {
       const checked = serial && (coverageContains(rec["覆盖製造番号"], serial)
         || (!selectedSerials.size && selectedBatches.has(s(device["发货批次"]))));
       const search = [batch, serial, device["機番"], device["设备型号"], device["PO No"]].map(s).join(" ").toLowerCase();
-      return `<label class="coverage-device" data-search="${esc(search)}">` +
-        `<input type="checkbox" class="coverage-device-check" data-index="${index}" ${checked ? "checked" : ""} ${serial ? "" : "disabled"}>` +
+      const rowTag = mode === "serial" ? "label" : "div";
+      const selector = mode === "serial"
+        ? `<input type="checkbox" class="coverage-device-check" data-index="${index}" ${checked ? "checked" : ""} ${serial ? "" : "disabled"}>`
+        : '<span class="coverage-device-marker">•</span>';
+      return `<${rowTag} class="coverage-device${mode === "batch" ? " coverage-device-readonly" : ""}" data-search="${esc(search)}">` +
+        selector +
         `<span class="serial">${esc(serial || "（无番号，不可勾选）")}</span>` +
         `<span>${esc(s(device["设备型号"]) || "—")}</span>` +
-        `<span class="meta">机番 ${esc(s(device["機番"]) || "—")} · ${Number(device["未税单价"] || 0).toLocaleString()}</span></label>`;
+        `<span class="meta">机番 ${esc(s(device["機番"]) || "—")} · ${Number(device["未税单价"] || 0).toLocaleString()}</span></${rowTag}>`;
     }).join("");
     const allChecked = selectable.length && selectable.every(({ device }) =>
       coverageContains(rec["覆盖製造番号"], s(device["製造番号"]))
       || (!selectedSerials.size && selectedBatches.has(s(device["发货批次"]))));
-    return `<div class="coverage-group"><label class="coverage-group-head">` +
-      `<input type="checkbox" class="coverage-group-all" ${allChecked ? "checked" : ""}>` +
-      `<b>批次 ${esc(batch)}</b><span class="coverage-group-meta">${items.length} 台</span></label>${rows}</div>`;
+    const groupHead = mode === "batch"
+      ? `<label class="coverage-group-head"><input type="checkbox" class="coverage-group-all" data-batch-key="${esc(batch)}" ${allChecked ? "checked" : ""} ${batch === "（无批次）" || !selectable.length ? "disabled" : ""}><b>批次 ${esc(batch)}</b><span class="coverage-group-meta">${items.length} 台</span></label>`
+      : `<div class="coverage-group-head"><b>批次 ${esc(batch)}</b><span class="coverage-group-meta">${items.length} 台 · 请逐台勾选</span></div>`;
+    return `<div class="coverage-group">${groupHead}${rows}</div>`;
   }).join("") : '<div class="coverage-empty">该 JOB 尚无设备。请展开下方“手工输入”填批次，或先到设备台账建设备。</div>';
-  state._coverage = { table, ri, job, deviceIndexes: devices.map((x) => x.index) };
+  state._coverage = {
+    table, ri, job, mode, deviceIndexes: devices.map((x) => x.index),
+    batchIndexes: new Map([...groups.entries()].map(([batch, items]) =>
+      [batch, items.filter(({ device }) => s(device["製造番号"])).map(({ index }) => index)])),
+  };
   updateCoverageSummary();
   $("coverageModal").classList.remove("hidden");
 }
 
 function coverageSelectedIndexes() {
+  if (state._coverage?.mode === "batch") {
+    return [...document.querySelectorAll("#coverageList .coverage-group-all:checked")]
+      .flatMap((box) => state._coverage.batchIndexes.get(box.dataset.batchKey) || []);
+  }
   return [...document.querySelectorAll("#coverageList .coverage-device-check:checked")]
     .map((box) => Number(box.dataset.index));
 }
 
 function updateCoverageGroupChecks() {
+  if (state._coverage?.mode !== "serial") return;
   document.querySelectorAll("#coverageList .coverage-group").forEach((group) => {
     const boxes = [...group.querySelectorAll(".coverage-device-check:not(:disabled)")];
     const all = group.querySelector(".coverage-group-all");
@@ -1027,8 +1055,12 @@ function updateCoverageSummary() {
   const indexes = coverageSelectedIndexes();
   const batches = new Set(indexes.map((index) => s(state.data["设备台账"][index]?.["发货批次"])));
   $("coverageSummary").textContent = indexes.length
-    ? `已选 ${indexes.length} 台 · ${[...batches].filter(Boolean).length} 个批次`
-    : "尚未勾选设备；可使用下方手工输入。";
+    ? (state._coverage?.mode === "batch"
+      ? `已选 ${[...batches].filter(Boolean).length} 个批次 · 将带入 ${indexes.length} 台设备`
+      : `已逐台选择 ${indexes.length} 台 · 覆盖 ${[...batches].filter(Boolean).length} 个批次`)
+    : (state._coverage?.mode === "batch"
+      ? "尚未选择批次；无设备订单可使用下方手工输入。"
+      : "尚未逐台勾选设备；历史番号可使用下方手工输入。");
 }
 
 function closeCoverageModal() {
@@ -1056,13 +1088,14 @@ $("coverageSearch").addEventListener("input", (e) => {
   });
 });
 $("coverageSelectVisible").addEventListener("click", () => {
-  document.querySelectorAll("#coverageList .coverage-device:not(.hidden-by-search) .coverage-device-check:not(:disabled)")
+  document.querySelectorAll("#coverageList .coverage-group:not([style*='display: none']) .coverage-group-all:not(:disabled)")
     .forEach((box) => { box.checked = true; });
   updateCoverageGroupChecks();
   updateCoverageSummary();
 });
 $("coverageClear").addEventListener("click", () => {
-  document.querySelectorAll("#coverageList .coverage-device-check").forEach((box) => { box.checked = false; });
+  document.querySelectorAll("#coverageList .coverage-device-check, #coverageList .coverage-group-all")
+    .forEach((box) => { box.checked = false; });
   $("coverageManualBatch").value = "";
   $("coverageManualSerial").value = "";
   updateCoverageGroupChecks();
@@ -1519,7 +1552,7 @@ function openColFilter(field) {
   const table = state.tab;
   const isJob = field === "JOB No";
   const isCustomer = field === "客户";
-  let recs = state.data[table];
+  let recs = visibleRows(table, field).map((index) => state.data[table][index]);
   if (isJob || isCustomer) {
     recs = state.data["合同订单"].filter((rec) => {
       if (isJob && state.customerFilter && !state.customerFilter.has(s(rec["客户"]))) return false;
@@ -1535,12 +1568,14 @@ function openColFilter(field) {
   _cfAllVals = [...dist.keys()].sort((a, b) => a.localeCompare(b, "zh"));
   const allCount = _cfAllVals.length;
   state.colFilters[table] = state.colFilters[table] || {};
-  const set = isJob ? (state.jobFilter || new Set(_cfAllVals))
-    : isCustomer ? (state.customerFilter || new Set(_cfAllVals))
-      : (state.colFilters[table][field] || new Set(_cfAllVals));
+  const activeSet = isJob ? state.jobFilter
+    : isCustomer ? state.customerFilter : state.colFilters[table][field];
+  const set = activeSet
+    ? new Set(_cfAllVals.filter((value) => activeSet.has(value)))
+    : new Set(_cfAllVals);
   $("colfiltTitle").textContent = `${field}（${allCount} 个值${isJob || isCustomer ? "；此列跨表共享" : ""}）`;
   $("colfiltSearch").value = "";
-  $("colfiltAll").checked = set.size >= allCount;
+  $("colfiltAll").checked = _cfAllVals.every((value) => set.has(value));
   $("colfiltList").innerHTML = _cfAllVals.map((v) => {
     const lbl = v === "" ? "（空）" : esc(v);
     return `<label class="cf-item"><input type="checkbox" data-v="${esc(v)}" ${set.has(v) ? "checked" : ""}><span class="cf-v">${lbl}</span></label>`;
@@ -1561,18 +1596,23 @@ function cfApply(field, value, checked) {
   const table = state.tab;
   if (field === "JOB No" || field === "客户") {
     const prop = field === "JOB No" ? "jobFilter" : "customerFilter";
-    let set = state[prop] ? new Set(state[prop]) : new Set(_cfAllVals);
+    let set = state[prop]
+      ? new Set(_cfAllVals.filter((candidate) => state[prop].has(candidate)))
+      : new Set(_cfAllVals);
     if (checked) set.add(value); else set.delete(value);
-    state[prop] = set.size >= _cfAllVals.length ? null : set;
+    state[prop] = _cfAllVals.every((candidate) => set.has(candidate)) ? null : set;
     $("colfiltAll").checked = !state[prop];
     renderGrid();
     return;
   }
   state.colFilters[table] = state.colFilters[table] || {};
   let set = state.colFilters[table][field];
-  if (!set) { set = new Set(_cfAllVals); state.colFilters[table][field] = set; }
+  set = set
+    ? new Set(_cfAllVals.filter((candidate) => set.has(candidate)))
+    : new Set(_cfAllVals);
+  state.colFilters[table][field] = set;
   if (checked) set.add(value); else set.delete(value);
-  if (set.size >= _cfAllVals.length) delete state.colFilters[table][field];
+  if (_cfAllVals.every((candidate) => set.has(candidate))) delete state.colFilters[table][field];
   $("colfiltAll").checked = !state.colFilters[table] || !state.colFilters[table][field];
   renderGrid();
 }

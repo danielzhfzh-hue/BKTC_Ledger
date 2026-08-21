@@ -15,7 +15,7 @@ import urllib.request
 import uuid
 import zipfile
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 
 IS_FROZEN = bool(getattr(sys, "frozen", False))

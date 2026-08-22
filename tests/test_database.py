@@ -255,6 +255,21 @@ class CoreReliabilityTests(unittest.TestCase):
         self.assertTrue(any("不存在的批次" in msg for msg in messages))
         self.assertTrue(any("不存在的製造番号" in msg for msg in messages))
 
+    def test_transaction_kind_must_belong_to_same_job_payment_terms(self):
+        data = sample_data()
+        data["回款记录"] = [{
+            "记录ID": "payment-1", "JOB No": "26BS001", "款类": "验收款",
+            "回款日": "2026-08-05", "含税金额": 100,
+            "覆盖批次": "1", "覆盖製造番号": "26BS001-001",
+        }]
+
+        issues = core.validate(core.derive(data))
+
+        self.assertTrue(any(
+            issue["severity"] == "error" and "不在该 JOB 的付款条件中" in issue["msg"]
+            for issue in issues
+        ))
+
     def test_blank_payment_placeholder_does_not_fail_ratio_validation(self):
         data = sample_data()
         data["付款条件"] = [{"记录ID": "placeholder", "JOB No": "26BS001"}]
@@ -321,6 +336,23 @@ class CoreReliabilityTests(unittest.TestCase):
         self.assertEqual(payment["对应应收回款日"], "2026-08-11")
         self.assertEqual(payment["是否超期"], "是")
         self.assertEqual(payment["超期天数"], 4)
+
+    def test_batch_coverage_count_includes_devices_without_serial_numbers(self):
+        data = sample_data()
+        data["设备台账"].append({
+            "记录ID": "device-blank", "JOB No": "26BS001",
+            "设备型号": "KT1000", "製造番号": "", "機番": "A2",
+            "未税单价": 100, "是否无偿": "否", "发货批次": "1",
+        })
+        data["回款记录"] = [{
+            "记录ID": "payment-1", "JOB No": "26BS001", "款类": "预付款",
+            "回款日": "2026-08-05", "含税金额": 226,
+            "覆盖批次": "1", "覆盖製造番号": "26BS001-001",
+        }]
+
+        derived = core.derive(data)
+
+        self.assertEqual(derived["回款记录"][0]["覆盖台数"], 2)
 
     def test_overlapping_invoices_use_cumulative_amount_for_payment_status(self):
         data = sample_data()

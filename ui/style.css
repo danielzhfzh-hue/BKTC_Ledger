@@ -401,6 +401,38 @@ th.col-h.filt-on .col-filt { color: #fff; background: rgba(255,255,255,.18); }
   resize: vertical; font: inherit;
 }
 
+.entry-card { width: 880px; }
+.entry-section { margin-bottom: 11px; padding: 11px 13px; background: var(--panel-soft); border: 1px solid var(--line); border-radius: 5px; }
+.entry-section:last-child { margin-bottom: 0; }
+.entry-section h4 { margin: 0 0 9px; color: var(--brand); display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }
+.entry-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 14px; }
+.entry-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.entry-grid label { min-width: 0; color: #44525d; display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
+.entry-grid label.full { grid-column: 1 / -1; }
+.entry-grid input, .entry-grid select, .entry-grid textarea {
+  width: 100%; min-height: 31px; padding: 6px 8px; color: var(--ink); background: #fff;
+  border: 1px solid var(--line-strong); border-radius: 4px; resize: vertical; font: inherit;
+}
+.entry-grid input[readonly] { color: #52626e; background: #edf2f5; }
+.entry-help { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.entry-warning { margin: 8px 0 0; padding: 7px 9px; color: #765510; background: var(--warn-soft); border: 1px solid #ead29b; border-radius: 4px; font-size: 11px; }
+.entry-list { max-height: 280px; overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 5px; }
+.entry-list-empty { padding: 18px; color: var(--muted); text-align: center; font-size: 11px; }
+.entry-device-option { display: grid; grid-template-columns: 24px minmax(150px, 1fr) minmax(100px, .8fr) minmax(110px, .8fr); gap: 8px; align-items: center; min-height: 34px; padding: 5px 10px; border-bottom: 1px solid #edf1f4; cursor: pointer; }
+.entry-device-option:last-child { border-bottom: 0; }
+.entry-device-option:hover { background: var(--teal-soft); }
+.entry-device-option .serial { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.entry-device-option .meta { color: var(--muted); font-size: 10px; }
+.entry-coverage-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.entry-coverage-summary { flex: 1; min-width: 280px; padding: 8px 10px; color: #244b68; background: #fff; border: 1px solid var(--line); border-left: 4px solid var(--teal); border-radius: 4px; font-size: 11px; }
+.entry-term-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.entry-term-table th { position: static; padding: 6px; color: #fff; background: var(--brand); text-align: left; }
+.entry-term-table td { padding: 3px 4px; }
+.entry-term-table input, .entry-term-table select { width: 100%; min-height: 29px; padding: 4px 6px; background: #fff; border: 1px solid var(--line); border-radius: 3px; font: inherit; }
+.entry-term-table .entry-term-del { width: 34px; text-align: center; }
+.entry-term-table .entry-term-del button { min-height: 22px; padding: 2px 6px; color: var(--danger); background: transparent; }
+#coverageModal { z-index: 330; }
+
 .import-card { width: 900px; }
 .import-status { margin-bottom: 10px; padding: 9px 11px; color: var(--brand); background: var(--brand-soft); border: 1px solid #bdd2e5; border-left: 4px solid var(--brand); border-radius: 4px; }
 .import-status.stale { color: var(--danger); background: var(--danger-soft); border-color: #efbdc2; border-left-color: var(--danger); }
@@ -486,6 +518,7 @@ footer { min-height: 34px; padding: 6px 22px; color: #3d4b56; background: #e8eef
 .noc-dev-table th { position: static; padding: 6px; color: #fff; background: var(--brand); text-align: left; }
 .noc-dev-table td { padding: 3px 4px; vertical-align: middle; }
 .noc-dev-table td input, .noc-dev-table td select { min-height: 28px; padding: 4px 6px; background: #fff; border: 1px solid var(--line); border-radius: 3px; }
+.noc-term-table td input, .noc-term-table td select { width: 100%; }
 .noc-dev-table td.noc-del { text-align: center; }
 .noc-dev-table td.noc-del button { min-height: 22px; padding: 2px 6px; color: var(--danger); background: transparent; }
 #nocDevSummary { margin-top: 6px; }
@@ -497,4 +530,11 @@ footer { min-height: 34px; padding: 6px 22px; color: #3d4b56; background: #e8eef
   .actionhint { display: none; }
   .cards { grid-template-columns: repeat(4, 1fr); }
   .path-chip { padding: 5px 7px; }
+}
+
+@media (max-width: 760px) {
+  .entry-grid, .entry-grid.three { grid-template-columns: 1fr; }
+  .entry-grid label.full { grid-column: auto; }
+  .entry-device-option { grid-template-columns: 24px 1fr; }
+  .entry-device-option .meta { grid-column: 2; }
 }

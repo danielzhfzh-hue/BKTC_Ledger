@@ -188,13 +188,18 @@ def derive(data):
 
     for table in ("开票记录", "回款记录"):
         for x in data[table]:
-            x["覆盖台数"] = coverage_count(x.get("覆盖製造番号"))
+            job_devices = [d for d in data["设备台账"]
+                           if s(d["JOB No"]) == s(x["JOB No"])]
+            has_coverage = (coverage_values(x.get("覆盖批次"))
+                            or coverage_values(x.get("覆盖製造番号")))
+            x["覆盖台数"] = (sum(
+                1 for d in job_devices
+                if cov_match(x, s(d.get("製造番号")), s(d.get("发货批次")))
+            ) if has_coverage else 0)
             coverage_tokens = coverage_values(x.get("覆盖製造番号"))
             if coverage_tokens:
                 batches = []
                 safe_to_rebuild = True
-                job_devices = [d for d in data["设备台账"]
-                               if s(d["JOB No"]) == s(x["JOB No"])]
                 for token in coverage_tokens:
                     parts = {p for p in re.split(r"[→⇒⟶➡➝]", token) if p}
                     matches = [d for d in job_devices
@@ -389,6 +394,20 @@ def validate(data):
         if abs(total - 100) > 0.01:
             issues.append({"severity": "error",
                            "msg": f"{job} 付款条件比例合计 {total:g}% ≠ 100%"})
+    term_kinds = {}
+    for term in data["付款条件"]:
+        if s(term.get("款类")):
+            term_kinds.setdefault(s(term.get("JOB No")), set()).add(s(term.get("款类")))
+    for table in ("开票记录", "回款记录"):
+        for rec in data[table]:
+            job, kind = s(rec.get("JOB No")), s(rec.get("款类"))
+            if not kind or (table == "开票记录" and kind == "全额"):
+                continue
+            if kind not in term_kinds.get(job, set()):
+                issues.append({
+                    "severity": "error",
+                    "msg": f"{table} {job} 款类 {kind!r} 不在该 JOB 的付款条件中",
+                })
     seen = {}
     seen_full = {}
     KNOWN_DUP = {("23BS004", "23BS004-058"), ("23BS004", "23BS004-061")}

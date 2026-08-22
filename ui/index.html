@@ -66,7 +66,7 @@
   <section id="panel-表格" class="panel hidden">
     <div class="toolbar">
       <button id="btnClearFilter" title="清除本表的筛选与排序">✕ 清除筛选/排序</button>
-      <button data-act="add">＋ 添加行</button>
+      <button id="btnAddRecord" data-act="add" class="primary">＋ 新增记录</button>
       <button data-act="del">🗑 删除选中</button>
       <button data-act="dup">⧉ 重复选中行</button>
       <button data-act="rename" class="only-ship" title="把选中批次的名称同步到设备/开票/回款">✎ 重命名批次</button>
@@ -96,24 +96,24 @@
               <td>一次填写订单头、设备、发货和付款条件，自动建立六表关联与稳定记录 ID；比逐表添加更可靠。</td></tr>
           <tr><td>修改订单</td><td>合同订单</td>
               <td>筛选 JOB 后直接改单元格；总台数/设备型号是自动列，不用改。</td></tr>
-          <tr><td>添加付款方式</td><td>付款条件</td>
-              <td>添加行填 JOB No/款类/比例%/账期天数/触发条件/说明；每单比例合计必须 100%。</td></tr>
+          <tr><td>录入付款方式</td><td>付款条件 →「录入付款条件」</td>
+              <td>选择 JOB 后一次维护完整条款；客户自动带入，每单比例合计必须 100%。</td></tr>
           <tr><td>修改付款方式</td><td>付款条件</td>
               <td>直接改对应行；合同订单页的“付款条件”展示文本会按条款说明自动汇总。</td></tr>
-          <tr><td>添加设备/发货明细</td><td>设备台账</td>
-              <td>一台设备一行：PO/型号/製造番号/機番/未税单价/是否无偿/<b>发货批次</b>/送货单回收/验收状态/质保时间/备注。</td></tr>
+          <tr><td>添加设备/发货明细</td><td>设备台账 →「录入设备」</td>
+              <td>选择 JOB 后客户自动带入，发货批次只能从该 JOB 已存在的批次中选择；也可填充新建订单生成的待编号设备。</td></tr>
           <tr><td>修改设备/质保时间</td><td>设备台账</td>
               <td>质保开始日/结束日/质保期、验收状态都在这里改。</td></tr>
           <tr><td>修改设备属于哪个批次</td><td>设备台账 或 发货批次页「✎ 重命名批次」</td>
               <td><b>批次归属以设备行为准</b>：改设备行的“发货批次”列；改名用发货批次页的「✎ 重命名批次」会自动同步设备/开票/回款。</td></tr>
-          <tr><td>添加发货批次</td><td>发货批次</td>
-              <td>添加行填 JOB No/发货批次/出荷日；<b>台数/未税合计/含税合计/覆盖番号是自动列</b>。新批次还要把对应设备行的“发货批次”改成同名，否则台账页不显示。</td></tr>
+          <tr><td>添加发货批次</td><td>发货批次 →「新增发货批次」</td>
+              <td>选择 JOB、填写批次和出荷日，并可勾选同一 JOB 的设备移入；<b>台数/未税合计/含税合计/覆盖番号自动计算</b>。</td></tr>
           <tr><td>修改发货信息（出荷日）</td><td>发货批次</td>
               <td>直接改“出荷日”；台数/金额不要手改，保存时自动重算。</td></tr>
-          <tr><td>添加/修改开票</td><td>开票记录</td>
-              <td>填 JOB No/款类/开票日/状态=已开/含税金额/账期；点覆盖列按批次勾选设备。客户、覆盖台数、应收回款日、回款状态自动计算。</td></tr>
-          <tr><td>添加/修改回款</td><td>回款记录</td>
-              <td>填 JOB No/款类/回款日/含税金额，再点覆盖列按批次一次勾选几十台设备。客户、覆盖台数、对应应收日、超期标记/天数自动计算。</td></tr>
+          <tr><td>添加/修改开票</td><td>开票记录 →「新增开票记录」</td>
+              <td>选择 JOB 后客户自动带入，款类来自该 JOB 的付款条件；可按该 JOB 的批次整批勾选，也可逐台选择制造番号并自动回写批次。</td></tr>
+          <tr><td>添加/修改回款</td><td>回款记录 →「新增回款记录」</td>
+              <td>选择 JOB 后客户自动带入，款类来自付款条件；日期、金额独立填写，批次/制造番号严格限定在该 JOB，覆盖台数自动计算。</td></tr>
           <tr><td>修改待回收预警条件</td><td>预警规则</td>
               <td>可配置临近天数（默认 30）、金额容差（默认 0.01）、未验收/发票异常是否归④待确认；保存后重新「生成台账」生效。</td></tr>
           <tr><td>看首页/待回收页效果</td><td>摘要 + 生成台账</td>
@@ -259,6 +259,24 @@
   </div>
 </div>
 
+<div id="entryModal" class="modal hidden">
+  <div class="modal-card entry-card">
+    <div class="modal-head">
+      <div><span class="modal-kicker">BUSINESS DATA ENTRY</span><strong id="entryTitle">新增记录</strong></div>
+      <button id="entryClose" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="entryErrors" class="noc-errors hidden"></div>
+      <div id="entryBody"></div>
+    </div>
+    <div class="modal-foot">
+      <span id="entrySafety" class="modal-safety">客户及自动字段由关联数据生成；提交前会检查跨表引用。</span>
+      <button id="entryCancel">取消</button>
+      <button id="entryOk" class="primary">确认录入</button>
+    </div>
+  </div>
+</div>
+
 <div id="coverageModal" class="modal hidden">
   <div class="modal-card coverage-card">
     <div class="modal-head">
@@ -342,8 +360,8 @@
             <button type="button" class="noc-mini noc-tmpl" data-tmpl="C">填C模板</button>
           </span>
         </h4>
-        <table class="noc-dev-table">
-          <thead><tr><th>款类</th><th style="width:88px">比例%</th><th style="width:88px">账期天数</th><th style="width:36px"></th></tr></thead>
+        <table class="noc-dev-table noc-term-table">
+          <thead><tr><th style="width:110px">款类</th><th style="width:72px">比例%</th><th style="width:78px">账期天数</th><th style="width:130px">触发条件</th><th>说明</th><th style="width:36px"></th></tr></thead>
           <tbody id="nocTermRows"></tbody>
         </table>
         <div id="nocTermSummary" class="muted"></div>

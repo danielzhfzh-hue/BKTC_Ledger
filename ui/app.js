@@ -12,11 +12,20 @@ const ROW_H = 31, BUFFER = 20;
 
 const TAB_HINTS = {
   "合同订单": "本页 = 合同头信息。总台数、设备型号和付款条件文本自动汇总；修改 JOB No 会同步更新六表关联。推荐用顶部“新建订单”。",
-  "付款条件": "本页 = 结构化付款方式（款类/比例/账期/触发条件/说明），比例合计须 100%。客户由合同自动带入；条款款类改名会同步对应开票/回款。",
-  "设备台账": "本页 = 每台设备一行（含发货批次归属、质保时间、验收状态）。改设备属于哪个批次就在这里改“发货批次”列。",
-  "发货批次": "本页改出荷日或批次名；直接改名与“重命名批次”都会同步设备及开票/回款覆盖批次。台数、合计和覆盖番号自动计算。",
-  "开票记录": "每笔开票一行。“覆盖批次”整批带入设备；“覆盖製造番号”逐台勾选，适合拆分开票。客户、覆盖台数、应收回款日和回款状态自动计算。",
-  "回款记录": "每笔回款一行。“覆盖批次”整批带入设备；“覆盖製造番号”逐台勾选，适合拆分回款。到期日、是否超期、超期天数自动计算。",
+  "付款条件": "点击“录入付款条件”后选择 JOB，一次维护完整付款条款；比例合计须 100%。客户自动带入，已被开票/回款引用的款类不可无关联地删除。",
+  "设备台账": "点击“录入设备”使用独立表单；客户自动带入，发货批次只能选择该 JOB 已存在的批次。宽表保留用于查看和修改既有记录。",
+  "发货批次": "点击“新增发货批次”填写批次并可勾选同一 JOB 的设备；台数、合计和覆盖番号自动计算。批次改名会同步关联表。",
+  "开票记录": "点击“新增开票记录”；款类来自该 JOB 付款条件，覆盖范围只显示该 JOB 的批次/制造番号，覆盖台数和应收状态自动计算。",
+  "回款记录": "点击“新增回款记录”；款类来自该 JOB 付款条件，可整批或逐台勾选，批次自动回写，覆盖台数和超期信息自动计算。",
+};
+
+const ENTRY_ACTION_LABELS = {
+  "合同订单": "＋ 新建订单",
+  "付款条件": "＋ 录入付款条件",
+  "设备台账": "＋ 录入设备",
+  "发货批次": "＋ 新增发货批次",
+  "开票记录": "＋ 新增开票记录",
+  "回款记录": "＋ 新增回款记录",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -192,6 +201,20 @@ function validateAll() {
       issues.push({ severity: "error", msg: `${job} 付款条件比例合计 ${total}% ≠ 100%` });
     }
   }
+  const termKinds = {};
+  for (const term of state.data["付款条件"]) {
+    const job = s(term["JOB No"]), kind = s(term["款类"]);
+    if (kind) (termKinds[job] ||= new Set()).add(kind);
+  }
+  for (const table of ["开票记录", "回款记录"]) {
+    for (const rec of state.data[table]) {
+      const job = s(rec["JOB No"]), kind = s(rec["款类"]);
+      if (!kind || (table === "开票记录" && kind === "全额")) continue;
+      if (!termKinds[job]?.has(kind)) {
+        issues.push({ severity: "error", msg: `${table} ${job} 款类“${kind}”不在该 JOB 的付款条件中` });
+      }
+    }
+  }
   const seen = new Set(), seenFull = new Set();
   for (const d of state.data["设备台账"]) {
     const job = String(d["JOB No"] || ""), ser = String(d["製造番号"] || ""), ki = String(d["機番"] || "");
@@ -289,6 +312,8 @@ function switchTab(tab) {
   $("panel-预警规则").classList.toggle("hidden", tab !== "预警规则");
   document.querySelectorAll(".only-ship").forEach((b) =>
     b.classList.toggle("hidden", tab !== "发货批次"));
+  const addButton = $("btnAddRecord");
+  if (addButton && ENTRY_ACTION_LABELS[tab]) addButton.textContent = ENTRY_ACTION_LABELS[tab];
   if (tab !== "摘要" && tab !== "使用指南" && tab !== "预警规则") renderGrid();
 }
 
@@ -442,11 +467,14 @@ function recomputeDerived() {
   for (const table of ["开票记录", "回款记录"]) {
     for (const rec of d[table]) {
       const serials = new Set(coverageValues(rec["覆盖製造番号"]));
-      rec["覆盖台数"] = serials.size;
+      const jobDevices = devicesByJob[s(rec["JOB No"])] || [];
+      const hasCoverage = serials.size || coverageValues(rec["覆盖批次"]).length;
+      rec["覆盖台数"] = hasCoverage
+        ? jobDevices.filter((dev) => coverageMatches(rec, dev)).length
+        : 0;
       if (serials.size) {
         const batches = [];
         let safeToRebuild = true;
-        const jobDevices = devicesByJob[s(rec["JOB No"])] || [];
         for (const token of serials) {
           const parts = new Set(token.split(/[→⇒⟶➡➝]/).filter(Boolean));
           const matches = jobDevices.filter((dev) =>
@@ -577,7 +605,12 @@ function renderGrid() {
         return `<td class="coverage-cell"><button type="button" class="coverage-picker" data-coverage-field="${esc(f.name)}" title="${pickerTitle}">${esc(label)} <span>▾</span></button></td>`;
       }
       if (f.type === "select") {
-        const opts = ["", ...f.options].map((o) =>
+        let options = f.options;
+        if (["开票记录", "回款记录"].includes(table) && f.name === "款类") {
+          options = paymentKindsForJob(s(rec["JOB No"]));
+          if (s(v) && !options.includes(s(v))) options = [...options, s(v)];
+        }
+        const opts = ["", ...options].map((o) =>
           `<option value="${esc(o)}" ${String(v) === String(o) ? "selected" : ""}>${esc(o || "（空）")}</option>`).join("");
         return `<td><select data-f="${esc(f.name)}">${opts}</select></td>`;
       }
@@ -762,15 +795,8 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
     const act = b.dataset.act;
     const table = state.tab;
     if (act === "add") {
-      const ctx = currentContext();
-      const rec = { "记录ID": newLocalId() };
-      if (ctx.job) rec["JOB No"] = ctx.job;
-      if (table === "合同订单" && ctx.customer) rec["客户"] = ctx.customer;
-      state.data[table].push(rec);
-      state.dirty = true;
-      state.selection = new Set([state.data[table].length - 1]);
-      recomputeDerived(); renderGrid(); renderCounts();
-      $("gridWrap").scrollTop = $("gridWrap").scrollHeight;
+      if (table === "合同订单") openNewOrder();
+      else openEntryModal(table);
     } else if (act === "del") {
       const idxs = [...state.selection].sort((a, b) => b - a);
       if (!idxs.length) { toast("请先选择要删除的行", "error"); return; }
@@ -965,9 +991,10 @@ $("splitClose").addEventListener("click", closeSplit);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSplit(); });
 
 // 开票/回款覆盖范围：批次入口整批选择，製造番号入口逐台选择。
-function openCoverageModal(table, ri, field) {
+// draftRecord 用于独立录入窗口，应用覆盖范围前不写入正式表。
+function openCoverageModal(table, ri, field, draftRecord = null) {
   if (!["开票记录", "回款记录"].includes(table)) return;
-  const rec = state.data[table]?.[ri];
+  const rec = draftRecord || state.data[table]?.[ri];
   if (!rec) return;
   const mode = field === "覆盖批次" ? "batch" : "serial";
   const job = s(rec["JOB No"]);
@@ -981,6 +1008,11 @@ function openCoverageModal(table, ri, field) {
     const batch = s(item.device["发货批次"]) || "（无批次）";
     if (!groups.has(batch)) groups.set(batch, []);
     groups.get(batch).push(item);
+  }
+  for (const shipment of state.data["发货批次"]) {
+    if (s(shipment["JOB No"]) !== job) continue;
+    const batch = s(shipment["发货批次"]);
+    if (batch && !groups.has(batch)) groups.set(batch, []);
   }
   $("coverageTitle").textContent = mode === "batch"
     ? `${table === "回款记录" ? "回款" : "开票"}覆盖批次`
@@ -1013,18 +1045,19 @@ function openCoverageModal(table, ri, field) {
         `<span>${esc(s(device["设备型号"]) || "—")}</span>` +
         `<span class="meta">机番 ${esc(s(device["機番"]) || "—")} · ${Number(device["未税单价"] || 0).toLocaleString()}</span></${rowTag}>`;
     }).join("");
-    const allChecked = selectable.length && selectable.every(({ device }) =>
+    const allChecked = selectedBatches.has(batch) || (selectable.length && selectable.every(({ device }) =>
       coverageContains(rec["覆盖製造番号"], s(device["製造番号"]))
-      || (!selectedSerials.size && selectedBatches.has(s(device["发货批次"]))));
+      || (!selectedSerials.size && selectedBatches.has(s(device["发货批次"])))));
     const groupHead = mode === "batch"
-      ? `<label class="coverage-group-head"><input type="checkbox" class="coverage-group-all" data-batch-key="${esc(batch)}" ${allChecked ? "checked" : ""} ${batch === "（无批次）" || !selectable.length ? "disabled" : ""}><b>批次 ${esc(batch)}</b><span class="coverage-group-meta">${items.length} 台</span></label>`
+      ? `<label class="coverage-group-head"><input type="checkbox" class="coverage-group-all" data-batch-key="${esc(batch)}" ${allChecked ? "checked" : ""} ${batch === "（无批次）" ? "disabled" : ""}><b>批次 ${esc(batch)}</b><span class="coverage-group-meta">${items.length} 台</span></label>`
       : `<div class="coverage-group-head"><b>批次 ${esc(batch)}</b><span class="coverage-group-meta">${items.length} 台 · 请逐台勾选</span></div>`;
     return `<div class="coverage-group">${groupHead}${rows}</div>`;
   }).join("") : '<div class="coverage-empty">该 JOB 尚无设备。请展开下方“手工输入”填批次，或先到设备台账建设备。</div>';
   state._coverage = {
-    table, ri, job, mode, deviceIndexes: devices.map((x) => x.index),
+    table, ri, job, mode, record: rec, draft: !!draftRecord,
+    deviceIndexes: devices.map((x) => x.index),
     batchIndexes: new Map([...groups.entries()].map(([batch, items]) =>
-      [batch, items.filter(({ device }) => s(device["製造番号"])).map(({ index }) => index)])),
+      [batch, items.map(({ index }) => index)])),
   };
   updateCoverageSummary();
   $("coverageModal").classList.remove("hidden");
@@ -1037,6 +1070,13 @@ function coverageSelectedIndexes() {
   }
   return [...document.querySelectorAll("#coverageList .coverage-device-check:checked")]
     .map((box) => Number(box.dataset.index));
+}
+
+function coverageSelectedBatches() {
+  if (state._coverage?.mode !== "batch") return [];
+  return [...document.querySelectorAll("#coverageList .coverage-group-all:checked")]
+    .map((box) => box.dataset.batchKey)
+    .filter((batch) => batch && batch !== "（无批次）");
 }
 
 function updateCoverageGroupChecks() {
@@ -1054,9 +1094,10 @@ function updateCoverageGroupChecks() {
 function updateCoverageSummary() {
   const indexes = coverageSelectedIndexes();
   const batches = new Set(indexes.map((index) => s(state.data["设备台账"][index]?.["发货批次"])));
-  $("coverageSummary").textContent = indexes.length
+  const selectedBatchCount = coverageSelectedBatches().length;
+  $("coverageSummary").textContent = indexes.length || selectedBatchCount
     ? (state._coverage?.mode === "batch"
-      ? `已选 ${[...batches].filter(Boolean).length} 个批次 · 将带入 ${indexes.length} 台设备`
+      ? `已选 ${selectedBatchCount} 个批次 · 将覆盖 ${indexes.length} 台设备`
       : `已逐台选择 ${indexes.length} 台 · 覆盖 ${[...batches].filter(Boolean).length} 个批次`)
     : (state._coverage?.mode === "batch"
       ? "尚未选择批次；无设备订单可使用下方手工输入。"
@@ -1104,11 +1145,15 @@ $("coverageClear").addEventListener("click", () => {
 $("coverageApply").addEventListener("click", () => {
   const context = state._coverage;
   if (!context) return;
-  const rec = state.data[context.table]?.[context.ri];
+  const rec = context.record || state.data[context.table]?.[context.ri];
   if (!rec) return closeCoverageModal();
   const indexes = coverageSelectedIndexes();
   let serials, batches;
-  if (indexes.length) {
+  const selectedBatches = coverageSelectedBatches();
+  if (context.mode === "batch" && selectedBatches.length) {
+    serials = [...new Set(indexes.map((index) => s(state.data["设备台账"][index]["製造番号"])).filter(Boolean))];
+    batches = selectedBatches;
+  } else if (indexes.length) {
     serials = [...new Set(indexes.map((index) => s(state.data["设备台账"][index]["製造番号"])).filter(Boolean))];
     batches = [...new Set(indexes.map((index) => s(state.data["设备台账"][index]["发货批次"])).filter(Boolean))];
   } else {
@@ -1123,6 +1168,12 @@ $("coverageApply").addEventListener("click", () => {
   }
   rec["覆盖製造番号"] = serials.join(";");
   rec["覆盖批次"] = batches.join(";");
+  if (context.draft) {
+    closeCoverageModal();
+    updateEntryCoveragePreview();
+    toast(`已带入 ${batches.length} 个批次 / ${indexes.length} 台设备`, "ok");
+    return;
+  }
   state.dirty = true;
   recomputeDerived();
   closeCoverageModal();
@@ -1134,7 +1185,10 @@ $("coverageApply").addEventListener("click", () => {
 $("coverageCancel").addEventListener("click", closeCoverageModal);
 $("coverageClose").addEventListener("click", closeCoverageModal);
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("coverageModal").classList.contains("hidden")) closeCoverageModal();
+  if (e.key === "Escape" && !$("coverageModal").classList.contains("hidden")) {
+    e.stopImmediatePropagation();
+    closeCoverageModal();
+  }
 });
 
 // 导出筛选结果到 Excel（可选字段）
@@ -1978,6 +2032,509 @@ window.addEventListener("beforeunload", (e) => {
   e.returnValue = "";
 });
 
+// ========== 各业务表独立录入 modal ==========
+const ENTRY_TITLES = {
+  "付款条件": "录入付款条件",
+  "设备台账": "录入设备",
+  "发货批次": "新增发货批次",
+  "开票记录": "新增开票记录",
+  "回款记录": "新增回款记录",
+};
+
+function customerForJob(job) {
+  return s(state.data["合同订单"].find((row) => s(row["JOB No"]) === s(job))?.["客户"]);
+}
+
+function entryJobOptions(selected) {
+  const contracts = [...state.data["合同订单"]].sort((a, b) =>
+    s(a["JOB No"]).localeCompare(s(b["JOB No"]), "zh"));
+  return '<option value="">请选择 JOB No…</option>' + contracts.map((row) => {
+    const job = s(row["JOB No"]), customer = s(row["客户"]);
+    return `<option value="${esc(job)}" ${job === selected ? "selected" : ""}>${esc(job)}${customer ? " · " + esc(customer) : ""}</option>`;
+  }).join("");
+}
+
+function entrySchemaOptions(table, field, selected, blankLabel = "请选择…") {
+  const spec = fieldsOf(table).find((item) => item.name === field);
+  const options = spec?.options || [];
+  return `<option value="">${esc(blankLabel)}</option>` + options.filter(Boolean).map((value) =>
+    `<option value="${esc(value)}" ${s(value) === s(selected) ? "selected" : ""}>${esc(value)}</option>`
+  ).join("");
+}
+
+function entryJobSection(job, title = "① 关联订单") {
+  return `<div class="entry-section">
+    <h4>${esc(title)}</h4>
+    <div class="entry-grid">
+      <label>JOB No<select id="entryJob">${entryJobOptions(job)}</select></label>
+      <label>客户（自动带入）<input id="entryCustomer" readonly value="${esc(customerForJob(job))}" placeholder="选择 JOB 后自动显示"></label>
+    </div>
+  </div>`;
+}
+
+function entryPaymentTermRow(rec = {}) {
+  const rid = s(rec["记录ID"]);
+  return `<tr data-rid="${esc(rid)}">
+    <td><select class="et-kind">${entrySchemaOptions("付款条件", "款类", rec["款类"], "选择款类")}</select></td>
+    <td><input class="et-ratio" type="number" min="0" max="100" step="any" value="${esc(val(rec, "比例%"))}"></td>
+    <td><input class="et-days" type="number" min="0" step="1" value="${esc(val(rec, "账期天数"))}"></td>
+    <td><select class="et-trigger">${entrySchemaOptions("付款条件", "触发条件", rec["触发条件"], "选择触发条件")}</select></td>
+    <td><input class="et-desc" value="${esc(val(rec, "说明"))}" placeholder="条款说明"></td>
+    <td class="entry-term-del"><button type="button" data-entry-act="del-term" title="删除本条">✕</button></td>
+  </tr>`;
+}
+
+function renderPaymentTermsEntry(job) {
+  const existing = job ? state.data["付款条件"].filter((row) => s(row["JOB No"]) === job) : [];
+  const rows = existing.length ? existing : [{}];
+  return entryJobSection(job) + `<div class="entry-section">
+    <h4><span>② 完整付款条款</span><span>
+      <button type="button" class="noc-mini" data-entry-act="add-term">＋ 添加条款</button>
+      <button type="button" class="noc-mini" data-entry-template="A">A模板</button>
+      <button type="button" class="noc-mini" data-entry-template="B">B模板</button>
+      <button type="button" class="noc-mini" data-entry-template="C">C模板</button>
+    </span></h4>
+    ${job ? `<table class="entry-term-table"><thead><tr><th style="width:110px">款类</th><th style="width:72px">比例%</th><th style="width:80px">账期天数</th><th style="width:135px">触发条件</th><th>说明</th><th style="width:36px"></th></tr></thead><tbody id="entryTermRows">${rows.map(entryPaymentTermRow).join("")}</tbody></table>
+      <div id="entryTermSummary" class="entry-help"></div>`
+      : '<div class="entry-list-empty">请先选择 JOB No，再录入该订单的完整付款条件。</div>'}
+    <p class="entry-help">提交会用这里的条款替换该 JOB 当前全部付款条件；合计必须为 100%。已被开票或回款引用的款类会受到关联保护。</p>
+  </div>`;
+}
+
+function pendingDeviceOptions(job, selectedId) {
+  const rows = state.data["设备台账"].filter((row) =>
+    s(row["JOB No"]) === job && !s(row["製造番号"]));
+  return '<option value="">新增一台设备</option>' + rows.map((row, index) => {
+    const rid = s(row["记录ID"]);
+    const label = `待完善 ${index + 1} · ${s(row["设备型号"]) || "无型号"} · 批次 ${s(row["发货批次"]) || "—"} · PO ${s(row["PO No"]) || "—"}`;
+    return `<option value="${esc(rid)}" ${rid === selectedId ? "selected" : ""}>${esc(label)}</option>`;
+  }).join("");
+}
+
+function renderDeviceEntry(job) {
+  const targetId = s(state._entry.deviceTargetId);
+  const target = state.data["设备台账"].find((row) =>
+    s(row["JOB No"]) === job && s(row["记录ID"]) === targetId && !s(row["製造番号"])) || {};
+  const batches = state.data["发货批次"].filter((row) => s(row["JOB No"]) === job);
+  const batchOptions = '<option value="">请选择该 JOB 的批次…</option>' + batches.map((row) => {
+    const batch = s(row["发货批次"]);
+    return `<option value="${esc(batch)}" ${batch === s(target["发货批次"]) ? "selected" : ""}>${esc(batch)}${s(row["出荷日"]) ? " · " + esc(s(row["出荷日"])) : ""}</option>`;
+  }).join("");
+  return entryJobSection(job) + `<div class="entry-section">
+    <h4>② 设备身份</h4>
+    ${job ? `<div class="entry-grid">
+      <label class="full">录入方式<select id="entryDeviceTarget">${pendingDeviceOptions(job, targetId)}</select></label>
+      <label>PO No<input id="entryPo" list="dlPo" autocomplete="off" value="${esc(val(target, "PO No"))}"></label>
+      <label>设备型号<input id="entryModel" list="dlModel" autocomplete="off" value="${esc(val(target, "设备型号"))}"></label>
+      <label>製造番号<input id="entrySerial" autocomplete="off" value="${esc(val(target, "製造番号"))}" placeholder="未知时可稍后补录"></label>
+      <label>機番<input id="entryMachine" autocomplete="off" value="${esc(val(target, "機番"))}"></label>
+      <label>未税单价<input id="entryPrice" type="number" step="any" min="0" value="${esc(val(target, "未税单价"))}"></label>
+      <label>是否无偿<select id="entryFree">${entrySchemaOptions("设备台账", "是否无偿", s(target["是否无偿"]) || "否", "请选择")}</select></label>
+    </div>` : '<div class="entry-list-empty">请先选择 JOB No。</div>'}
+  </div>
+  <div class="entry-section">
+    <h4>③ 发货与验收</h4>
+    ${job ? `<div class="entry-grid three">
+      <label>发货批次<select id="entryBatch">${batchOptions}</select></label>
+      <label>送货单回收<select id="entryReceipt">${entrySchemaOptions("设备台账", "送货单回收", target["送货单回收"], "未回收")}</select></label>
+      <label>质保期<input id="entryWarranty" value="${esc(val(target, "质保期"))}" placeholder="如 12个月"></label>
+      <label>质保开始日<input id="entryWarrantyStart" type="date" value="${esc(val(target, "质保开始日"))}"></label>
+      <label>质保结束日<input id="entryWarrantyEnd" type="date" value="${esc(val(target, "质保结束日"))}"></label>
+      <label class="full">备注<textarea id="entryNote" rows="2">${esc(val(target, "备注"))}</textarea></label>
+    </div>
+    ${batches.length ? '<p class="entry-help">批次列表严格限定为当前 JOB；验收状态由质保开始日自动计算。</p>' : '<div class="entry-warning">该 JOB 尚无发货批次。请先到“发货批次”页新增批次，设备不能引用其他 JOB 的批次。</div>'}` : '<div class="entry-list-empty">选择 JOB 后显示该订单的批次。</div>'}
+  </div>`;
+}
+
+function renderShipmentDevices(job) {
+  const devices = state.data["设备台账"].filter((row) => s(row["JOB No"]) === job);
+  if (!devices.length) return '<div class="entry-list-empty">该 JOB 暂无设备；可以先建立空批次，再通过“录入设备”选择该批次。</div>';
+  return `<div class="entry-list">${devices.map((row) => `<label class="entry-device-option">
+    <input type="checkbox" class="entry-ship-device" value="${esc(s(row["记录ID"]))}">
+    <span class="serial">${esc(s(row["製造番号"]) || "（待编号设备）")}</span>
+    <span>${esc(s(row["设备型号"]) || "—")}</span>
+    <span class="meta">当前批次 ${esc(s(row["发货批次"]) || "—")} · 机番 ${esc(s(row["機番"]) || "—")}</span>
+  </label>`).join("")}</div>`;
+}
+
+function renderShipmentEntry(job) {
+  return entryJobSection(job) + `<div class="entry-section">
+    <h4>② 批次信息</h4>
+    ${job ? `<div class="entry-grid">
+      <label>发货批次名<input id="entryShipmentName" autocomplete="off" placeholder="如 2"></label>
+      <label>出荷日<input id="entryShipmentDate" type="date"></label>
+    </div>` : '<div class="entry-list-empty">请先选择 JOB No。</div>'}
+  </div><div class="entry-section">
+    <h4>③ 将现有设备移入本批次（可选）</h4>
+    ${job ? renderShipmentDevices(job) : '<div class="entry-list-empty">选择 JOB 后仅显示该订单的设备。</div>'}
+    <p class="entry-help">列表不会出现其他 JOB 的设备。未勾选设备时仍可先建立空批次，之后在“录入设备”中引用。</p>
+  </div>`;
+}
+
+function paymentKindsForJob(job) {
+  return [...new Set(state.data["付款条件"]
+    .filter((row) => s(row["JOB No"]) === job && s(row["款类"]))
+    .map((row) => s(row["款类"])))];
+}
+
+function renderTransactionEntry(table, job) {
+  const draft = state._entry.draft;
+  draft["JOB No"] = job;
+  draft["客户"] = customerForJob(job);
+  const isInvoice = table === "开票记录";
+  const kinds = paymentKindsForJob(job);
+  const kindOptions = '<option value="">请选择付款条件中的款类…</option>' + kinds.map((kind) =>
+    `<option value="${esc(kind)}" ${kind === s(draft["款类"]) ? "selected" : ""}>${esc(kind)}</option>`).join("");
+  const dateField = isInvoice ? "开票日" : "回款日";
+  return entryJobSection(job) + `<div class="entry-section">
+    <h4>② ${isInvoice ? "开票" : "回款"}信息</h4>
+    ${job ? `<div class="entry-grid three">
+      <label>款类<select id="entryKind" ${kinds.length ? "" : "disabled"}>${kindOptions}</select></label>
+      <label>${dateField}<input id="entryTransactionDate" type="date" value="${esc(val(draft, dateField))}"></label>
+      <label>含税金额<input id="entryAmount" type="number" min="0" step="any" value="${esc(val(draft, "含税金额"))}" placeholder="手工输入金额"></label>
+      ${isInvoice ? `<label>状态<input value="已开" readonly></label><label>账期天数<input id="entryInvoiceDays" type="number" min="0" step="1" value="${esc(val(draft, "账期天数"))}"></label>` : ""}
+    </div>
+    ${kinds.length ? '<p class="entry-help">款类只读取当前 JOB 的付款条件，不会混入其他订单。</p>' : '<div class="entry-warning">该 JOB 尚未录入有效付款条件。请先到“付款条件”页录入完整条款后再新增本记录。</div>'}` : '<div class="entry-list-empty">请先选择 JOB No。</div>'}
+  </div><div class="entry-section">
+    <h4>③ 覆盖范围</h4>
+    <div class="entry-coverage-actions">
+      <div id="entryCoverageSummary" class="entry-coverage-summary">尚未选择覆盖范围</div>
+      <button type="button" data-entry-coverage="batch" ${job ? "" : "disabled"}>按批次勾选</button>
+      <button type="button" data-entry-coverage="serial" ${job ? "" : "disabled"}>按制造番号逐台选择</button>
+    </div>
+    <p class="entry-help">批次和设备列表均严格限定为当前 JOB；逐台选择制造番号后会自动回写对应批次，覆盖台数自动计算。</p>
+  </div>`;
+}
+
+function renderEntryBody() {
+  const entry = state._entry;
+  if (!entry) return;
+  const job = s(entry.job);
+  let html = "";
+  if (entry.table === "付款条件") html = renderPaymentTermsEntry(job);
+  else if (entry.table === "设备台账") html = renderDeviceEntry(job);
+  else if (entry.table === "发货批次") html = renderShipmentEntry(job);
+  else html = renderTransactionEntry(entry.table, job);
+  $("entryBody").innerHTML = html;
+  $("entryErrors").classList.add("hidden");
+  $("entryErrors").innerHTML = "";
+  if (entry.table === "付款条件" && job) updateEntryTermSummary();
+  if (["开票记录", "回款记录"].includes(entry.table)) updateEntryCoveragePreview();
+}
+
+function openEntryModal(table) {
+  if (!ENTRY_TITLES[table] || !state.data) return;
+  buildNocDatalists();
+  const contextJob = currentContext().job;
+  state._entry = {
+    table,
+    job: state.data["合同订单"].some((row) => s(row["JOB No"]) === contextJob) ? contextJob : "",
+    deviceTargetId: "",
+    draft: { "记录ID": newLocalId() },
+  };
+  $("entryTitle").textContent = ENTRY_TITLES[table];
+  $("entryOk").textContent = table === "付款条件" ? "保存完整条款" : "确认录入";
+  $("entrySafety").textContent = ["开票记录", "回款记录"].includes(table)
+    ? "JOB、客户、款类与覆盖范围会在提交时再次交叉校验。"
+    : "客户及自动字段由关联数据生成；提交前会检查跨表引用。";
+  renderEntryBody();
+  $("entryModal").classList.remove("hidden");
+}
+
+function closeEntryModal() {
+  $("entryModal").classList.add("hidden");
+  state._entry = null;
+}
+
+function showEntryErrors(errors) {
+  const box = $("entryErrors");
+  box.innerHTML = `<b>请修正以下 ${errors.length} 处问题：</b><ul>${errors.map((error) => `<li>${esc(error)}</li>`).join("")}</ul>`;
+  box.classList.remove("hidden");
+  box.scrollIntoView({ block: "nearest" });
+  toast(`请修正 ${errors.length} 处问题`, "error");
+}
+
+function updateEntryTermSummary() {
+  const box = $("entryTermSummary");
+  if (!box) return;
+  const rows = [...document.querySelectorAll("#entryTermRows tr")];
+  const meaningful = rows.filter((row) => row.querySelector(".et-kind").value);
+  const total = meaningful.reduce((sum, row) => sum + (Number(row.querySelector(".et-ratio").value) || 0), 0);
+  const ok = meaningful.length && Math.abs(total - 100) <= 0.01;
+  box.textContent = meaningful.length ? `当前合计 ${total}% / ${meaningful.length} 条${ok ? "  ✓" : "  ⚠ 必须为 100%"}` : "尚未录入有效条款";
+  box.style.color = ok ? "var(--ok)" : "var(--danger)";
+}
+
+function syncEntryTransactionDraft() {
+  const entry = state._entry;
+  if (!entry || !["开票记录", "回款记录"].includes(entry.table)) return;
+  const draft = entry.draft;
+  draft["JOB No"] = entry.job;
+  draft["客户"] = customerForJob(entry.job);
+  if ($("entryKind")) draft["款类"] = $("entryKind").value;
+  if ($("entryTransactionDate")) draft[entry.table === "开票记录" ? "开票日" : "回款日"] = $("entryTransactionDate").value;
+  if ($("entryAmount")) draft["含税金额"] = $("entryAmount").value === "" ? null : Number($("entryAmount").value);
+  if (entry.table === "开票记录") {
+    draft["状态"] = "已开";
+    if ($("entryInvoiceDays")) draft["账期天数"] = $("entryInvoiceDays").value === "" ? null : Math.round(Number($("entryInvoiceDays").value));
+  }
+}
+
+function updateEntryCoveragePreview() {
+  const entry = state._entry, box = $("entryCoverageSummary");
+  if (!entry || !box || !["开票记录", "回款记录"].includes(entry.table)) return;
+  const draft = entry.draft;
+  const batches = coverageValues(draft["覆盖批次"]);
+  const serials = coverageValues(draft["覆盖製造番号"]);
+  const devices = state.data["设备台账"].filter((row) => s(row["JOB No"]) === s(entry.job));
+  const covered = devices.filter((device) => coverageMatches(draft, device));
+  box.textContent = batches.length || serials.length
+    ? `已选 ${batches.length} 个批次 · ${serials.length} 个制造番号 · 自动覆盖 ${covered.length} 台设备`
+    : (devices.length ? `尚未选择 · 当前 JOB 共 ${devices.length} 台设备` : "该 JOB 暂无设备，可录入预付款/开票后稍后补覆盖范围");
+}
+
+function readEntryTerms() {
+  return [...document.querySelectorAll("#entryTermRows tr")].map((row) => ({
+    rid: row.dataset.rid || "",
+    kind: row.querySelector(".et-kind").value,
+    ratio: Number(row.querySelector(".et-ratio").value),
+    days: Number(row.querySelector(".et-days").value),
+    trigger: row.querySelector(".et-trigger").value,
+    desc: row.querySelector(".et-desc").value.trim(),
+  })).filter((row) => row.kind || row.ratio || row.days || row.trigger || row.desc);
+}
+
+function commitPaymentTermsEntry() {
+  const job = s(state._entry.job), rows = readEntryTerms(), errors = [];
+  const allowed = new Set(fieldsOf("付款条件").find((field) => field.name === "款类").options);
+  if (!job || !customerForJob(job)) errors.push("请选择有效 JOB No");
+  if (!rows.length) errors.push("至少录入一条付款条件");
+  rows.forEach((row, index) => {
+    if (!allowed.has(row.kind)) errors.push(`第 ${index + 1} 条款类无效`);
+    if (!(row.ratio > 0 && row.ratio <= 100)) errors.push(`第 ${index + 1} 条比例必须大于 0 且不超过 100`);
+    if (!Number.isInteger(row.days) || row.days < 0) errors.push(`第 ${index + 1} 条账期天数必须是非负整数`);
+  });
+  const total = rows.reduce((sum, row) => sum + (Number(row.ratio) || 0), 0);
+  if (rows.length && Math.abs(total - 100) > 0.01) errors.push(`付款条件比例合计 ${total}% ≠ 100%`);
+
+  const previous = state.data["付款条件"].filter((row) => s(row["JOB No"]) === job);
+  const nextKinds = new Set(rows.map((row) => row.kind));
+  const renames = new Map();
+  for (const old of previous) {
+    const oldKind = s(old["款类"]);
+    if (!oldKind || nextKinds.has(oldKind)) continue;
+    const replacement = rows.find((row) => row.rid && row.rid === s(old["记录ID"]) && row.kind !== oldKind);
+    const referenced = ["开票记录", "回款记录"].some((table) => state.data[table].some((rec) =>
+      s(rec["JOB No"]) === job && s(rec["款类"]) === oldKind));
+    if (replacement) renames.set(oldKind, replacement.kind);
+    else if (referenced) errors.push(`款类“${oldKind}”已被开票/回款引用，不能直接删除；请保留或改名`);
+  }
+  if (errors.length) return showEntryErrors(errors);
+
+  const nextRows = rows.map((row) => ({
+    "记录ID": row.rid || newLocalId(), "JOB No": job, "款类": row.kind,
+    "比例%": row.ratio, "账期天数": row.days, "触发条件": row.trigger,
+    "说明": row.desc,
+  }));
+  state.data["付款条件"] = state.data["付款条件"].filter((row) => s(row["JOB No"]) !== job).concat(nextRows);
+  for (const [before, after] of renames) {
+    for (const table of ["开票记录", "回款记录"]) {
+      for (const rec of state.data[table]) {
+        if (s(rec["JOB No"]) === job && s(rec["款类"]) === before) rec["款类"] = after;
+      }
+    }
+  }
+  finishEntryCommit("付款条件", job, nextRows.length, `已保存 ${job} 的 ${nextRows.length} 条付款条件`);
+}
+
+function commitDeviceEntry() {
+  const job = s(state._entry.job), targetId = s(state._entry.deviceTargetId), errors = [];
+  const batch = s($("entryBatch")?.value), model = s($("entryModel")?.value).trim();
+  const serial = s($("entrySerial")?.value).trim(), machine = s($("entryMachine")?.value).trim();
+  const priceRaw = $("entryPrice")?.value ?? "";
+  if (!job || !customerForJob(job)) errors.push("请选择有效 JOB No");
+  if (!model) errors.push("设备型号不能为空");
+  if (!batch || !state.data["发货批次"].some((row) => s(row["JOB No"]) === job && s(row["发货批次"]) === batch)) {
+    errors.push("必须选择当前 JOB 已存在的发货批次");
+  }
+  if (priceRaw !== "" && (!Number.isFinite(Number(priceRaw)) || Number(priceRaw) < 0)) errors.push("未税单价必须是非负数字");
+  const start = s($("entryWarrantyStart")?.value), end = s($("entryWarrantyEnd")?.value);
+  if (start && end && end < start) errors.push("质保结束日不能早于质保开始日");
+  if (serial && state.data["设备台账"].some((row) => row !== state.data["设备台账"].find((x) => s(x["记录ID"]) === targetId)
+      && s(row["JOB No"]) === job && s(row["製造番号"]) === serial && s(row["機番"]) === machine)) {
+    errors.push(`设备业务键重复：${job} / ${serial} / ${machine || "空机番"}`);
+  }
+  if (errors.length) return showEntryErrors(errors);
+  const record = {
+    "JOB No": job, "PO No": s($("entryPo").value).trim(), "设备型号": model,
+    "製造番号": serial, "機番": machine, "未税单价": priceRaw === "" ? null : Number(priceRaw),
+    "是否无偿": $("entryFree").value || "否", "发货批次": batch,
+    "送货单回收": $("entryReceipt").value, "质保开始日": start,
+    "质保结束日": end, "质保期": s($("entryWarranty").value).trim(),
+    "备注": s($("entryNote").value).trim(),
+  };
+  let target = targetId ? state.data["设备台账"].find((row) =>
+    s(row["JOB No"]) === job && s(row["记录ID"]) === targetId && !s(row["製造番号"])) : null;
+  if (target) Object.assign(target, record);
+  else {
+    target = { "记录ID": newLocalId(), ...record };
+    state.data["设备台账"].push(target);
+  }
+  finishEntryCommit("设备台账", job, 1, targetId ? `已完善设备 ${serial || model}` : `已新增设备 ${serial || model}`,
+    state.data["设备台账"].indexOf(target));
+}
+
+function commitShipmentEntry() {
+  const job = s(state._entry.job), batch = s($("entryShipmentName")?.value).trim(), errors = [];
+  if (!job || !customerForJob(job)) errors.push("请选择有效 JOB No");
+  if (!batch) errors.push("发货批次名不能为空");
+  if (state.data["发货批次"].some((row) => s(row["JOB No"]) === job && s(row["发货批次"]) === batch)) errors.push(`该 JOB 已存在批次“${batch}”`);
+  const selectedIds = new Set([...document.querySelectorAll(".entry-ship-device:checked")].map((box) => box.value));
+  const selected = state.data["设备台账"].filter((row) => selectedIds.has(s(row["记录ID"])));
+  if (selected.some((row) => s(row["JOB No"]) !== job)) errors.push("设备选择中出现了其他 JOB 的记录，请重新打开录入窗口");
+  if (errors.length) return showEntryErrors(errors);
+  const shipment = { "记录ID": newLocalId(), "JOB No": job, "发货批次": batch, "出荷日": s($("entryShipmentDate").value) };
+  state.data["发货批次"].push(shipment);
+  for (const device of selected) device["发货批次"] = batch;
+  finishEntryCommit("发货批次", job, 1, `已新增批次 ${batch}${selected.length ? `，并移入 ${selected.length} 台设备` : ""}`,
+    state.data["发货批次"].indexOf(shipment));
+}
+
+function isBlankTransaction(table, rec) {
+  const dateField = table === "开票记录" ? "开票日" : "回款日";
+  return !s(rec["款类"]) && !s(rec[dateField]) && !Number(rec["含税金额"])
+    && !s(rec["覆盖批次"]) && !s(rec["覆盖製造番号"]);
+}
+
+function commitTransactionEntry() {
+  syncEntryTransactionDraft();
+  const entry = state._entry, table = entry.table, draft = entry.draft;
+  const job = s(entry.job), errors = [], isInvoice = table === "开票记录";
+  const dateField = isInvoice ? "开票日" : "回款日";
+  const kinds = new Set(paymentKindsForJob(job));
+  if (!job || !customerForJob(job)) errors.push("请选择有效 JOB No");
+  if (!s(draft["款类"]) || !kinds.has(s(draft["款类"]))) errors.push("款类必须来自当前 JOB 已录入的付款条件");
+  if (!s(draft[dateField])) errors.push(`${dateField}不能为空`);
+  if (!(Number(draft["含税金额"]) > 0)) errors.push("含税金额必须大于 0");
+  if (isInvoice && (!Number.isInteger(Number(draft["账期天数"])) || Number(draft["账期天数"]) < 0)) errors.push("账期天数必须是非负整数");
+  const batches = coverageValues(draft["覆盖批次"]), serials = coverageValues(draft["覆盖製造番号"]);
+  const jobDevices = state.data["设备台账"].filter((row) => s(row["JOB No"]) === job);
+  const validBatches = new Set(state.data["发货批次"].filter((row) => s(row["JOB No"]) === job).map((row) => s(row["发货批次"])));
+  const validSerials = new Set(jobDevices.map((row) => s(row["製造番号"])).filter(Boolean));
+  const badBatch = batches.find((batch) => !validBatches.has(batch));
+  const badSerial = serials.find((serial) => !validSerials.has(serial));
+  if (badBatch) errors.push(`覆盖批次“${badBatch}”不属于当前 JOB`);
+  if (badSerial) errors.push(`製造番号“${badSerial}”不属于当前 JOB`);
+  if (jobDevices.length && !batches.length && !serials.length) errors.push("该 JOB 已有设备，必须按批次或制造番号选择覆盖范围");
+  if (errors.length) return showEntryErrors(errors);
+
+  const record = {
+    "JOB No": job, "款类": s(draft["款类"]), [dateField]: s(draft[dateField]),
+    "含税金额": Number(draft["含税金额"]), "覆盖批次": batches.join(";"),
+    "覆盖製造番号": serials.join(";"),
+  };
+  if (isInvoice) {
+    record["状态"] = "已开";
+    record["账期天数"] = Number(draft["账期天数"]);
+  }
+  let target = state.data[table].find((row) => s(row["JOB No"]) === job && isBlankTransaction(table, row));
+  if (target) Object.assign(target, record);
+  else {
+    target = { "记录ID": newLocalId(), ...record };
+    state.data[table].push(target);
+  }
+  finishEntryCommit(table, job, 1, `已新增${isInvoice ? "开票" : "回款"}记录：${s(record["款类"])} / ${Number(record["含税金额"]).toLocaleString()}`,
+    state.data[table].indexOf(target));
+}
+
+function finishEntryCommit(table, job, count, message, selectedIndex = null) {
+  state.dirty = true;
+  recomputeDerived();
+  state.jobFilter = new Set([job]);
+  state.customerFilter = null;
+  state.selection = selectedIndex === null ? new Set() : new Set([selectedIndex]);
+  closeEntryModal();
+  renderGrid();
+  renderCounts();
+  renderSummary();
+  toast(message || `已录入 ${count} 条记录`, "ok");
+}
+
+function commitEntryModal() {
+  if (!state._entry) return;
+  if (state._entry.table === "付款条件") commitPaymentTermsEntry();
+  else if (state._entry.table === "设备台账") commitDeviceEntry();
+  else if (state._entry.table === "发货批次") commitShipmentEntry();
+  else commitTransactionEntry();
+}
+
+$("entryBody").addEventListener("change", (event) => {
+  const entry = state._entry;
+  if (!entry) return;
+  if (event.target.id === "entryJob") {
+    entry.job = event.target.value;
+    entry.deviceTargetId = "";
+    entry.draft = { "记录ID": newLocalId(), "JOB No": entry.job };
+    renderEntryBody();
+    return;
+  }
+  if (event.target.id === "entryDeviceTarget") {
+    entry.deviceTargetId = event.target.value;
+    renderEntryBody();
+    return;
+  }
+  if (event.target.id === "entryKind" && entry.table === "开票记录") {
+    const term = state.data["付款条件"].find((row) =>
+      s(row["JOB No"]) === s(entry.job) && s(row["款类"]) === event.target.value);
+    if ($("entryInvoiceDays")) $("entryInvoiceDays").value = term?.["账期天数"] ?? 0;
+  }
+  syncEntryTransactionDraft();
+});
+
+$("entryBody").addEventListener("input", (event) => {
+  if (event.target.closest("#entryTermRows")) updateEntryTermSummary();
+  syncEntryTransactionDraft();
+});
+
+$("entryBody").addEventListener("click", (event) => {
+  const action = event.target.closest("[data-entry-act]")?.dataset.entryAct;
+  if (action === "add-term") {
+    if (!$("entryTermRows")) return showEntryErrors(["请先选择 JOB No"]);
+    $("entryTermRows").insertAdjacentHTML("beforeend", entryPaymentTermRow());
+    updateEntryTermSummary();
+    return;
+  }
+  if (action === "del-term") {
+    event.target.closest("tr").remove();
+    updateEntryTermSummary();
+    return;
+  }
+  const templateKey = event.target.closest("[data-entry-template]")?.dataset.entryTemplate;
+  if (templateKey) {
+    if (!$("entryTermRows")) return showEntryErrors(["请先选择 JOB No"]);
+    const terms = PAYMENT_TEMPLATES[templateKey] || [];
+    $("entryTermRows").innerHTML = terms.map((term) => entryPaymentTermRow({
+      "款类": term.kind, "比例%": term.ratio, "账期天数": term.days,
+      "触发条件": term.trigger, "说明": term.desc,
+    })).join("");
+    updateEntryTermSummary();
+    return;
+  }
+  const coverageMode = event.target.closest("[data-entry-coverage]")?.dataset.entryCoverage;
+  if (coverageMode) {
+    syncEntryTransactionDraft();
+    if (!s(state._entry.job)) return showEntryErrors(["请先选择 JOB No"]);
+    openCoverageModal(state._entry.table, -1, coverageMode === "batch" ? "覆盖批次" : "覆盖製造番号", state._entry.draft);
+  }
+});
+
+$("entryClose").addEventListener("click", closeEntryModal);
+$("entryCancel").addEventListener("click", closeEntryModal);
+$("entryOk").addEventListener("click", commitEntryModal);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state._entry && !state._coverage) closeEntryModal();
+});
+
 // ========== 新建订单 modal ==========
 const PAYMENT_TEMPLATES = {
   A: [
@@ -2054,13 +2611,15 @@ function addNocDeviceRow() {
 
 function nocTermRowHtml() {
   return `<tr>
-    <td><input class="nt-kind" list="dlKind" autocomplete="off" placeholder="款类"></td>
+    <td><select class="nt-kind">${entrySchemaOptions("付款条件", "款类", "", "选择款类")}</select></td>
     <td><input class="nt-ratio" type="number" min="0" max="100" step="any" placeholder="0"></td>
     <td><input class="nt-days" type="number" min="0" step="1" placeholder="0"></td>
+    <td><select class="nt-trigger">${entrySchemaOptions("付款条件", "触发条件", "", "选择触发条件")}</select></td>
+    <td><input class="nt-desc" autocomplete="off" placeholder="条款说明"></td>
     <td class="noc-del"><button type="button" class="nt-del">✕</button></td>
   </tr>`;
 }
-function addNocTermRow(kind, ratio, days) {
+function addNocTermRow(kind, ratio, days, trigger, desc) {
   const tr = document.createElement("tr");
   tr.innerHTML = nocTermRowHtml();
   $("nocTermRows").appendChild(tr);
@@ -2068,13 +2627,15 @@ function addNocTermRow(kind, ratio, days) {
     tr.querySelector(".nt-kind").value = kind;
     tr.querySelector(".nt-ratio").value = ratio;
     tr.querySelector(".nt-days").value = days;
+    tr.querySelector(".nt-trigger").value = trigger || "";
+    tr.querySelector(".nt-desc").value = desc || "";
   }
 }
 function fillNocTemplate(key) {
   const terms = PAYMENT_TEMPLATES[key];
   if (!terms) return;
   $("nocTermRows").innerHTML = "";
-  for (const t of terms) addNocTermRow(t.kind, t.ratio, t.days);
+  for (const t of terms) addNocTermRow(t.kind, t.ratio, t.days, t.trigger, t.desc);
   nocTermSummary();
 }
 function nocTermSummary() {
@@ -2148,6 +2709,8 @@ function readNocForm() {
       kind: tr.querySelector(".nt-kind").value.trim(),
       ratio: Number(tr.querySelector(".nt-ratio").value) || 0,
       days: Number(tr.querySelector(".nt-days").value) || 0,
+      trigger: tr.querySelector(".nt-trigger").value,
+      desc: tr.querySelector(".nt-desc").value.trim(),
     })).filter((t) => t.kind),
   };
 }
@@ -2163,6 +2726,12 @@ function validateNoc(f) {
     if (d.qty > 0 && !d.model) errs.push("第 " + (i + 1) + " 行设备缺少型号");
   });
   if (f.terms.length) {
+    const allowedKinds = new Set(fieldsOf("付款条件").find((field) => field.name === "款类").options);
+    f.terms.forEach((term, index) => {
+      if (!allowedKinds.has(term.kind)) errs.push("第 " + (index + 1) + " 条付款款类无效");
+      if (!(term.ratio > 0 && term.ratio <= 100)) errs.push("第 " + (index + 1) + " 条付款比例必须大于 0 且不超过 100");
+      if (!Number.isInteger(term.days) || term.days < 0) errs.push("第 " + (index + 1) + " 条账期天数必须是非负整数");
+    });
     const sum = f.terms.reduce((a, t) => a + Number(t.ratio), 0);
     if (Math.abs(sum - 100) > 0.01) errs.push("付款条件比例合计 " + sum + "% ≠ 100%（或全部留空建空占位）");
   }
@@ -2204,7 +2773,7 @@ function commitNewOrder(f) {
     for (const t of f.terms) {
       state.data["付款条件"].push({
         "记录ID": newId(), "JOB No": job, "款类": t.kind, "比例%": Number(t.ratio),
-        "账期天数": Number(t.days),
+        "账期天数": Number(t.days), "触发条件": t.trigger, "说明": t.desc,
       });
     }
   } else {

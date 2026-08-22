@@ -1,4 +1,4 @@
-# BKTC Ledger 工程交接（v1.3.0）
+# BKTC Ledger 工程交接（v1.4.0）
 
 ## 当前架构
 
@@ -14,7 +14,7 @@ pywebview UI
 - `database.py`：关系表、JSON 迁移、事务、备份、修订、Excel 往返。
 - `core.py`：六表 schema、规范化、派生、业务校验、查询导出与台账入口。
 - `build_ledger_main.py`：导航页、未回收管理表、JOB 页生成。
-- `ui/`：纯 HTML/CSS/JS；大表行虚拟化，跨表查询包含「未付款订单」和「未回款明细」派生数据源。
+- `ui/`：纯 HTML/CSS/JS；六个业务标签页均有独立录入窗口，大表行虚拟化，跨表查询包含「未付款订单」和「未回款明细」派生数据源。
 - `tests/`：SQLite、回导冲突和生成引擎边界回归。
 
 真实业务数据仍位于仓库外：
@@ -55,6 +55,8 @@ pywebview UI
 - 合同客户自动映射到五个子表；客户与 JOB 筛选在六表间保持，并可交叉筛选。
 - 修改合同 JOB No、发货批次名、设备番号或付款条款款类时同步关联表；Excel 回导按稳定记录 ID 做同样传播。
 - 开票/回款覆盖使用按批次分组的设备多选；同设备范围的多笔开票/回款金额累计计算。
+- 付款条件按 JOB 整组维护且比例必须为 100%；开票/回款款类只能来自同一 JOB 的付款条件。
+- 设备录入只能引用同一 JOB 的既有批次；开票/回款批次和制造番号选择器只展示同一 JOB 数据，逐台选择会回写批次并按实际设备行计算覆盖台数。
 - 设置页选择的 DB/XLSX 路径保存在当前用户配置目录，启动参数与环境变量仍可覆盖。
 - 切换数据库前处理未保存状态；窗口关闭使用 `beforeunload` 保护。
 
@@ -62,7 +64,7 @@ pywebview UI
 
 ```bash
 cd /Users/danielzhu/projects/订单整理/BKTC_Ledger
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -s tests -v  # 当前 37 项
 .venv/bin/python -m py_compile app.py core.py database.py build_ledger_main.py create_portable_starter.py
 node --check ui/app.js
 ```
@@ -73,7 +75,7 @@ node --check ui/app.js
 
 `.github/workflows/build.yml` 在 `windows-latest` / `macos-latest` 上安装依赖、运行 unittest，再用 PyInstaller onedir 打包。PR 与 push 到主分支触发构建；产物内含空白启动 DB/XLSX，tag `v*` 还会创建 Release（Windows zip、macOS tar.gz）。
 
-发布流程使用 `github:yeet`：从 `agent/*` 分支提交并推送，创建 draft PR。版本升级时再由维护者决定是否打 `v1.3.0` tag；本任务不自动创建 Release tag。
+推送 `main` 会触发双平台构建；打 `v1.4.0` tag 会由工作流创建 GitHub Release，并上传 Windows zip 与 macOS tar.gz。
 
 ## 外部同步
 

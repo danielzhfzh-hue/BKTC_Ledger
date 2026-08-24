@@ -17,8 +17,9 @@ import urllib.request
 import uuid
 import zipfile
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
+CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"
 
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 APP_DIR = sys._MEIPASS if IS_FROZEN else os.path.dirname(os.path.abspath(__file__))
@@ -133,6 +134,22 @@ def _is_ephemeral_path(path):
     except (TypeError, ValueError):
         return False
     return normalized == "/tmp" or normalized.startswith(("/tmp/", "/private/tmp/"))
+
+
+def _prefer_canonical_mac_data(path, filename, platform_name=None, project_root=None):
+    """Keep this Mac's working data in the project's single canonical data directory."""
+    platform_name = sys.platform if platform_name is None else platform_name
+    if platform_name != "darwin":
+        return path
+    project_root = project_root or CANONICAL_PROJECT_ROOT
+    canonical = os.path.join(project_root, "data", filename)
+    if not os.path.exists(canonical):
+        return path
+    normalized = os.path.abspath(os.path.expanduser(path))
+    release_root = os.path.join(project_root, "releases") + os.sep
+    if _is_ephemeral_path(normalized) or normalized.startswith(release_root):
+        return canonical
+    return path
 
 
 def _source_default(filename, legacy_path, platform=None):
@@ -486,10 +503,8 @@ def main():
         or os.environ.get("BKTC_STORE") or config.get("database_path")
         or DEFAULT_DATABASE
     )
-    if sys.platform == "darwin" and _is_ephemeral_path(data_path):
-        data_path = DEFAULT_DATABASE
-    if sys.platform == "darwin" and _is_ephemeral_path(xlsx_path):
-        xlsx_path = DEFAULT_XLSX
+    data_path = _prefer_canonical_mac_data(data_path, "BKTC_Ledger.db")
+    xlsx_path = _prefer_canonical_mac_data(xlsx_path, "BKTC_Ledger.xlsx")
     legacy_json = DEFAULT_LEGACY_JSON if data_path == DEFAULT_DATABASE else None
     api = Api(
         xlsx_path, data_path, legacy_json_path=legacy_json, config_path=config_path,

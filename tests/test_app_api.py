@@ -76,6 +76,27 @@ class ApiMigrationTests(unittest.TestCase):
         self.assertTrue(app._is_ephemeral_path("/private/tmp/bktc-ledger-audit/ledger.db"))
         self.assertFalse(app._is_ephemeral_path("/Users/danielzhu/projects/订单整理/BKTC_Ledger/data/BKTC_Ledger.db"))
 
+    def test_mac_release_copy_is_redirected_to_canonical_project_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            release_path = str(root / "releases" / "macOS" / "data" / "BKTC_Ledger.db")
+            expected = root / "data" / "BKTC_Ledger.db"
+            expected.parent.mkdir()
+            expected.write_bytes(b"db")
+
+            self.assertEqual(
+                app._prefer_canonical_mac_data(
+                    release_path, "BKTC_Ledger.db", "darwin", str(root)
+                ),
+                str(expected),
+            )
+            self.assertEqual(
+                app._prefer_canonical_mac_data(
+                    release_path, "BKTC_Ledger.db", "win32", str(root)
+                ),
+                release_path,
+            )
+
     def test_source_mode_uses_project_data_directory(self):
         legacy = "/Users/example/production.db"
 

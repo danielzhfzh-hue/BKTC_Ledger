@@ -59,12 +59,29 @@ class ApiMigrationTests(unittest.TestCase):
                 str(local_db),
             )
 
-    def test_source_mode_uses_project_local_data_paths_on_windows(self):
+    def test_portable_default_prefers_sibling_data_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = root / "releases" / "macOS" / "BKTC_Ledger.app" / "Contents" / "MacOS" / "BKTC_Ledger"
+            data_dir = root / "releases" / "macOS" / "data"
+            data_dir.mkdir(parents=True)
+            data_file = data_dir / "BKTC_Ledger.db"
+            data_file.write_bytes(b"db")
+            self.assertEqual(
+                app._portable_default("BKTC_Ledger.db", str(executable)),
+                str(data_file),
+            )
+
+    def test_ephemeral_path_is_rejected(self):
+        self.assertTrue(app._is_ephemeral_path("/private/tmp/bktc-ledger-audit/ledger.db"))
+        self.assertFalse(app._is_ephemeral_path("/Users/danielzhu/projects/订单整理/BKTC_Ledger/data/BKTC_Ledger.db"))
+
+    def test_source_mode_uses_project_data_directory(self):
         legacy = "/Users/example/production.db"
 
         path = app._source_default("BKTC_Ledger.db", legacy, platform="win32")
 
-        self.assertEqual(path, str(Path(app.APP_DIR) / "BKTC_Ledger.db"))
+        self.assertEqual(path, str(Path(app.APP_DIR) / "data" / "BKTC_Ledger.db"))
 
     def test_portable_starter_contains_openable_database_and_workbook(self):
         with tempfile.TemporaryDirectory() as tmp:

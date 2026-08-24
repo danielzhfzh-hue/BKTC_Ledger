@@ -8,7 +8,7 @@
 ## 直接启动
 
 - Release 压缩包：完整解压后双击 `BKTC_Ledger\BKTC_Ledger.exe`，不要只复制 exe。
-- 源码压缩包：双击 `启动.bat`；脚本会检查 Python、按需安装依赖，并在缺失时创建项目目录下的空白 `BKTC_Ledger.db` / `BKTC_Ledger.xlsx`。
+- 源码压缩包：双击 `启动.bat`；脚本会检查 Python、按需安装依赖，并在缺失时创建 `data\BKTC_Ledger.db` / `data\BKTC_Ledger.xlsx`。
 
 ## 构建
 
@@ -18,7 +18,7 @@
 build_win.bat
 ```
 
-脚本会建立 `.venv`、安装 `pywebview openpyxl pyinstaller`，并生成 `dist\BKTC_Ledger\`。分发时必须复制整个文件夹，而不是只复制 exe。该目录会包含空白可用的 `BKTC_Ledger.db` 和 `BKTC_Ledger.xlsx`。
+脚本会建立 `.venv`、安装 `pywebview openpyxl pyinstaller`，并生成 `dist\BKTC_Ledger\`。分发时必须复制整个文件夹，而不是只复制 exe；数据库和 Excel 位于同级 `data\` 子目录。
 
 GitHub Actions 是推荐构建路径：Windows 与 macOS 均会先运行可靠性测试，再打包产物。
 标签发布时 Windows 产物使用 `.zip`，可直接用 Win11 资源管理器解压。
@@ -36,7 +36,7 @@ GitHub Actions 是推荐构建路径：Windows 与 macOS 均会先运行可靠�
 
 旧版 `BKTC_STORE=<records.json>` / `--store <records.json>` 仍可用于一次性迁移。
 
-发布包里的 DB/XLSX 只是空白启动文件，不包含客户订单。正式数据不上传公开 GitHub；请在「设置」页选择实际 DB/XLSX 路径，或退出应用后再替换同名文件。之后主要携带 `.db`；`.xlsx` 可随时重新生成。复制数据库前先退出应用，或复制 `备份/` 中的完整快照，避免遗漏 WAL 中尚未归档的事务。
+本机交付包的 `data\BKTC_Ledger.db` / `data\BKTC_Ledger.xlsx` 是当前项目数据；公开 GitHub Release 仍不上传客户数据。复制数据库前先退出应用，或复制 `备份/` 中的完整快照，避免遗漏 WAL 中尚未归档的事务。
 
 ## Windows 首次运行警告
 

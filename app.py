@@ -88,11 +88,14 @@ def _save_config(database_path, xlsx_path, path=None):
     os.replace(temporary, path)
 
 def _portable_default(filename, executable=None):
-    """Find portable data beside an exe or beside a macOS .app bundle."""
+    """Find portable data in a sibling data directory or beside the executable."""
     executable_dir = os.path.dirname(os.path.abspath(executable or sys.executable))
     candidates = []
     directory = executable_dir
     for _ in range(4):
+        data_candidate = os.path.join(directory, "data", filename)
+        if data_candidate not in candidates:
+            candidates.append(data_candidate)
         candidate = os.path.join(directory, filename)
         if candidate not in candidates:
             candidates.append(candidate)
@@ -103,18 +106,29 @@ def _portable_default(filename, executable=None):
     for candidate in candidates:
         if os.path.exists(candidate):
             return candidate
+    canonical = os.path.join(
+        "/Users/danielzhu/projects/订单整理/BKTC_Ledger", "data", filename
+    )
+    if sys.platform == "darwin" and os.path.exists(canonical):
+        return canonical
     for directory in [executable_dir, *[os.path.dirname(x) for x in candidates]]:
         if directory.lower().endswith(".app"):
             return os.path.join(os.path.dirname(directory), filename)
     return candidates[0]
 
 
+def _is_ephemeral_path(path):
+    """旧审计/解压流程可能留下 /tmp 路径，不能作为长期工作库。"""
+    try:
+        normalized = os.path.abspath(os.path.expanduser(path))
+    except (TypeError, ValueError):
+        return False
+    return normalized == "/tmp" or normalized.startswith(("/tmp/", "/private/tmp/"))
+
+
 def _source_default(filename, legacy_path, platform=None):
-    """Keep the existing macOS workspace default; use project-local files elsewhere."""
-    platform = sys.platform if platform is None else platform
-    if platform == "darwin" and os.path.exists(legacy_path):
-        return legacy_path
-    return os.path.join(APP_DIR, filename)
+    """Use the repository's persistent data directory in source mode."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", filename)
 
 
 if IS_FROZEN:
@@ -406,6 +420,10 @@ def main():
         or os.environ.get("BKTC_STORE") or config.get("database_path")
         or DEFAULT_DATABASE
     )
+    if sys.platform == "darwin" and _is_ephemeral_path(data_path):
+        data_path = DEFAULT_DATABASE
+    if sys.platform == "darwin" and _is_ephemeral_path(xlsx_path):
+        xlsx_path = DEFAULT_XLSX
     legacy_json = DEFAULT_LEGACY_JSON if data_path == DEFAULT_DATABASE else None
     api = Api(
         xlsx_path, data_path, legacy_json_path=legacy_json, config_path=config_path

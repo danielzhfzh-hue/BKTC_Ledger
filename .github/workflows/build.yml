@@ -31,7 +31,7 @@ jobs:
         run: pyinstaller --noconfirm --windowed --clean --name BKTC_Ledger --add-data "ui${{ runner.os == 'Windows' && ';' || ':' }}ui" --collect-all webview --hidden-import "webview.platforms.edgechromium" app.py
       - name: Add portable starter database and workbook
         shell: bash
-        run: python create_portable_starter.py "${{ runner.os == 'Windows' && 'dist/BKTC_Ledger' || 'dist' }}"
+        run: python create_portable_starter.py "${{ runner.os == 'Windows' && 'dist/BKTC_Ledger/data' || 'dist/data' }}"
       - uses: actions/upload-artifact@v4
         with:
           name: BKTC_Ledger-${{ runner.os }}

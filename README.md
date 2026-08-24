@@ -13,7 +13,7 @@
 
 ## 日常工作流
 
-1. macOS 双击 `启动.command`；Windows Release 完整解压后双击 `BKTC_Ledger.exe`，源码包双击 `启动.bat`（会在缺失时创建空白 DB/XLSX）。
+1. macOS 双击 `启动.command`；Windows Release 完整解压后双击 `BKTC_Ledger.exe`，源码包双击 `启动.bat`（会在 `data/` 缺失时创建空白 DB/XLSX）。
 2. 首次使用可直接打开发布包内的空白 DB/XLSX，或在「设置」选择本地 `.db`（也可选择旧 `*.records.json` 自动迁移）及生成用 `.xlsx`；选择会保存到当前用户配置并在下次启动恢复。
 3. 推荐点「＋ 新建订单」，一次填写订单头、设备、首批发货和付款条件，自动建立六表记录与稳定记录 ID。
 4. 在六个业务页编辑；五张子表的客户由 JOB 自动带入，批次合计、合同汇总、验收状态、应收日、回款状态和超期天数都会自动重算。
@@ -47,6 +47,9 @@
 ## 技术与目录
 
 ```text
+data/                  本机唯一工作数据库与 Excel（不上传 GitHub）
+releases/macOS/        Mac App、Mac 压缩包及其 data/ 发布副本
+releases/Windows/      Windows 可运行目录、压缩包及其 data/ 发布副本
 app.py                 pywebview 桌面壳与本地 API
 core.py                六表模型、派生、业务校验、台账导出
 database.py            SQLite、JSON 迁移、事务、备份、Excel 差异导入
@@ -70,6 +73,6 @@ node --check ui/app.js
 
 ## 数据与发布
 
-真实 `.db`、`.db-wal`、`.db-shm`、`*.records.json`、`.xlsx` 与 `备份/` 已被 `.gitignore` 排除，客户数据不会上传 GitHub。Release 会在构建时放入可直接打开的空白 `BKTC_Ledger.db` 和 `BKTC_Ledger.xlsx`；正式使用时在设置页选择本机真实数据文件。GitHub Actions 在 macOS/Windows 上先执行回归测试，再打包应用；tag `v*` 会创建 Release。
+真实 `.db`、`.db-wal`、`.db-shm`、`*.records.json`、`.xlsx` 与 `备份/` 已被 `.gitignore` 排除，客户数据不会上传 GitHub。程序会优先使用可执行文件旁的 `data/`；本机源码和 Mac App 会固定使用项目内 `BKTC_Ledger/data/`，不会把 `/tmp` 临时路径当作长期数据库。GitHub Actions 在 macOS/Windows 上先执行回归测试，再打包应用；tag `v*` 会创建 Release。
 
 完整审计结论见 [AUDIT.md](AUDIT.md)。Windows 说明见 [README_win.md](README_win.md)。

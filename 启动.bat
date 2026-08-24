@@ -20,7 +20,8 @@ if errorlevel 1 (
   python -m pip install -r requirements.txt
   if errorlevel 1 goto :failed
 )
-python create_portable_starter.py .
+if not exist data mkdir data
+python create_portable_starter.py data
 if errorlevel 1 goto :failed
 python app.py
 if errorlevel 1 goto :failed

@@ -11,7 +11,7 @@ const state = {
 const ROW_H = 31, BUFFER = 20;
 
 const TAB_HINTS = {
-  "合同订单": "本页 = 合同头信息。总台数、设备型号和付款条件文本自动汇总；修改 JOB No 会同步更新六表关联。推荐用顶部“新建订单”。",
+  "合同订单": "本页 = 合同头信息。总台数、设备型号和付款条件文本自动汇总；修改 JOB No 会同步更新六表关联。",
   "付款条件": "点击“录入付款条件”后选择 JOB，一次维护完整付款条款；比例合计须 100%。客户自动带入，已被开票/回款引用的款类不可无关联地删除。",
   "设备台账": "点击“录入设备”使用独立表单；客户自动带入，发货批次只能选择该 JOB 已存在的批次。宽表保留用于查看和修改既有记录。",
   "发货批次": "点击“新增发货批次”填写批次并可勾选同一 JOB 的设备；台数、合计和覆盖番号自动计算。批次改名会同步关联表。",
@@ -99,9 +99,6 @@ function renderAll() {
   $("setRevision").textContent = db.revision ?? "—";
   $("setIntegrity").textContent = db.integrity === "ok" ? "正常" : (db.integrity || "—");
   $("setLastSaved").textContent = db.last_saved_at ? db.last_saved_at.replace("T", " ") : "—";
-  $("databaseSummary").textContent = db.integrity === "ok"
-    ? `本地关系数据库完整性正常 · 修订 ${db.revision ?? 0} · 六表关联已启用外键保护`
-    : "数据库尚未完成完整性检查";
   renderSummary();
   renderGrid();
   renderCounts();
@@ -2793,7 +2790,6 @@ function commitNewOrder(f) {
   toast("已创建订单 " + job + "（" + total + " 台），已筛到该订单；点 ✕清除筛选 看全部", "ok");
 }
 
-$("btnNewOrder").addEventListener("click", openNewOrder);
 $("nocClose").addEventListener("click", closeNewOrder);
 $("nocCancel").addEventListener("click", closeNewOrder);
 $("nocAddDev").addEventListener("click", () => { addNocDeviceRow(); nocUpdateSummary(); });

@@ -17,7 +17,7 @@ import urllib.request
 import uuid
 import zipfile
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"
 

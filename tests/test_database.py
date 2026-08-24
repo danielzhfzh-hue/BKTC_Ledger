@@ -127,9 +127,9 @@ class DatabaseTests(unittest.TestCase):
                             for x in changes))
         exported = self.root / "audit.xlsx"
         database.export_audit_xlsx(exported, audit["events"])
-        workbook = load_workbook(exported, read_only=True)
-        self.assertEqual(workbook["审计记录"]["A1"].value, "时间")
-        self.assertGreater(workbook["审计记录"].max_row, 1)
+        with closing(load_workbook(exported, read_only=True)) as workbook:
+            self.assertEqual(workbook["审计记录"]["A1"].value, "时间")
+            self.assertGreater(workbook["审计记录"].max_row, 1)
 
     def test_noop_save_does_not_create_audit_event(self):
         first = database.save_database(self.db, sample_data(), self.rules, backup=False)

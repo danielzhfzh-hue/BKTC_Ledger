@@ -29,6 +29,14 @@ jobs:
       - name: Build with PyInstaller (onedir)
         # separator: ';' on Windows, ':' on macOS
         run: pyinstaller --noconfirm --windowed --clean --name BKTC_Ledger --add-data "ui${{ runner.os == 'Windows' && ';' || ':' }}ui" --collect-all webview --hidden-import "webview.platforms.edgechromium" app.py
+      - name: Set macOS bundle version
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          APP_VERSION="$(python -c 'import app; print(app.__version__)')"
+          plutil -replace CFBundleShortVersionString -string "$APP_VERSION" dist/BKTC_Ledger.app/Contents/Info.plist
+          plutil -insert CFBundleVersion -string "$APP_VERSION" dist/BKTC_Ledger.app/Contents/Info.plist
+          codesign --force --deep --sign - dist/BKTC_Ledger.app
       - name: Add portable starter database and workbook
         shell: bash
         run: python create_portable_starter.py "${{ runner.os == 'Windows' && 'dist/BKTC_Ledger/data' || 'dist/data' }}"

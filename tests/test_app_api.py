@@ -119,8 +119,34 @@ class ApiMigrationTests(unittest.TestCase):
                 {
                     "database_path": str(database_path),
                     "xlsx_path": str(workbook_path),
+                    "operator_name": api.operator_name,
                 },
             )
+
+    def test_operator_name_is_persisted_and_used_for_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            api = app.Api(
+                str(root / "ledger.xlsx"), str(root / "ledger.db"),
+                config_path=str(config_path), operator_name="初始操作人",
+            )
+            state = api.load_state()
+            api.set_operator_name("张三")
+            data = state["data"]
+            data["合同订单"] = [{
+                "记录ID": "contract-1", "JOB No": "26BS001", "客户": "客户A"
+            }]
+
+            result = api.save_data(data, state["rules"], {
+                "source": "manual_save", "actions": ["new_order"]
+            })
+            audit = api.get_audit_events({}, 20)
+
+            self.assertGreater(result["audit_change_count"], 0)
+            self.assertEqual(audit["events"][0]["operator_name"], "张三")
+            self.assertIn("new_order", audit["events"][0]["actions"])
+            self.assertEqual(app._load_config(str(config_path))["operator_name"], "张三")
 
     def test_second_app_instance_cannot_overwrite_a_newer_revision(self):
         with tempfile.TemporaryDirectory() as tmp:

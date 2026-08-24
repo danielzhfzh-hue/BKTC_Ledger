@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """BKTC 台账维护工具（pywebview 桌面壳，macOS / Windows 通用）。"""
 import argparse
+import getpass
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -15,7 +17,7 @@ import urllib.request
 import uuid
 import zipfile
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 
 IS_FROZEN = bool(getattr(sys, "frozen", False))
@@ -64,14 +66,17 @@ def _load_config(path=None):
         return {}
     if not isinstance(raw, dict):
         return {}
-    return {
+    config = {
         key: os.path.abspath(os.path.expanduser(value))
         for key in ("database_path", "xlsx_path")
         if isinstance((value := raw.get(key)), str) and value.strip()
     }
+    if isinstance(raw.get("operator_name"), str) and raw["operator_name"].strip():
+        config["operator_name"] = raw["operator_name"].strip()
+    return config
 
 
-def _save_config(database_path, xlsx_path, path=None):
+def _save_config(database_path, xlsx_path, path=None, operator_name=None):
     path = os.path.abspath(os.path.expanduser(path or _default_config_path()))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = path + ".tmp"
@@ -80,6 +85,7 @@ def _save_config(database_path, xlsx_path, path=None):
             {
                 "database_path": os.path.abspath(database_path),
                 "xlsx_path": os.path.abspath(xlsx_path),
+                "operator_name": str(operator_name or getpass.getuser()).strip(),
             },
             f,
             ensure_ascii=False,
@@ -165,12 +171,14 @@ def schema_for_js():
 
 
 class Api:
-    def __init__(self, xlsx_path, data_path, legacy_json_path=None, config_path=None):
+    def __init__(self, xlsx_path, data_path, legacy_json_path=None, config_path=None,
+                 operator_name=None):
         self.xlsx_path = xlsx_path
         self.database_path = ""
         self.database_revision = None
         self.legacy_json_path = None
         self.config_path = config_path
+        self.operator_name = str(operator_name or getpass.getuser()).strip() or "unknown"
         self._pending_imports = {}
         self._set_data_path(data_path)
         if legacy_json_path and not str(data_path).lower().endswith(".json"):
@@ -194,6 +202,18 @@ class Api:
             self.database_path, core.empty_data(), reason="database_created", backup=False
         )
 
+    def _audit_context(self, requested=None, source="manual_save"):
+        requested = requested if isinstance(requested, dict) else {}
+        actions = requested.get("actions") if isinstance(requested.get("actions"), list) else []
+        return {
+            "operator_name": self.operator_name,
+            "source": str(requested.get("source") or source),
+            "actions": [str(x) for x in actions],
+            "app_version": __version__,
+            "platform": platform.platform(),
+            "hostname": platform.node(),
+        }
+
     def load_state(self, store=None, xlsx=None):
         if store:
             self._set_data_path(store)
@@ -209,7 +229,10 @@ class Api:
         config_warning = None
         if self.config_path:
             try:
-                _save_config(self.database_path, self.xlsx_path, self.config_path)
+                _save_config(
+                    self.database_path, self.xlsx_path, self.config_path,
+                    self.operator_name,
+                )
             except OSError as exc:
                 config_warning = f"路径已切换，但无法保存下次启动设置：{exc}"
         return {"store_path": self.database_path, "database_path": self.database_path,
@@ -220,28 +243,35 @@ class Api:
                 "migration": bool(migration and migration.get("migrated")),
                 "migration_source": migration.get("source") if migration else None,
                 "config_warning": config_warning,
+                "operator_name": self.operator_name,
                 "version": __version__}
 
-    def save_data(self, data, rules=None):
+    def save_data(self, data, rules=None, audit_context=None):
         result = database.save_database(
-            self.database_path, data, rules, expected_revision=self.database_revision
+            self.database_path, data, rules, expected_revision=self.database_revision,
+            audit_context=self._audit_context(audit_context),
         )
         self.database_revision = result["revision"]
         return {"ok": True, "path": self.database_path,
                 "data": result["data"], "revision": result["revision"],
-                "backup": result["backup"], "issues": result["issues"]}
+                "backup": result["backup"], "issues": result["issues"],
+                "audit_event_id": result["audit_event_id"],
+                "audit_change_count": result["audit_change_count"]}
 
-    def generate(self, data, rules=None):
+    def generate(self, data, rules=None, audit_context=None):
         if not self.xlsx_path or not os.path.isdir(os.path.dirname(self.xlsx_path)):
             raise RuntimeError("请先选择台账 Excel 文件")
         saved = database.save_database(
-            self.database_path, data, rules, expected_revision=self.database_revision
+            self.database_path, data, rules, expected_revision=self.database_revision,
+            audit_context=self._audit_context(audit_context, "generate_ledger"),
         )
         self.database_revision = saved["revision"]
         core.backup_xlsx(self.xlsx_path)
         out, issues, counts = core.generate_xlsx(saved["data"], self.xlsx_path, rules)
         return {"ok": True, "out": out, "issues": issues, "counts": counts,
-                "data": saved["data"], "revision": saved["revision"]}
+                "data": saved["data"], "revision": saved["revision"],
+                "audit_event_id": saved["audit_event_id"],
+                "audit_change_count": saved["audit_change_count"]}
 
     def get_unpaid_rows(self, data, rules=None):
         """Return the unpaid report using the same calculation as generated Excel."""
@@ -260,11 +290,12 @@ class Api:
         core.export_filtered(path, table, rows, fields)
         return {"ok": True, "path": path, "rows": len(rows), "fields": len(fields)}
 
-    def export_editable(self, data, rules=None, dirty=True):
+    def export_editable(self, data, rules=None, dirty=True, audit_context=None):
         """Save current edits, then export a revision-bound six-table workbook."""
         if dirty:
             saved = database.save_database(
-                self.database_path, data, rules, expected_revision=self.database_revision
+                self.database_path, data, rules, expected_revision=self.database_revision,
+                audit_context=self._audit_context(audit_context, "export_editable"),
             )
             self.database_revision = saved["revision"]
         else:
@@ -306,7 +337,13 @@ class Api:
         prepared = self._pending_imports.get(token)
         if not prepared:
             raise RuntimeError("差异预览已失效，请重新选择 Excel 并预览")
-        result = database.apply_editable_import(self.database_path, prepared)
+        result = database.apply_editable_import(
+            self.database_path, prepared,
+            audit_context=self._audit_context(
+                {"source": "xlsx_import", "actions": ["xlsx_confirmed_import"]},
+                "xlsx_import",
+            ),
+        )
         self._pending_imports.clear()
         self.database_revision = result["revision"]
         return {
@@ -316,7 +353,33 @@ class Api:
             "rules": database.get_rules(self.database_path),
             "revision": result["revision"],
             "backup": result["backup"],
+            "audit_event_id": result["audit_event_id"],
+            "audit_change_count": result["audit_change_count"],
         }
+
+    def set_operator_name(self, name):
+        name = str(name or "").strip()
+        if not name:
+            raise RuntimeError("操作人不能为空")
+        self.operator_name = name
+        if self.config_path:
+            _save_config(
+                self.database_path, self.xlsx_path, self.config_path,
+                self.operator_name,
+            )
+        return {"ok": True, "operator_name": self.operator_name}
+
+    def get_audit_events(self, filters=None, limit=500):
+        return database.get_audit_events(self.database_path, filters, limit)
+
+    def export_audit(self, filters=None):
+        result = database.get_audit_events(self.database_path, filters, 5000)
+        dl = os.path.join(os.path.expanduser("~"), "Downloads")
+        os.makedirs(dl, exist_ok=True)
+        path = os.path.join(dl, f"BKTC_审计记录_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
+        database.export_audit_xlsx(path, result["events"])
+        return {"ok": True, "path": path, "events": len(result["events"]),
+                "chain": result["chain"]}
 
     def pick_store(self):
         w = webview.windows[0]
@@ -429,7 +492,8 @@ def main():
         xlsx_path = DEFAULT_XLSX
     legacy_json = DEFAULT_LEGACY_JSON if data_path == DEFAULT_DATABASE else None
     api = Api(
-        xlsx_path, data_path, legacy_json_path=legacy_json, config_path=config_path
+        xlsx_path, data_path, legacy_json_path=legacy_json, config_path=config_path,
+        operator_name=config.get("operator_name"),
     )
     webview.create_window(
         "BKTC 台账维护工具",

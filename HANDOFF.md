@@ -1,4 +1,4 @@
-# BKTC Ledger 工程交接（v1.4.0）
+# BKTC Ledger 工程交接（v1.5.0）
 
 ## 当前架构
 
@@ -11,7 +11,7 @@ pywebview UI
 ```
 
 - `app.py`：桌面壳、文件选择、本地 API、更新下载、两阶段导入令牌。
-- `database.py`：关系表、JSON 迁移、事务、备份、修订、Excel 往返。
+- `database.py`：关系表、JSON 迁移、事务、备份、修订、字段级审计与 Excel 往返。
 - `core.py`：六表 schema、规范化、派生、业务校验、查询导出与台账入口。
 - `build_ledger_main.py`：导航页、未回收管理表、JOB 页生成。
 - `ui/`：纯 HTML/CSS/JS；六个业务标签页均有独立录入窗口，大表行虚拟化，跨表查询包含「未付款订单」和「未回款明细」派生数据源。
@@ -47,6 +47,14 @@ pywebview UI
 
 `prepare_editable_import` 生成新增/修改/删除逐字段差异；`Api` 只保留最后一个随机 token。`apply_editable_import` 在提交前再次校验数据库修订、database_id、内容 SHA-256 和 Excel size/mtime，成功后走正常事务保存与备份。
 
+## 审计模型
+
+- `_audit_event`：一次成功保存一个事件，记录修订、时间、操作人、来源、动作、应用/平台/设备和哈希。
+- `_audit_change`：按稳定 `记录ID` 保存新增/删除快照或修改字段的旧值/新值；自动派生字段过滤，关联同步与系统重算单独标记。
+- 旧库首次打开时在 `_meta.audit_start_revision/audit_started_at` 建立基线，不为既有记录补写新增事件；`json_migration`、`database_created`、`portable_starter` 同样只建立基线。
+- 审计写入与六表替换、外键检查、修订更新处于同一个 `BEGIN IMMEDIATE` 事务；失败整体回滚。
+- 四个 SQLite trigger 阻止普通 UPDATE/DELETE 审计表，`audit_chain_head` 与连续 SHA-256 哈希用于检测直接篡改或截断。
+
 ## 关键交互不变量
 
 - 切表必须清空 `selection`/`anchor`，避免索引跨表复用。
@@ -75,7 +83,7 @@ node --check ui/app.js
 
 `.github/workflows/build.yml` 在 `windows-latest` / `macos-latest` 上安装依赖、运行 unittest，再用 PyInstaller onedir 打包。PR 与 push 到主分支触发构建；产物内含空白启动 DB/XLSX，tag `v*` 还会创建 Release（Windows zip、macOS tar.gz）。
 
-推送 `main` 会触发双平台构建；打 `v1.4.0` tag 会由工作流创建 GitHub Release，并上传 Windows zip 与 macOS tar.gz。
+推送 `main` 会触发双平台构建；打 `v1.5.0` tag 会由工作流创建 GitHub Release，并上传 Windows zip 与 macOS tar.gz。
 
 ## 外部同步
 

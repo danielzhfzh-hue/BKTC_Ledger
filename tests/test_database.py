@@ -81,6 +81,145 @@ class DatabaseTests(unittest.TestCase):
             )}
             self.assertTrue(set(core.TABLES).issubset(tables))
             self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        audit = database.get_audit_events(self.db)
+        self.assertEqual(audit["events"], [])
+        self.assertTrue(audit["chain"]["ok"])
+        self.assertEqual(audit["chain"]["start_revision"], 1)
+
+    def test_audit_records_insert_update_delete_and_operator_context(self):
+        context = {
+            "operator_name": "测试员", "source": "manual_save",
+            "actions": ["new_order"], "app_version": "1.5.0",
+            "platform": "test", "hostname": "unit-test",
+        }
+        first = database.save_database(
+            self.db, sample_data(), self.rules, backup=False, audit_context=context
+        )
+        self.assertGreater(first["audit_change_count"], 0)
+
+        changed = sample_data()
+        changed["合同订单"][0]["客户"] = "新客户"
+        changed["设备台账"] = []
+        changed["开票记录"] = [{
+            "记录ID": "invoice-1", "JOB No": "26BS001", "款类": "预付款",
+            "开票日": "2026-08-10", "状态": "已开", "含税金额": 113,
+            "覆盖批次": "1", "覆盖製造番号": "",
+        }]
+        second = database.save_database(
+            self.db, changed, self.rules, backup=False,
+            expected_revision=first["revision"],
+            audit_context={**context, "actions": ["grid_edit", "add_invoice", "delete_row"]},
+        )
+        audit = database.get_audit_events(self.db)
+        self.assertTrue(audit["chain"]["ok"])
+        self.assertEqual(len(audit["events"]), 2)
+        latest = audit["events"][0]
+        self.assertEqual(latest["revision"], second["revision"])
+        self.assertEqual(latest["operator_name"], "测试员")
+        self.assertIn("add_invoice", latest["actions"])
+        changes = latest["changes"]
+        self.assertTrue(any(x["operation"] == "update" and x["field_name"] == "客户"
+                            and x["old_value"] == "原客户" and x["new_value"] == "新客户"
+                            for x in changes))
+        self.assertTrue(any(x["operation"] == "delete" and x["table_name"] == "设备台账"
+                            for x in changes))
+        self.assertTrue(any(x["operation"] == "insert" and x["table_name"] == "开票记录"
+                            for x in changes))
+        exported = self.root / "audit.xlsx"
+        database.export_audit_xlsx(exported, audit["events"])
+        workbook = load_workbook(exported, read_only=True)
+        self.assertEqual(workbook["审计记录"]["A1"].value, "时间")
+        self.assertGreater(workbook["审计记录"].max_row, 1)
+
+    def test_noop_save_does_not_create_audit_event(self):
+        first = database.save_database(self.db, sample_data(), self.rules, backup=False)
+        event_count = len(database.get_audit_events(self.db)["events"])
+
+        second = database.save_database(
+            self.db, database.load_database(self.db), self.rules, backup=False,
+            expected_revision=first["revision"],
+        )
+
+        self.assertEqual(second["audit_change_count"], 0)
+        self.assertEqual(len(database.get_audit_events(self.db)["events"]), event_count)
+
+    def test_existing_database_gets_baseline_without_legacy_backfill(self):
+        first = database.save_database(self.db, sample_data(), self.rules, backup=False)
+        with closing(sqlite3.connect(self.db)) as conn:
+            for trigger in (
+                "audit_event_no_update", "audit_event_no_delete",
+                "audit_change_no_update", "audit_change_no_delete",
+            ):
+                conn.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+            conn.execute("DROP TABLE _audit_change")
+            conn.execute("DROP TABLE _audit_event")
+            conn.execute("DELETE FROM _meta WHERE key LIKE 'audit_%'")
+            conn.commit()
+
+        info = database.get_database_info(self.db)
+        audit = database.get_audit_events(self.db)
+
+        self.assertEqual(info["revision"], first["revision"])
+        self.assertEqual(info["audit_start_revision"], first["revision"])
+        self.assertEqual(audit["events"], [])
+        self.assertTrue(audit["chain"]["ok"])
+        self.assertEqual(len(database.load_database(self.db)["合同订单"]), 1)
+
+    def test_failed_save_does_not_append_audit(self):
+        database.save_database(self.db, sample_data(), self.rules, backup=False)
+        before = database.get_audit_events(self.db)
+        broken = sample_data()
+        broken["合同订单"].append({
+            "记录ID": "duplicate-job", "JOB No": "26BS001", "客户": "冲突"
+        })
+
+        with self.assertRaises(database.DatabaseValidationError):
+            database.save_database(self.db, broken, self.rules, backup=False)
+
+        after = database.get_audit_events(self.db)
+        self.assertEqual(len(after["events"]), len(before["events"]))
+        self.assertEqual(after["chain"]["head"], before["chain"]["head"])
+
+    def test_audit_hash_chain_detects_direct_tampering(self):
+        database.save_database(self.db, sample_data(), self.rules, backup=False)
+        self.assertTrue(database.verify_audit_chain(self.db)["ok"])
+        with closing(sqlite3.connect(self.db)) as conn:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE _audit_change SET new_value_json=? WHERE change_id=(SELECT MIN(change_id) FROM _audit_change)",
+                    ('"被阻止"',),
+                )
+            conn.rollback()
+            conn.execute("DROP TRIGGER audit_change_no_update")
+            conn.execute(
+                "UPDATE _audit_change SET new_value_json=? WHERE change_id=(SELECT MIN(change_id) FROM _audit_change)",
+                ('"被篡改"',),
+            )
+            conn.commit()
+
+        status = database.verify_audit_chain(self.db)
+        self.assertFalse(status["ok"])
+        self.assertIn("已被改变", status["error"])
+
+    def test_audit_marks_backend_normalization_and_ignores_derived_fields(self):
+        old = sample_data()
+        old["合同订单"][0]["总台数"] = 99
+        old["回款记录"] = [{
+            "记录ID": "payment-1", "JOB No": "26BS001", "款类": "预付款",
+            "回款日": "2026-08-05", "含税金额": 50,
+            "覆盖批次": "1;不存在批次", "覆盖製造番号": "26BS001-001",
+        }]
+        requested = core.normalize(old)
+        prepared = core.derive(old)
+
+        changes = database._audit_changes(
+            core.normalize(old), prepared, self.rules, self.rules,
+            requested_data=requested,
+        )
+
+        coverage = next(x for x in changes if x["field_name"] == "覆盖批次")
+        self.assertEqual(coverage["origin"], "system_recompute")
+        self.assertFalse(any(x["field_name"] == "总台数" for x in changes))
 
     def test_invalid_orphan_is_rejected_without_changing_database(self):
         database.save_database(self.db, sample_data(), self.rules, backup=False)
@@ -129,13 +268,25 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(prepared.action_counts["新增"], 1)
         self.assertEqual(prepared.action_counts["删除"], 1)
         self.assertGreaterEqual(prepared.action_counts["修改"], 1)
-        result = database.apply_editable_import(self.db, prepared)
+        result = database.apply_editable_import(
+            self.db, prepared,
+            audit_context={
+                "operator_name": "导入员", "source": "xlsx_import",
+                "actions": ["xlsx_confirmed_import"],
+            },
+        )
         self.assertEqual(result["revision"], 2)
         self.assertTrue(Path(result["backup"]).is_file())
         loaded = database.load_database(self.db)
         self.assertEqual(loaded["合同订单"][0]["客户"], "新客户")
         self.assertEqual(loaded["合同订单"][0]["关联合同"], ["remote-link"])
         self.assertEqual(loaded["设备台账"][0]["製造番号"], "26BS001-002")
+        audit = database.get_audit_events(self.db)
+        self.assertEqual(audit["events"][0]["source"], "xlsx_import")
+        self.assertEqual(audit["events"][0]["operator_name"], "导入员")
+        self.assertTrue({"insert", "update", "delete"}.issubset(
+            {change["operation"] for change in audit["events"][0]["changes"]}
+        ))
 
     def test_stale_workbook_cannot_be_applied(self):
         database.save_database(self.db, sample_data(), self.rules, backup=False)
@@ -227,6 +378,14 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(prepared.data[table][0]["款类"], "发货款")
             self.assertEqual(prepared.data[table][0]["覆盖批次"], "2")
             self.assertEqual(prepared.data[table][0]["覆盖製造番号"], "26BS002-001")
+        database.apply_editable_import(self.db, prepared)
+        changes = database.get_audit_events(self.db)["events"][0]["changes"]
+        self.assertTrue(any(
+            change["table_name"] != "合同订单"
+            and change["field_name"] == "JOB No"
+            and change["origin"] == "association_sync"
+            for change in changes
+        ))
 
 
 class CoreReliabilityTests(unittest.TestCase):

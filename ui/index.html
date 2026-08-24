@@ -44,6 +44,7 @@
   <button class="tab" data-tab="开票记录">开票记录</button>
   <button class="tab" data-tab="回款记录">回款记录</button>
   <button class="tab" data-tab="预警规则">预警规则</button>
+  <button class="tab" data-tab="审计记录">审计记录</button>
   <button class="tab" data-tab="使用指南">使用指南</button>
 </nav>
 
@@ -114,6 +115,8 @@
               <td>选择 JOB 后客户自动带入，款类来自付款条件；日期、金额独立填写，批次/制造番号严格限定在该 JOB，覆盖台数自动计算。</td></tr>
           <tr><td>修改待回收预警条件</td><td>预警规则</td>
               <td>可配置临近天数（默认 30）、金额容差（默认 0.01）、未验收/发票异常是否归④待确认；保存后重新「生成台账」生效。</td></tr>
+          <tr><td>追溯新增/修改/删除</td><td>审计记录</td>
+              <td>保存数据库后按操作人、JOB、业务表查询字段旧值和新值；legacy 历史不回填，审计启用后的变化会进入连续哈希链。</td></tr>
           <tr><td>看首页/待回收页效果</td><td>摘要 + 生成台账</td>
               <td>「生成台账」会重建导航页、未回收管理表、全部 JOB 页；摘要页先看校验问题。</td></tr>
         </tbody>
@@ -180,6 +183,37 @@
     </div>
   </section>
 
+  <section id="panel-审计记录" class="panel hidden">
+    <div class="audit-page">
+      <div class="audit-head">
+        <div>
+          <div class="eyebrow">AUDIT TRAIL</div>
+          <h3>数据库变更审计</h3>
+          <p class="muted">仅记录审计启用后的新增、删除和实质字段修改；legacy 历史数据不回填。</p>
+        </div>
+        <div id="auditChain" class="audit-chain">尚未验证</div>
+      </div>
+      <div class="audit-filters">
+        <label>开始日期<input id="auditDateFrom" type="date"></label>
+        <label>结束日期<input id="auditDateTo" type="date"></label>
+        <label>操作人<input id="auditOperator" placeholder="包含…"></label>
+        <label>JOB No<input id="auditJob" placeholder="包含…"></label>
+        <label>保存来源<select id="auditSource"><option value="">全部</option><option value="manual_save">手动保存</option><option value="generate_ledger">生成台账</option><option value="export_editable">导出编辑副本</option><option value="xlsx_import">Excel 回导</option></select></label>
+        <label>业务表<select id="auditTable"><option value="">全部</option></select></label>
+        <label>类型<select id="auditOperation"><option value="">全部</option><option value="insert">新增</option><option value="update">修改</option><option value="delete">删除</option></select></label>
+        <button id="btnAuditRefresh" class="primary">查询并验证</button>
+        <button id="btnAuditExport">导出 XLSX</button>
+      </div>
+      <div id="auditSummary" class="audit-summary muted"></div>
+      <div class="audit-table-wrap">
+        <table class="audit-table">
+          <thead><tr><th>时间 / 修订</th><th>操作人 / 来源</th><th>业务对象</th><th>变更</th><th>旧值 → 新值</th></tr></thead>
+          <tbody id="auditBody"><tr><td colspan="5" class="muted">点击“查询并验证”读取审计记录</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
   <section id="panel-设置" class="panel hidden">
     <div class="guide">
       <div class="eyebrow">LOCAL DATA</div>
@@ -195,6 +229,9 @@
           <tr><td>数据库状态</td>
               <td>修订 <b id="setRevision">—</b>　·　完整性 <b id="setIntegrity">—</b>　·　最近保存 <span id="setLastSaved">—</span></td>
               <td><span class="muted">SQLite + 外键 + WAL</span></td></tr>
+          <tr><td>当前操作人</td>
+              <td><input id="setOperatorName" class="path-input" placeholder="审计记录中的操作人"></td>
+              <td><button id="btnSetOperator">保存操作人</button></td></tr>
           <tr><td>台账文件</td>
               <td><span id="setXlsx" class="path">（未选择）</span><br>
                 <input id="setXlsxInput" class="path-input" placeholder="也可粘贴 .xlsx 路径"></td>
@@ -210,6 +247,7 @@
          · <b>旧 JSON 迁移</b>：选择 <code>*.records.json</code> 时会在同目录创建 <code>.db</code>，原 JSON 保留不动。<br>
          · <b>文件路径</b>：在上方选择或粘贴 DB/XLSX 路径后立即生效，并保存为当前 Windows/macOS 用户的下次启动设置。<br>
          · <b>外部表格编辑</b>：先「导出编辑副本」，在 Excel/WPS 修改六表，再「导入变更」；应用会展示新增/修改/删除明细，必须二次确认才写入。旧修订副本会被拒绝。<br>
+         · <b>审计记录</b>：新增、删除和实质字段修改与业务数据在同一事务写入；失败保存不会留下审计记录。请先设置正确的“当前操作人”。<br>
          · <b>生成台账</b>：按数据库重写 <code>xlsx</code>（导航页 / 未回收管理表 / 各 JOB 页），旧版自动进同目录 <code>备份/</code>（留近 10 份）。<br>
          · <b>检查更新</b>：联网查 GitHub 最新版本；有新版可点「下载并打开」，解压到下载目录后，<b>请退出本程序，用其中的新版本替换旧文件夹</b>（未签名，首开仍需 Mac 右键打开 / Windows SmartScreen「仍要运行」）。</p>
     </div>

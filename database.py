@@ -24,7 +24,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 import core
 
 
-DATABASE_VERSION = 2
+DATABASE_VERSION = 3
 WORKBOOK_VERSION = 2
 META_SHEET = "_BKTC_META"
 HELP_SHEET = "使用说明"
@@ -116,6 +116,9 @@ def _connect(path):
 
 
 def _create_schema(conn):
+    audit_was_present = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_audit_event'"
+    ).fetchone() is not None
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS "_meta" (
@@ -132,6 +135,53 @@ def _create_schema(conn):
             "reason" TEXT NOT NULL,
             "summary_json" TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS "_audit_event" (
+            "event_id" TEXT PRIMARY KEY,
+            "revision" INTEGER NOT NULL UNIQUE,
+            "created_at" TEXT NOT NULL,
+            "operator_name" TEXT NOT NULL,
+            "source" TEXT NOT NULL,
+            "actions_json" TEXT NOT NULL,
+            "app_version" TEXT NOT NULL,
+            "platform" TEXT NOT NULL,
+            "hostname" TEXT NOT NULL,
+            "change_count" INTEGER NOT NULL,
+            "summary_json" TEXT NOT NULL,
+            "previous_hash" TEXT NOT NULL,
+            "event_hash" TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS "_audit_change" (
+            "change_id" INTEGER PRIMARY KEY AUTOINCREMENT,
+            "event_id" TEXT NOT NULL,
+            "table_name" TEXT NOT NULL,
+            "record_id" TEXT NOT NULL,
+            "job_no" TEXT NOT NULL,
+            "operation" TEXT NOT NULL,
+            "field_name" TEXT NOT NULL,
+            "old_value_json" TEXT,
+            "new_value_json" TEXT,
+            "origin" TEXT NOT NULL,
+            FOREIGN KEY ("event_id") REFERENCES "_audit_event" ("event_id")
+                ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS "idx_audit_event_created"
+            ON "_audit_event" ("created_at");
+        CREATE INDEX IF NOT EXISTS "idx_audit_change_event"
+            ON "_audit_change" ("event_id", "change_id");
+        CREATE INDEX IF NOT EXISTS "idx_audit_change_job"
+            ON "_audit_change" ("job_no");
+        CREATE TRIGGER IF NOT EXISTS "audit_event_no_update"
+            BEFORE UPDATE ON "_audit_event"
+            BEGIN SELECT RAISE(ABORT, 'audit events are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS "audit_event_no_delete"
+            BEFORE DELETE ON "_audit_event"
+            BEGIN SELECT RAISE(ABORT, 'audit events are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS "audit_change_no_update"
+            BEFORE UPDATE ON "_audit_change"
+            BEGIN SELECT RAISE(ABORT, 'audit changes are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS "audit_change_no_delete"
+            BEFORE DELETE ON "_audit_change"
+            BEGIN SELECT RAISE(ABORT, 'audit changes are append-only'); END;
         """
     )
     for table in core.TABLES:
@@ -188,6 +238,20 @@ def _create_schema(conn):
         (str(uuid.uuid4()),),
     )
     conn.execute("INSERT OR IGNORE INTO _meta(key, value) VALUES('revision', '0')")
+    if not audit_was_present:
+        now = datetime.now().isoformat(timespec="seconds")
+        revision = _meta(conn, "revision", "0") or "0"
+        conn.execute(
+            "INSERT OR IGNORE INTO _meta(key, value) VALUES('audit_started_at', ?)",
+            (now,),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO _meta(key, value) VALUES('audit_start_revision', ?)",
+            (revision,),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO _meta(key, value) VALUES('audit_chain_head', '')"
+        )
     conn.execute(
         "INSERT INTO _meta(key, value) VALUES('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -286,9 +350,176 @@ def _rules_from_connection(conn):
     return {**core.DEFAULT_RULES, **rules}
 
 
+def _data_from_connection(conn):
+    data = core.empty_data()
+    for table in core.TABLES:
+        fields = [f[0] for f in core.SCHEMA[table]]
+        select = ["记录ID", *fields, "_extra_json"]
+        rows = conn.execute(
+            f'SELECT {", ".join(_q(x) for x in select)} FROM {_q(table)} '
+            f'ORDER BY {_q("_row_order")}'
+        )
+        for row in rows:
+            try:
+                rec = json.loads(row["_extra_json"] or "{}")
+            except (TypeError, ValueError):
+                rec = {}
+            rec["记录ID"] = row["记录ID"]
+            for field in fields:
+                rec[field] = row[field]
+            data[table].append(rec)
+    return core.normalize(data)
+
+
+def _json_scalar(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _audit_snapshot(table, record):
+    derived = set(core.DERIVED.get(table, []))
+    return {
+        key: value for key, value in record.items()
+        if key != "记录ID" and key not in derived
+    }
+
+
+def _job_rename_map(old_data, new_data):
+    old_rows = {x.get("记录ID"): x for x in old_data.get("合同订单", [])}
+    result = {}
+    for rec in new_data.get("合同订单", []):
+        old = old_rows.get(rec.get("记录ID"))
+        before, after = (old or {}).get("JOB No"), rec.get("JOB No")
+        if old and before != after:
+            result[before] = after
+    return result
+
+
+def _audit_changes(old_data, new_data, old_rules, new_rules, requested_data=None):
+    changes = []
+    job_renames = _job_rename_map(old_data, new_data)
+    requested_data = requested_data or new_data
+    for table in core.TABLES:
+        old_rows = {x.get("记录ID"): x for x in old_data.get(table, [])}
+        new_rows = {x.get("记录ID"): x for x in new_data.get(table, [])}
+        requested_rows = {x.get("记录ID"): x for x in requested_data.get(table, [])}
+        for record_id in sorted(set(old_rows) | set(new_rows), key=str):
+            old = old_rows.get(record_id)
+            new = new_rows.get(record_id)
+            if old is None:
+                snapshot = _audit_snapshot(table, new)
+                changes.append({
+                    "table_name": table, "record_id": str(record_id or ""),
+                    "job_no": str(new.get("JOB No") or ""), "operation": "insert",
+                    "field_name": "", "old_value": None, "new_value": snapshot,
+                    "origin": "user",
+                })
+                continue
+            if new is None:
+                snapshot = _audit_snapshot(table, old)
+                changes.append({
+                    "table_name": table, "record_id": str(record_id or ""),
+                    "job_no": str(old.get("JOB No") or ""), "operation": "delete",
+                    "field_name": "", "old_value": snapshot, "new_value": None,
+                    "origin": "user",
+                })
+                continue
+            derived = set(core.DERIVED.get(table, []))
+            fields = sorted((set(old) | set(new)) - {"记录ID"} - derived)
+            for field in fields:
+                before, after = old.get(field), new.get(field)
+                if before == after:
+                    continue
+                origin = "user"
+                if (table != "合同订单" and field == "JOB No"
+                        and job_renames.get(before) == after):
+                    origin = "association_sync"
+                elif (record_id in requested_rows
+                      and requested_rows[record_id].get(field) == before
+                      and requested_rows[record_id].get(field) != after):
+                    origin = "system_recompute"
+                changes.append({
+                    "table_name": table, "record_id": str(record_id or ""),
+                    "job_no": str(new.get("JOB No") or old.get("JOB No") or ""),
+                    "operation": "update", "field_name": field,
+                    "old_value": before, "new_value": after, "origin": origin,
+                })
+    old_rules = old_rules or {}
+    new_rules = new_rules or {}
+    for key in sorted(set(old_rules) | set(new_rules)):
+        before, after = old_rules.get(key), new_rules.get(key)
+        if before != after:
+            changes.append({
+                "table_name": "预警规则", "record_id": "warning_rules", "job_no": "",
+                "operation": "update", "field_name": key,
+                "old_value": before, "new_value": after, "origin": "user",
+            })
+    return changes
+
+
+def _audit_summary(changes):
+    summary = {}
+    for change in changes:
+        table = change["table_name"]
+        operation = change["operation"]
+        table_summary = summary.setdefault(table, {"insert": 0, "update": 0, "delete": 0})
+        table_summary[operation] += 1
+    return summary
+
+
+def _append_audit_event(conn, revision, created_at, reason, changes, context=None):
+    context = context if isinstance(context, dict) else {}
+    event_id = "audit-" + uuid.uuid4().hex
+    previous_hash = _meta(conn, "audit_chain_head", "")
+    actions = context.get("actions") if isinstance(context.get("actions"), list) else []
+    event = {
+        "event_id": event_id,
+        "revision": revision,
+        "created_at": created_at,
+        "operator_name": str(context.get("operator_name") or "unknown"),
+        "source": str(context.get("source") or reason or "manual_save"),
+        "actions": [str(x) for x in actions if str(x).strip()],
+        "app_version": str(context.get("app_version") or ""),
+        "platform": str(context.get("platform") or ""),
+        "hostname": str(context.get("hostname") or ""),
+        "summary": _audit_summary(changes),
+    }
+    payload = {
+        "event": event,
+        "changes": changes,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"), default=str)
+    event_hash = hashlib.sha256((previous_hash + "\n" + canonical).encode("utf-8")).hexdigest()
+    conn.execute(
+        "INSERT INTO _audit_event(event_id, revision, created_at, operator_name, source, "
+        "actions_json, app_version, platform, hostname, change_count, summary_json, "
+        "previous_hash, event_hash) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            event_id, revision, created_at, event["operator_name"], event["source"],
+            json.dumps(event["actions"], ensure_ascii=False), event["app_version"],
+            event["platform"], event["hostname"], len(changes),
+            json.dumps(event["summary"], ensure_ascii=False), previous_hash, event_hash,
+        ),
+    )
+    for change in changes:
+        conn.execute(
+            "INSERT INTO _audit_change(event_id, table_name, record_id, job_no, operation, "
+            "field_name, old_value_json, new_value_json, origin) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id, change["table_name"], change["record_id"], change["job_no"],
+                change["operation"], change["field_name"],
+                _json_scalar(change["old_value"]), _json_scalar(change["new_value"]),
+                change["origin"],
+            ),
+        )
+    _set_meta(conn, "audit_chain_head", event_hash)
+    return event_id, event_hash
+
+
 def save_database(path, data, rules=None, *, reason="manual_save", backup=True,
-                  expected_revision=None):
+                  expected_revision=None, audit_context=None):
     path = os.path.abspath(os.fspath(path))
+    requested_data = core.normalize(data)
     prepared, issues = _prepare_data(data)
     if rules is None:
         rules = get_rules(path) if os.path.exists(path) else dict(core.DEFAULT_RULES)
@@ -306,6 +537,11 @@ def save_database(path, data, rules=None, *, reason="manual_save", backup=True,
             raise StaleImportError(
                 f"数据库已从修订 {expected_revision} 更新到 {current_revision}，请重新加载后再操作"
             )
+        old_data = _data_from_connection(conn)
+        old_rules = _rules_from_connection(conn)
+        changes = _audit_changes(
+            old_data, prepared, old_rules, rules, requested_data=requested_data
+        )
         for table in ("回款记录", "开票记录", "设备台账", "付款条件", "发货批次", "合同订单"):
             conn.execute(f'DELETE FROM {_q(table)}')
         for table in ("合同订单", "发货批次", "付款条件", "设备台账", "开票记录", "回款记录"):
@@ -329,6 +565,19 @@ def save_database(path, data, rules=None, *, reason="manual_save", backup=True,
             "VALUES(?, ?, ?, ?)",
             (revision, now, reason, json.dumps(summary, ensure_ascii=False)),
         )
+        audit_event_id = None
+        suppressed = (
+            reason in {"database_created", "json_migration", "portable_starter"}
+            and conn.execute("SELECT COUNT(*) FROM _audit_event").fetchone()[0] == 0
+        )
+        if changes and not suppressed:
+            audit_event_id, _ = _append_audit_event(
+                conn, revision, now, reason, changes, audit_context
+            )
+        elif suppressed:
+            _set_meta(conn, "audit_started_at", now)
+            _set_meta(conn, "audit_start_revision", revision)
+            _set_meta(conn, "audit_chain_head", "")
         conn.commit()
     except sqlite3.IntegrityError as exc:
         conn.rollback()
@@ -345,6 +594,8 @@ def save_database(path, data, rules=None, *, reason="manual_save", backup=True,
         "path": path,
         "revision": revision,
         "backup": backup_path,
+        "audit_event_id": audit_event_id,
+        "audit_change_count": len(changes) if audit_event_id else 0,
         "data": load_database(path),
         "issues": issues,
     }
@@ -359,24 +610,7 @@ def load_database(path):
         integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
             raise RuntimeError(f"数据库完整性检查失败：{integrity}")
-        data = core.empty_data()
-        for table in core.TABLES:
-            fields = [f[0] for f in core.SCHEMA[table]]
-            select = ["记录ID", *fields, "_extra_json"]
-            rows = conn.execute(
-                f'SELECT {", ".join(_q(x) for x in select)} FROM {_q(table)} '
-                f'ORDER BY {_q("_row_order")}'
-            )
-            for row in rows:
-                try:
-                    rec = json.loads(row["_extra_json"] or "{}")
-                except (TypeError, ValueError):
-                    rec = {}
-                rec["记录ID"] = row["记录ID"]
-                for field in fields:
-                    rec[field] = row[field]
-                data[table].append(rec)
-        return core.normalize(data)
+        return _data_from_connection(conn)
     finally:
         conn.close()
 
@@ -404,15 +638,180 @@ def get_revision(path):
 def get_database_info(path):
     conn = _connect(path)
     try:
+        audit_count = conn.execute("SELECT COUNT(*) FROM _audit_event").fetchone()[0]
         return {
             "path": os.path.abspath(os.fspath(path)),
             "database_id": _meta(conn, "database_id"),
             "revision": int(_meta(conn, "revision", "0") or 0),
             "last_saved_at": _meta(conn, "last_saved_at"),
             "integrity": conn.execute("PRAGMA integrity_check").fetchone()[0],
+            "audit_started_at": _meta(conn, "audit_started_at"),
+            "audit_start_revision": int(_meta(conn, "audit_start_revision", "0") or 0),
+            "audit_event_count": audit_count,
         }
     finally:
         conn.close()
+
+
+def _decoded_json(value):
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _audit_changes_for_event(conn, event_id):
+    rows = conn.execute(
+        "SELECT table_name, record_id, job_no, operation, field_name, old_value_json, "
+        "new_value_json, origin FROM _audit_change WHERE event_id=? ORDER BY change_id",
+        (event_id,),
+    )
+    return [{
+        "table_name": row["table_name"],
+        "record_id": row["record_id"],
+        "job_no": row["job_no"],
+        "operation": row["operation"],
+        "field_name": row["field_name"],
+        "old_value": _decoded_json(row["old_value_json"]),
+        "new_value": _decoded_json(row["new_value_json"]),
+        "origin": row["origin"],
+    } for row in rows]
+
+
+def _audit_event_from_row(row, changes):
+    return {
+        "event_id": row["event_id"],
+        "revision": row["revision"],
+        "created_at": row["created_at"],
+        "operator_name": row["operator_name"],
+        "source": row["source"],
+        "actions": _decoded_json(row["actions_json"]) or [],
+        "app_version": row["app_version"],
+        "platform": row["platform"],
+        "hostname": row["hostname"],
+        "summary": _decoded_json(row["summary_json"]) or {},
+        "change_count": row["change_count"],
+        "previous_hash": row["previous_hash"],
+        "event_hash": row["event_hash"],
+        "changes": changes,
+    }
+
+
+def verify_audit_chain(path):
+    conn = _connect(path)
+    try:
+        previous_hash = ""
+        checked = 0
+        for row in conn.execute("SELECT * FROM _audit_event ORDER BY revision, event_id"):
+            changes = _audit_changes_for_event(conn, row["event_id"])
+            event = _audit_event_from_row(row, changes)
+            payload_event = {
+                key: event[key] for key in (
+                    "event_id", "revision", "created_at", "operator_name", "source",
+                    "actions", "app_version", "platform", "hostname", "summary"
+                )
+            }
+            canonical = json.dumps(
+                {"event": payload_event, "changes": changes}, ensure_ascii=False,
+                sort_keys=True, separators=(",", ":"), default=str,
+            )
+            expected = hashlib.sha256(
+                (previous_hash + "\n" + canonical).encode("utf-8")
+            ).hexdigest()
+            if row["previous_hash"] != previous_hash:
+                return {"ok": False, "checked_events": checked,
+                        "error": f"修订 {row['revision']} 的前序哈希不匹配"}
+            if row["event_hash"] != expected:
+                return {"ok": False, "checked_events": checked,
+                        "error": f"修订 {row['revision']} 的审计内容已被改变"}
+            previous_hash = expected
+            checked += 1
+        head = _meta(conn, "audit_chain_head", "")
+        if head != previous_hash:
+            return {"ok": False, "checked_events": checked,
+                    "error": "审计链尾标记不匹配，可能有记录被删除"}
+        return {
+            "ok": True,
+            "checked_events": checked,
+            "head": head,
+            "started_at": _meta(conn, "audit_started_at"),
+            "start_revision": int(_meta(conn, "audit_start_revision", "0") or 0),
+        }
+    finally:
+        conn.close()
+
+
+def get_audit_events(path, filters=None, limit=500):
+    filters = filters if isinstance(filters, dict) else {}
+    conn = _connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM _audit_event ORDER BY revision DESC, event_id DESC LIMIT ?",
+            (max(1, min(int(limit or 500), 5000)),),
+        ).fetchall()
+        result = []
+        for row in rows:
+            changes = _audit_changes_for_event(conn, row["event_id"])
+            event = _audit_event_from_row(row, changes)
+            if filters.get("operator_name") and filters["operator_name"] not in event["operator_name"]:
+                continue
+            if filters.get("source") and filters["source"] != event["source"]:
+                continue
+            if filters.get("date_from") and event["created_at"][:10] < filters["date_from"]:
+                continue
+            if filters.get("date_to") and event["created_at"][:10] > filters["date_to"]:
+                continue
+            table_name = filters.get("table_name")
+            job_no = filters.get("job_no")
+            operation = filters.get("operation")
+            if table_name and not any(x["table_name"] == table_name for x in changes):
+                continue
+            if job_no and not any(job_no in x["job_no"] for x in changes):
+                continue
+            if operation and not any(x["operation"] == operation for x in changes):
+                continue
+            result.append(event)
+        return {
+            "events": result,
+            "chain": verify_audit_chain(path),
+            "total_returned": len(result),
+        }
+    finally:
+        conn.close()
+
+
+def export_audit_xlsx(path, events):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "审计记录"
+    headers = [
+        "时间", "修订", "操作人", "来源", "操作动作", "业务表", "JOB No",
+        "操作类型", "字段", "旧值", "新值", "变化来源", "记录ID", "事件哈希",
+    ]
+    sheet.append(headers)
+    for event in events:
+        for change in event.get("changes", []):
+            sheet.append([
+                event.get("created_at", ""), event.get("revision", ""),
+                event.get("operator_name", ""), event.get("source", ""),
+                "、".join(event.get("actions") or []), change.get("table_name", ""),
+                change.get("job_no", ""), change.get("operation", ""),
+                change.get("field_name", ""),
+                _json_scalar(change.get("old_value")),
+                _json_scalar(change.get("new_value")), change.get("origin", ""),
+                change.get("record_id", ""), event.get("event_hash", ""),
+            ])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="004494")
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    widths = [20, 9, 16, 18, 24, 14, 16, 12, 18, 40, 40, 14, 28, 24]
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    workbook.save(path)
+    return path
 
 
 def migrate_json_to_database(json_path, database_path):
@@ -855,7 +1254,7 @@ def prepare_editable_import(database_path, workbook_path):
     )
 
 
-def apply_editable_import(database_path, prepared):
+def apply_editable_import(database_path, prepared, audit_context=None):
     database_path = os.path.abspath(os.fspath(database_path))
     if database_path != prepared.database_path:
         raise StaleImportError("预览对应的数据库已切换，请重新选择文件并预览")
@@ -876,4 +1275,5 @@ def apply_editable_import(database_path, prepared):
         reason="xlsx_import",
         backup=True,
         expected_revision=prepared.current_revision,
+        audit_context=audit_context,
     )

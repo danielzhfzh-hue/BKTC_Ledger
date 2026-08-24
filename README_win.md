@@ -34,6 +34,8 @@ GitHub Actions 是推荐构建路径：Windows 与 macOS 均会先运行可靠�
 
 界面选择或粘贴的 DB/XLSX 路径会保存到当前 Windows 用户的 `%APPDATA%\BKTC_Ledger\config.json`，下次双击启动会自动恢复；命令行参数和环境变量优先于该配置。
 
+设置页的“当前操作人”也保存在该配置中。审计从 v1.5.0 启用时点开始，不回填旧数据；之后每次成功保存的新增、修改、删除和 Excel 回导可在“审计记录”页面查询和导出。
+
 旧版 `BKTC_STORE=<records.json>` / `--store <records.json>` 仍可用于一次性迁移。
 
 本机交付包的 `data\BKTC_Ledger.db` / `data\BKTC_Ledger.xlsx` 是当前项目数据；公开 GitHub Release 仍不上传客户数据。复制数据库前先退出应用，或复制 `备份/` 中的完整快照，避免遗漏 WAL 中尚未归档的事务。

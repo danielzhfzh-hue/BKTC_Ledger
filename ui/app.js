@@ -6,6 +6,7 @@ const state = {
   filter: "", colFilters: {}, sortBy: {}, rules: {}, jobFilter: null,
   customerFilter: null,
   version: "?", update: null, databaseInfo: null, pendingImport: null,
+  operatorName: "", auditActions: new Set(), auditEvents: [], auditChain: null,
 };
 
 const ROW_H = 31, BUFFER = 20;
@@ -51,6 +52,18 @@ function newLocalId() {
   return `local-${Date.now()}-${_localIdCounter}`;
 }
 
+function markAuditAction(action) {
+  if (action) state.auditActions.add(String(action));
+}
+
+function pendingAuditContext(source = "manual_save") {
+  return { source, actions: [...state.auditActions] };
+}
+
+function clearPendingAuditActions() {
+  state.auditActions.clear();
+}
+
 function esc(x) {
   return String(x ?? "").replace(/[&<>"']/g, (c) => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -93,6 +106,9 @@ function renderAll() {
   }
   if (document.activeElement !== $("setXlsxInput")) {
     $("setXlsxInput").value = state.xlsxPath || "";
+  }
+  if (document.activeElement !== $("setOperatorName")) {
+    $("setOperatorName").value = state.operatorName || "";
   }
   $("setVersion").textContent = "v" + state.version;
   const db = state.databaseInfo || {};
@@ -304,14 +320,16 @@ function switchTab(tab) {
   document.querySelectorAll(".tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === tab));
   $("panel-摘要").classList.toggle("hidden", tab !== "摘要");
-  $("panel-表格").classList.toggle("hidden", tab === "摘要" || tab === "使用指南" || tab === "预警规则");
+  $("panel-表格").classList.toggle("hidden", ["摘要", "使用指南", "预警规则", "审计记录"].includes(tab));
   $("panel-使用指南").classList.toggle("hidden", tab !== "使用指南");
   $("panel-预警规则").classList.toggle("hidden", tab !== "预警规则");
+  $("panel-审计记录").classList.toggle("hidden", tab !== "审计记录");
   document.querySelectorAll(".only-ship").forEach((b) =>
     b.classList.toggle("hidden", tab !== "发货批次"));
   const addButton = $("btnAddRecord");
   if (addButton && ENTRY_ACTION_LABELS[tab]) addButton.textContent = ENTRY_ACTION_LABELS[tab];
-  if (tab !== "摘要" && tab !== "使用指南" && tab !== "预警规则") renderGrid();
+  if (tab === "审计记录") loadAuditEvents();
+  if (!['摘要', '使用指南', '预警规则', '审计记录'].includes(tab)) renderGrid();
 }
 
 $("summaryCards").addEventListener("click", (e) => {
@@ -340,6 +358,7 @@ for (const id of ["rulesDays", "rulesTol", "rulesUnacc", "rulesInvBad"]) {
   $(id).addEventListener("input", () => {
     state.rules = rulesFromForm();
     state.dirty = true;
+    markAuditAction("warning_rule_edit");
     renderCounts();
   });
 }
@@ -348,6 +367,7 @@ $("btnRulesDefault").addEventListener("click", () => {
   state.rules = { "临近天数": 30, "金额容差": 0.01, "未验收待确认": true, "发票异常待确认": true };
   renderRules();
   state.dirty = true;
+  markAuditAction("warning_rule_reset");
   renderCounts();
 });
 
@@ -702,6 +722,7 @@ function updateRec(table, ri, field, raw, deferRecompute = false) {
     }
   }
   state.dirty = true;
+  markAuditAction("grid_edit");
   if (!deferRecompute) {
     recomputeDerived();
     renderCounts();
@@ -801,6 +822,7 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
       for (const i of idxs) state.data[table].splice(i, 1);
       state.selection = new Set();
       state.dirty = true;
+      markAuditAction("delete_row");
       recomputeDerived(); renderGrid(); renderCounts();
     } else if (act === "dup") {
       const idxs = [...state.selection].sort((a, b) => a - b);
@@ -811,6 +833,7 @@ document.querySelectorAll(".toolbar [data-act]").forEach((b) => {
       state.data[table].splice(at, 0, ...news);
       state.selection = new Set(news.map((_, k) => at + k));
       state.dirty = true;
+      markAuditAction("duplicate_row");
       recomputeDerived(); renderGrid(); renderCounts();
       toast(`已重复 ${news.length} 行`);
     } else if (act === "copy") {
@@ -831,6 +854,7 @@ function tryCascadeDelete(idxs) {
     for (const i of idxs) state.data["合同订单"].splice(i, 1);
     state.selection = new Set();
     state.dirty = true;
+    markAuditAction("delete_contract_draft");
     recomputeDerived(); renderGrid(); renderCounts(); renderSummary();
     toast("已删除无 JOB No 的合同草稿行");
     return true;
@@ -846,6 +870,7 @@ function tryCascadeDelete(idxs) {
   state.jobFilter = null; // 删除的 JOB 可能正被筛，清筛选看全貌
   state.customerFilter = null;
   state.dirty = true;
+  markAuditAction("delete_order");
   recomputeDerived(); renderGrid(); renderCounts(); renderSummary();
   toast("已删除 " + jobs.length + " 个订单（六表全部数据）");
   return true;
@@ -892,6 +917,7 @@ function renameBatch() {
   }
   state.data["发货批次"] = [...best.values()];
   state.dirty = true;
+  markAuditAction("rename_shipment_batch");
   recomputeDerived(); renderGrid(); renderCounts();
   toast(`已重命名批次 ${oldName} → ${nw}（同步 ${touched} 处）`, "ok");
 }
@@ -979,6 +1005,7 @@ $("splitOk").addEventListener("click", () => {
   }
   recomputeDerived();
   state.dirty = true;
+  markAuditAction("split_shipment_batch");
   closeSplit();
   renderGrid(); renderCounts();
   toast(`已把 ${sel.length} 台设备移到批次「${target}」`, "ok");
@@ -1172,6 +1199,7 @@ $("coverageApply").addEventListener("click", () => {
     return;
   }
   state.dirty = true;
+  markAuditAction("coverage_edit");
   recomputeDerived();
   closeCoverageModal();
   renderGrid();
@@ -1565,6 +1593,7 @@ function pasteGrid(table, row0, col0, text) {
     r += 1;
   }
   state.dirty = true;
+  markAuditAction("paste_rows");
   recomputeDerived(); renderGrid(); renderCounts();
   toast(`已粘贴 ${rows.length} 行`);
 }
@@ -1737,6 +1766,7 @@ function applyBackendState(r) {
   if (r.schema) state.schema = r.schema;
   if (r.rules) state.rules = r.rules;
   if (r.version) state.version = r.version;
+  if (r.operator_name) state.operatorName = r.operator_name;
   if (r.database_info) state.databaseInfo = r.database_info;
   if (r.revision !== undefined) {
     state.databaseInfo = { ...(state.databaseInfo || {}), revision: r.revision,
@@ -1750,9 +1780,10 @@ async function saveCurrent(silent = false) {
   state._saving = true;
   try {
     if (!silent) setStatus("正在校验并保存数据库…");
-    const r = await call("save_data", state.data, state.rules);
+    const r = await call("save_data", state.data, state.rules, pendingAuditContext());
     applyBackendState(r);
     state.dirty = false;
+    clearPendingAuditActions();
     setStatus(`数据库已保存：${r.path}（修订 ${r.revision}）`);
     if (!silent) toast("数据库已通过校验并保存", "ok");
     renderAll();
@@ -1775,9 +1806,10 @@ $("btnSave").addEventListener("click", async () => {
 $("btnGenerate").addEventListener("click", async () => {
   try {
     setStatus("生成台账中…");
-    const r = await call("generate", state.data, state.rules);
+    const r = await call("generate", state.data, state.rules, pendingAuditContext("generate_ledger"));
     applyBackendState(r);
     state.dirty = false;
+    clearPendingAuditActions();
     const msg = `已生成：${r.out}（未回收 ${r.counts["未回收行数"]} 行，合计 ${Number(r.counts["未回收合计"]).toLocaleString()}）`;
     setStatus(msg);
     toast("台账已生成", "ok");
@@ -1836,11 +1868,101 @@ $("btnApplyXlsxPath").addEventListener("click", async () => {
   await refreshWithFeedback(null, p);
 });
 
+$("btnSetOperator").addEventListener("click", async () => {
+  const name = $("setOperatorName").value.trim();
+  if (!name) return toast("操作人不能为空", "error");
+  try {
+    const result = await call("set_operator_name", name);
+    state.operatorName = result.operator_name;
+    toast(`当前操作人已设为：${state.operatorName}`, "ok");
+  } catch (error) {
+    toast(String(error), "error");
+  }
+});
+
+function auditFilters() {
+  return {
+    date_from: $("auditDateFrom").value,
+    date_to: $("auditDateTo").value,
+    operator_name: $("auditOperator").value.trim(),
+    job_no: $("auditJob").value.trim(),
+    source: $("auditSource").value,
+    table_name: $("auditTable").value,
+    operation: $("auditOperation").value,
+  };
+}
+
+function auditValue(value) {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "object") return JSON.stringify(value, null, 0);
+  return String(value);
+}
+
+function auditOperationLabel(operation) {
+  return { insert: "新增", update: "修改", delete: "删除" }[operation] || operation;
+}
+
+function renderAuditEvents(result) {
+  state.auditEvents = result.events || [];
+  state.auditChain = result.chain || null;
+  const chain = state.auditChain;
+  const chainBox = $("auditChain");
+  chainBox.className = "audit-chain " + (chain?.ok ? "ok" : "bad");
+  chainBox.textContent = chain?.ok
+    ? `审计链完整 · ${chain.checked_events} 次保存 · 基线修订 ${chain.start_revision}`
+    : `审计链异常 · ${chain?.error || "无法验证"}`;
+  const rows = [];
+  for (const event of state.auditEvents) {
+    for (const change of event.changes || []) {
+      const actionText = (event.actions || []).join("、") || "保存数据库";
+      const origin = change.origin === "association_sync" ? " · 关联同步"
+        : (change.origin === "system_recompute" ? " · 系统重算" : "");
+      rows.push(`<tr>
+        <td><b>${esc((event.created_at || "").replace("T", " "))}</b><br><span class="muted">修订 ${esc(event.revision)}</span></td>
+        <td><b>${esc(event.operator_name || "unknown")}</b><br><span class="muted">${esc(event.source)} · ${esc(actionText)}</span></td>
+        <td><b>${esc(change.table_name)}</b><br><span>${esc(change.job_no || "—")}</span><br><code>${esc(change.record_id)}</code></td>
+        <td><span class="audit-op ${esc(change.operation)}">${esc(auditOperationLabel(change.operation))}</span>${origin}<br><b>${esc(change.field_name || "整条记录")}</b></td>
+        <td><div class="audit-values"><span>${esc(auditValue(change.old_value))}</span><i>→</i><span>${esc(auditValue(change.new_value))}</span></div></td>
+      </tr>`);
+    }
+  }
+  $("auditBody").innerHTML = rows.join("") || '<tr><td colspan="5" class="muted">当前筛选条件下没有审计记录</td></tr>';
+  const changes = state.auditEvents.reduce((sum, event) => sum + (event.changes || []).length, 0);
+  $("auditSummary").textContent = `返回 ${state.auditEvents.length} 次保存、${changes} 项变更。审计从 ${chain?.started_at?.replace("T", " ") || "启用时"} 开始。`;
+}
+
+async function loadAuditEvents() {
+  if (!state.storePath) return;
+  if ($("auditTable").options.length === 1 && state.schema) {
+    for (const table of [...Object.keys(state.schema), "预警规则"]) {
+      $("auditTable").insertAdjacentHTML("beforeend", `<option value="${esc(table)}">${esc(table)}</option>`);
+    }
+  }
+  $("auditBody").innerHTML = '<tr><td colspan="5" class="muted">正在读取并验证审计链…</td></tr>';
+  try {
+    renderAuditEvents(await call("get_audit_events", auditFilters(), 1000));
+  } catch (error) {
+    $("auditBody").innerHTML = `<tr><td colspan="5" class="error">${esc(String(error))}</td></tr>`;
+  }
+}
+
+$("btnAuditRefresh").addEventListener("click", loadAuditEvents);
+$("btnAuditExport").addEventListener("click", async () => {
+  try {
+    const result = await call("export_audit", auditFilters());
+    toast(`已导出 ${result.events} 次保存的审计记录`, "ok");
+    await call("open_path", result.path);
+  } catch (error) {
+    toast(String(error), "error");
+  }
+});
+
 $("btnSettings").addEventListener("click", () => {
-  ["摘要", "表格", "使用指南", "预警规则"].forEach((p) => $("panel-" + p).classList.add("hidden"));
+  ["摘要", "表格", "使用指南", "预警规则", "审计记录"].forEach((p) => $("panel-" + p).classList.add("hidden"));
   $("panel-设置").classList.remove("hidden");
   document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
   $("setVersion").textContent = "v" + state.version;
+  $("setOperatorName").value = state.operatorName || "";
 });
 
 $("btnCheckUpdate").addEventListener("click", async () => {
@@ -1940,9 +2062,13 @@ function renderImportPreview(result) {
 $("btnExportEditable").addEventListener("click", async () => {
   try {
     setStatus("正在保存并生成可编辑副本…");
-    const r = await call("export_editable", state.data, state.rules, state.dirty);
+    const r = await call(
+      "export_editable", state.data, state.rules, state.dirty,
+      pendingAuditContext("export_editable")
+    );
     applyBackendState(r);
     state.dirty = false;
+    clearPendingAuditActions();
     renderAll();
     setStatus(`已导出编辑副本：${r.path}（数据库修订 ${r.revision}）`);
     toast("六表编辑副本已导出到 Downloads", "ok");
@@ -1976,6 +2102,7 @@ $("importApply").addEventListener("click", async () => {
     const r = await call("apply_import", state.pendingImport.token);
     applyBackendState(r);
     state.dirty = false;
+    clearPendingAuditActions();
     closeImportPreview();
     renderRules();
     renderAll();
@@ -1995,6 +2122,7 @@ async function refresh(store, xlsx) {
   const r = await call("load_state", store, xlsx);
   applyBackendState(r);
   state.dirty = false;
+  clearPendingAuditActions();
   renderAll();
   renderRules();
   switchTab("摘要");
@@ -2446,6 +2574,14 @@ function commitTransactionEntry() {
 
 function finishEntryCommit(table, job, count, message, selectedIndex = null) {
   state.dirty = true;
+  const actions = {
+    "付款条件": "edit_payment_terms",
+    "设备台账": "add_device",
+    "发货批次": "add_shipment_batch",
+    "开票记录": "add_invoice",
+    "回款记录": "add_payment",
+  };
+  markAuditAction(actions[table] || "entry_form");
   recomputeDerived();
   state.jobFilter = new Set([job]);
   state.customerFilter = null;
@@ -2781,6 +2917,7 @@ function commitNewOrder(f) {
   state.data["回款记录"].push({ "记录ID": newId(), "JOB No": job });
 
   state.dirty = true;
+  markAuditAction("new_order");
   recomputeDerived();
   state.jobFilter = new Set([job]);
   switchTab("合同订单");

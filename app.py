@@ -119,6 +119,9 @@ def _portable_default(filename, executable=None):
 
 def _is_ephemeral_path(path):
     """旧审计/解压流程可能留下 /tmp 路径，不能作为长期工作库。"""
+    raw = str(path).replace("\\", "/")
+    if raw == "/tmp" or raw.startswith(("/tmp/", "/private/tmp/")):
+        return True
     try:
         normalized = os.path.abspath(os.path.expanduser(path))
     except (TypeError, ValueError):

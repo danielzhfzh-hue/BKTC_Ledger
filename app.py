@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """BKTC 台账维护工具（pywebview 桌面壳，macOS / Windows 通用）。"""
 import argparse
+import errno
 import getpass
 import json
 import os
@@ -11,13 +12,14 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.request
 import uuid
 import zipfile
 
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"
 
@@ -124,6 +126,125 @@ def _portable_default(filename, executable=None):
     return candidates[0]
 
 
+def _windows_user_data_dir(root=None):
+    """Return the per-user writable data directory used by packaged Windows builds."""
+    if root is None:
+        root = (
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("APPDATA")
+            or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        )
+    return os.path.join(os.path.abspath(os.path.expanduser(root)), "BKTC_Ledger", "data")
+
+
+def _path_is_writable(path):
+    """Probe both the containing directory and an existing file for write access."""
+    path = os.path.abspath(os.path.expanduser(path))
+    directory = os.path.dirname(path) or os.getcwd()
+    try:
+        os.makedirs(directory, exist_ok=True)
+        if os.path.exists(path):
+            # Opening without writing catches read-only attributes and ACL denial.
+            with open(path, "ab"):
+                pass
+        fd, probe = tempfile.mkstemp(prefix=".bktc-write-", dir=directory)
+        os.close(fd)
+        os.unlink(probe)
+        return True
+    except OSError:
+        try:
+            if "probe" in locals() and os.path.exists(probe):
+                os.unlink(probe)
+        except OSError:
+            pass
+        return False
+
+
+def _is_packaged_data_path(path, executable=None, platform_name=None, frozen=None):
+    """Whether a path lives in the bundled executable's data directory on Windows."""
+    platform_name = sys.platform if platform_name is None else platform_name
+    frozen = IS_FROZEN if frozen is None else bool(frozen)
+    if not frozen or not str(platform_name).lower().startswith("win"):
+        return False
+    executable_dir = os.path.dirname(os.path.abspath(executable or sys.executable))
+    package_data = os.path.abspath(os.path.join(executable_dir, "data"))
+    normalized = os.path.abspath(os.path.expanduser(path))
+    try:
+        return os.path.commonpath((package_data, normalized)) == package_data
+    except ValueError:
+        return False
+
+
+def _resolve_windows_data_paths(database_path, xlsx_path, *, executable=None,
+                                platform_name=None, frozen=None, user_data_dir=None):
+    """Move unwritable packaged data to a per-user directory, copying only missing files.
+
+    Explicit paths outside the bundled ``data`` directory are never changed. This keeps
+    portable builds usable from protected folders while preserving user-selected paths.
+    """
+    platform_name = sys.platform if platform_name is None else platform_name
+    frozen = IS_FROZEN if frozen is None else bool(frozen)
+    if not frozen or not str(platform_name).lower().startswith("win"):
+        return database_path, xlsx_path
+    db_packaged = _is_packaged_data_path(
+        database_path, executable=executable, platform_name=platform_name, frozen=frozen
+    )
+    xlsx_packaged = _is_packaged_data_path(
+        xlsx_path, executable=executable, platform_name=platform_name, frozen=frozen
+    )
+    db_needs_move = db_packaged and not _path_is_writable(database_path)
+    xlsx_needs_move = xlsx_packaged and not _path_is_writable(xlsx_path)
+    if not db_needs_move and not xlsx_needs_move:
+        return database_path, xlsx_path
+
+    target_dir = os.path.abspath(os.path.expanduser(
+        user_data_dir or _windows_user_data_dir()
+    ))
+    os.makedirs(target_dir, exist_ok=True)
+    new_db = os.path.join(target_dir, "BKTC_Ledger.db") if db_needs_move else database_path
+    new_xlsx = os.path.join(target_dir, "BKTC_Ledger.xlsx") if xlsx_needs_move else xlsx_path
+    for source, target in ((database_path, new_db), (xlsx_path, new_xlsx)):
+        if source == target or os.path.exists(target) or not os.path.exists(source):
+            continue
+        shutil.copy2(source, target)
+    return new_db, new_xlsx
+
+
+def _is_write_permission_error(exc):
+    return isinstance(exc, PermissionError) or getattr(exc, "errno", None) in (
+        errno.EACCES, errno.EPERM,
+    )
+
+
+def _fallback_xlsx_path(path):
+    stem, ext = os.path.splitext(os.path.abspath(os.path.expanduser(path)))
+    ext = ext or ".xlsx"
+    return f"{stem}.generated_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}{ext}"
+
+
+def _generate_xlsx_with_fallback(data, path, rules=None):
+    """Generate the requested workbook, falling back if Windows has it locked/read-only."""
+    notice = ""
+    try:
+        core.backup_xlsx(path)
+    except OSError as exc:
+        if not _is_write_permission_error(exc):
+            raise
+        notice = "旧台账无法备份（文件可能正被 Excel 占用）"
+    try:
+        out, issues, counts = core.generate_xlsx(data, path, rules)
+    except OSError as exc:
+        if not _is_write_permission_error(exc):
+            raise
+        fallback = _fallback_xlsx_path(path)
+        out, issues, counts = core.generate_xlsx(data, fallback, rules)
+        notice = (
+            f"原台账无法覆盖（Windows 权限/占用），已生成备用文件：{fallback}；"
+            "关闭 Excel 后可再生成到原路径"
+        )
+    return out, issues, counts, notice
+
+
 def _is_ephemeral_path(path):
     """旧审计/解压流程可能留下 /tmp 路径，不能作为长期工作库。"""
     raw = str(path).replace("\\", "/")
@@ -201,6 +322,35 @@ class Api:
         if legacy_json_path and not str(data_path).lower().endswith(".json"):
             self.legacy_json_path = legacy_json_path
 
+    def _relocate_windows_paths(self):
+        """Retry a packaged Windows operation from the writable per-user data directory."""
+        old_db, old_xlsx = self.database_path, self.xlsx_path
+        new_db, new_xlsx = _resolve_windows_data_paths(old_db, old_xlsx)
+        if new_db == old_db and new_xlsx == old_xlsx:
+            return False
+        self.database_path, self.xlsx_path = new_db, new_xlsx
+        self.database_revision = database.get_revision(new_db) if os.path.exists(new_db) else None
+        if self.config_path:
+            _save_config(self.database_path, self.xlsx_path, self.config_path, self.operator_name)
+        return True
+
+    def _save_database(self, data, rules=None, audit_context=None, source="manual_save"):
+        try:
+            return database.save_database(
+                self.database_path, data, rules, expected_revision=self.database_revision,
+                audit_context=self._audit_context(audit_context, source),
+            )
+        except OSError as exc:
+            if not _is_write_permission_error(exc) or not self._relocate_windows_paths():
+                raise RuntimeError(
+                    f"无法写入数据库：{self.database_path}。请将程序移到可写目录，"
+                    "或在设置中选择可写的 .db 文件。"
+                ) from exc
+            return database.save_database(
+                self.database_path, data, rules, expected_revision=self.database_revision,
+                audit_context=self._audit_context(audit_context, source),
+            )
+
     def _set_data_path(self, path):
         path = os.path.abspath(os.path.expanduser(path))
         if path.lower().endswith(".json"):
@@ -264,10 +414,7 @@ class Api:
                 "version": __version__}
 
     def save_data(self, data, rules=None, audit_context=None):
-        result = database.save_database(
-            self.database_path, data, rules, expected_revision=self.database_revision,
-            audit_context=self._audit_context(audit_context),
-        )
+        result = self._save_database(data, rules, audit_context)
         self.database_revision = result["revision"]
         return {"ok": True, "path": self.database_path,
                 "data": result["data"], "revision": result["revision"],
@@ -278,15 +425,14 @@ class Api:
     def generate(self, data, rules=None, audit_context=None):
         if not self.xlsx_path or not os.path.isdir(os.path.dirname(self.xlsx_path)):
             raise RuntimeError("请先选择台账 Excel 文件")
-        saved = database.save_database(
-            self.database_path, data, rules, expected_revision=self.database_revision,
-            audit_context=self._audit_context(audit_context, "generate_ledger"),
-        )
+        saved = self._save_database(data, rules, audit_context, "generate_ledger")
         self.database_revision = saved["revision"]
-        core.backup_xlsx(self.xlsx_path)
-        out, issues, counts = core.generate_xlsx(saved["data"], self.xlsx_path, rules)
+        out, issues, counts, notice = _generate_xlsx_with_fallback(
+            saved["data"], self.xlsx_path, rules
+        )
         return {"ok": True, "out": out, "issues": issues, "counts": counts,
                 "data": saved["data"], "revision": saved["revision"],
+                "xlsx_path": self.xlsx_path, "notice": notice,
                 "audit_event_id": saved["audit_event_id"],
                 "audit_change_count": saved["audit_change_count"]}
 
@@ -310,10 +456,7 @@ class Api:
     def export_editable(self, data, rules=None, dirty=True, audit_context=None):
         """Save current edits, then export a revision-bound six-table workbook."""
         if dirty:
-            saved = database.save_database(
-                self.database_path, data, rules, expected_revision=self.database_revision,
-                audit_context=self._audit_context(audit_context, "export_editable"),
-            )
+            saved = self._save_database(data, rules, audit_context, "export_editable")
             self.database_revision = saved["revision"]
         else:
             saved = {
@@ -505,6 +648,7 @@ def main():
     )
     data_path = _prefer_canonical_mac_data(data_path, "BKTC_Ledger.db")
     xlsx_path = _prefer_canonical_mac_data(xlsx_path, "BKTC_Ledger.xlsx")
+    data_path, xlsx_path = _resolve_windows_data_paths(data_path, xlsx_path)
     legacy_json = DEFAULT_LEGACY_JSON if data_path == DEFAULT_DATABASE else None
     api = Api(
         xlsx_path, data_path, legacy_json_path=legacy_json, config_path=config_path,

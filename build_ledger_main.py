@@ -167,6 +167,34 @@ def to_dt(v):
     return None
 
 
+def payment_term_days(term, default=0):
+    """Return a non-negative integer term in days."""
+    value = num(term.get('账期天数')) if term else None
+    return max(0, int(value)) if value is not None else default
+
+
+def warranty_term_settings(kind, term):
+    """Return (uses warranty expiry, days after expiry).
+
+    A missing trigger is treated as the warranty-expiry rule for legacy rows;
+    an explicit non-warranty trigger keeps the existing invoice-date rule.
+    """
+    if s(kind) != '质保款':
+        return False, payment_term_days(term)
+    trigger = s(term.get('触发条件')) if term else ''
+    if term is not None and trigger not in ('', '质保期满后'):
+        return False, payment_term_days(term)
+    return True, payment_term_days(term)
+
+
+def warranty_due_date(kind, term, warranty_end):
+    """Return the effective due datetime for a warranty-expiry term."""
+    uses_warranty, days = warranty_term_settings(kind, term)
+    if not uses_warranty or warranty_end is None:
+        return None
+    return warranty_end + timedelta(days=days)
+
+
 def set_cell(ws, r, c, v, font=F_BODY, fill=None, align=AL_L, fmt=None,
              trusted_formula=False):
     if isinstance(v, str) and v.startswith(('=', '+', '-', '@')) and not trusted_formula:
@@ -230,6 +258,7 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
     full_invs = [x for x in invs if s(x['款类']) == '全额']
     inv_by = {t: [x for x in invs if s(x['款类']) == t] for t in types}
     pay_by = {t: [x for x in pays if s(x['款类']) == t] for t in types}
+    term_by_kind = {s(t.get('款类')): t for t in tms}
 
     matched_sets = {}
 
@@ -256,12 +285,20 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
             '质保开始日': d['质保开始日'], '质保结束日': d['质保结束日'],
             '质保期': s(d['质保期']), '送货单回收': s(d['送货单回收']),
             '备注': s(d['备注']),
+            '_warranty_pending': False, '_warranty_rule': False,
         }
         dues = []
         free = s(d['是否无偿']) == '是'
         for t in types:
             matched_invoices = matching_records(inv_by[t], ser, batch)
             matched_payments = matching_records(pay_by[t], ser, batch)
+            term = term_by_kind.get(t)
+            uses_warranty, _ = warranty_term_settings(t, term)
+            warranty_end = to_dt(d.get('质保结束日')) if uses_warranty and not free else None
+            if uses_warranty and not free:
+                row['_warranty_rule'] = True
+            if uses_warranty and not free and warranty_end is None:
+                row['_warranty_pending'] = True
             inv_key, inv_date, inv_amount = match_summary(
                 matched_invoices, '开票日', f'invoice:{t}'
             )
@@ -269,7 +306,11 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
                 matched_payments, '回款日', f'payment:{t}'
             )
             if matched_invoices:
-                dues.extend(to_dt(inv.get('应收回款日')) for inv in matched_invoices)
+                if uses_warranty:
+                    effective_due = warranty_due_date(t, term, warranty_end)
+                    dues.extend(effective_due for _ in matched_invoices)
+                else:
+                    dues.extend(to_dt(inv.get('应收回款日')) for inv in matched_invoices)
                 row[t + '·开票日'] = inv_date
                 row[t + '·开票金额'] = inv_amount
                 row[t + '·开票状况'] = '已开票'
@@ -279,6 +320,13 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
                 row[t + '·开票金额'] = None
                 row[t + '·开票状况'] = '无偿不开票' if free else '未开票'
                 row[t + '·开票键'] = None
+            if not matched_invoices and full_invs:
+                fallback_invoices = matching_records(full_invs, ser, batch)
+                if uses_warranty:
+                    effective_due = warranty_due_date(t, term, warranty_end)
+                    dues.extend(effective_due for _ in fallback_invoices)
+                else:
+                    dues.extend(to_dt(inv.get('应收回款日')) for inv in fallback_invoices)
             if matched_payments:
                 row[t + '·回款日'] = pay_date
                 row[t + '·回款金额'] = pay_amount
@@ -291,7 +339,6 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
         matched_full = matching_records(full_invs, ser, batch)
         full_key, full_date, full_amount = match_summary(matched_full, '开票日', 'invoice:全额')
         if matched_full:
-            dues.extend(to_dt(invf.get('应收回款日')) for invf in matched_full)
             row['全额·开票日'] = full_date
             row['全额·开票金额'] = full_amount
             row['全额·开票状况'] = '已开票'
@@ -309,7 +356,8 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
         syn = {'批次': '', '批次日期': None, '批台数': None, '製造番号': '', '機番': '',
                '设备型号': '', 'PO No': '', '未税单价': 0, '是否无偿': '否', '验收状态': '',
                '质保开始日': None, '质保结束日': None, '质保期': '', '送货单回收': '',
-               '备注': '暂无设备/发货（源事实）；开票/回款仅作汇总显示', '_max_due': None}
+               '备注': '暂无设备/发货（源事实）；开票/回款仅作汇总显示',
+               '_max_due': None, '_warranty_pending': False, '_warranty_rule': False}
         dues = []
         for t in types:
             type_invoices = inv_by[t]
@@ -525,6 +573,12 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
     due_col = get_column_letter(hc)
     hidden_specs.append((hc, '行应收回款日', 'due', None))
     hc += 1
+    warranty_pending_col = get_column_letter(hc)
+    hidden_specs.append((hc, '行质保待确认', 'warranty_pending', None))
+    hc += 1
+    warranty_rule_col = get_column_letter(hc)
+    hidden_specs.append((hc, '行质保规则', 'warranty_rule', None))
+    hc += 1
     warn_col = get_column_letter(hc)
     hidden_specs.append((hc, '行预警', 'warn', None))
 
@@ -610,13 +664,24 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
                     set_cell(ws, r, cidx, formula, align=AL_R, fmt='0.00', trusted_formula=True)
             elif kind == 'due':
                 set_cell(ws, r, cidx, row.get('_max_due'), align=AL_C, fmt='yyyy/mm/dd')
+            elif kind == 'warranty_pending':
+                set_cell(ws, r, cidx, 1 if row.get('_warranty_pending') else 0,
+                         align=AL_C)
+            elif kind == 'warranty_rule':
+                set_cell(ws, r, cidx, 1 if row.get('_warranty_rule') else 0,
+                         align=AL_C)
             elif kind == 'warn':
                 inv_expr = '+'.join(f'{c}{r}' for c in inv_row_cols) or '0'
                 pay_expr = '+'.join(f'{c}{r}' for c in pay_row_cols) or '0'
                 dc = f'{due_col}{r}'
+                pc = f'{warranty_pending_col}{r}'
+                rc = f'{warranty_rule_col}{r}'
+                wc = f'{col_letter["质保结束日"]}{r}'
                 formula = (f'=IF({inv_expr}=0,"",'
+                           f'IF({pc},"待确认",'
+                           f'IF(AND({rc}=1,{wc}<>"",TODAY()<={wc}),"未到期",'
                            f'IF({pay_expr}+{tol:g}>={inv_expr},"已回款",'
-                           f'IF({dc}="","未到期",IF({dc}<TODAY(),"逾期","未到期"))))')
+                           f'IF({dc}="","未到期",IF({dc}<TODAY(),"逾期","未到期"))))))')
                 set_cell(ws, r, cidx, formula, align=AL_C, trusted_formula=True)
     for cidx, *_ in hidden_specs:
         ws.column_dimensions[get_column_letter(cidx)].hidden = True
@@ -677,6 +742,7 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
         rates = {}
         for t in tms:
             rates[s(t['款类'])] = (num(t['比例%']) or 0) / 100.0
+        term_by_kind = {s(t.get('款类')): t for t in tms}
         full_invs = [x for x in invs if s(x['款类']) == '全额']
         inv_by_t = {t: [x for x in invs if s(x['款类']) == t] for t in types}
         pay_by_t = {t: [x for x in pays if s(x['款类']) == t] for t in types}
@@ -710,7 +776,9 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
                                      '未回收原因': '未发货；未开票；待确认',
                                      'recv': round(unpaid, 2), 'unacc': 0,
                                      'warn_exempt': 1, 'static': True, 'raw_batch': '',
-                                     'inv_dt': None, 'due_dt': None})
+                                     'inv_dt': None, 'due_dt': None,
+                                     '_warranty_end': None, '_warranty_pending': False,
+                                     '_warranty_rule': False})
             else:
                 invoiced = sum(num(x.get('含税金额')) or 0 for x in invs)
                 paid = sum(num(x.get('含税金额')) or 0 for x in pays)
@@ -718,10 +786,12 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
                 rows.append({'客户': cust[job], 'JOB No': job, '批次': '（未制造）',
                              '款类': '（比例未配置）', '预警等级': '④待确认', '开票日期': '',
                              '预定回收日期': '', '未回收金额': round(unpaid, 2),
-                             '未回收原因': '未发货；付款比例未配置；待确认',
-                             'recv': round(unpaid, 2), 'unacc': 0,
-                             'warn_exempt': 1, 'static': True, 'raw_batch': '',
-                             'inv_dt': None, 'due_dt': None})
+                                     '未回收原因': '未发货；付款比例未配置；待确认',
+                                     'recv': round(unpaid, 2), 'unacc': 0,
+                                     'warn_exempt': 1, 'static': True, 'raw_batch': '',
+                                     'inv_dt': None, 'due_dt': None,
+                                     '_warranty_end': None, '_warranty_pending': False,
+                                     '_warranty_rule': False})
             continue
 
         # 每笔发票/回款覆盖的有偿设备未税总价（按价格占比分摊，兼容同批不同单价）
@@ -741,6 +811,7 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
         agg = {}
         batch_unacc = {}
         batch_war = {}
+        batch_war_missing = {}
         for d in devs:
             if s(d['是否无偿']) == '是':
                 continue
@@ -750,6 +821,8 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
                 batch_unacc.setdefault(batch, 0)
                 batch_unacc[batch] += 1
             wend = to_dt(d.get('质保结束日'))
+            if not wend:
+                batch_war_missing[batch] = True
             if wend and (batch not in batch_war or wend > batch_war[batch]):
                 batch_war[batch] = wend
             for t in types:
@@ -800,6 +873,18 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
             uninv = max(0.0, a['应收'] - a['已开'])
             due = max((d for d in a['dues'] if d), default=None)
             inv_date = max((d for d in a['inv_dates'] if d), default=None)
+            term = term_by_kind.get(t)
+            uses_warranty, _ = warranty_term_settings(t, term)
+            warranty_end = batch_war.get(batch)
+            warranty_missing = uses_warranty and (
+                batch_war_missing.get(batch, False) or warranty_end is None
+            )
+            warranty_active = bool(
+                uses_warranty and warranty_end and
+                today.date() <= warranty_end.date()
+            )
+            if uses_warranty:
+                due = warranty_due_date(t, term, warranty_end)
             reasons = []
             if batch not in ship_batches:
                 reasons.append('未发货')
@@ -807,26 +892,33 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
                 reasons.append('未开票')
             if t == '验收款' and batch_unacc.get(batch, 0) > 0:
                 reasons.append('未验收')
-            if t == '质保款' and batch_war.get(batch) and batch_war[batch] > today:
+            if warranty_missing:
+                reasons.append('质保期未设置')
+            elif warranty_active:
                 reasons.append('质保未到期')
             pend = (('未验收' in reasons) and rules['未验收待确认']) or \
                    (a['inv_bad'] and rules['发票异常待确认']) or due is None
+            if warranty_missing:
+                pend = True
             if pend and '待确认' not in reasons:
                 reasons.append('待确认')
-            elif due.date() < today.date():
+            elif warranty_active:
+                pass
+            elif due and due.date() < today.date():
                 reasons.append('逾期')
-            elif due <= today.replace(hour=0, minute=0, second=0,
-                                      microsecond=0) + timedelta(days=days):
+            elif due and due <= today.replace(hour=0, minute=0, second=0,
+                                              microsecond=0) + timedelta(days=days):
                 reasons.append('临近')
-            else:
+            elif due:
                 reasons.append('未到付款期')
-            if '质保未到期' in reasons and '未到付款期' in reasons:
-                reasons.remove('未到付款期')
-            if (('未验收' in reasons) and rules['未验收待确认']) or due is None:
+            if (('未验收' in reasons) and rules['未验收待确认']) or \
+               warranty_missing or due is None:
                 warn = '④待确认'
-            elif due.date() < today.date():
+            elif warranty_active:
+                warn = '③未到期'
+            elif due and due.date() < today.date():
                 warn = '①已逾期'
-            elif due <= today + timedelta(days=days):
+            elif due and due <= today + timedelta(days=days):
                 warn = '②临近'
             else:
                 warn = '③未到期'
@@ -839,7 +931,10 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
                          'recv': a['应收'], 'unacc': 1 if '未验收' in reasons else 0,
                          'warn_exempt': 1 if pend else 0,
                          'static': False, 'raw_batch': batch,
-                         'inv_dt': inv_date, 'due_dt': due})
+                         'inv_dt': inv_date, 'due_dt': due,
+                         '_warranty_end': warranty_end if uses_warranty else None,
+                         '_warranty_pending': warranty_missing,
+                         '_warranty_rule': uses_warranty})
 
     rows.sort(key=lambda r: (r['客户'], r['JOB No'], natural_batch_key(r['批次']),
                              CANON.get(r['款类'], 99)))
@@ -864,6 +959,15 @@ def build_unpaid_sheet(wb, contracts, terms, shipments, invoices, payments, devi
     widths = [26, 10, 12, 10, 10, 12, 13, 14, 42]
     for c, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(c)].width = w
+    warranty_end_col = get_column_letter(ncol + 1)
+    warranty_pending_col = get_column_letter(ncol + 2)
+    warranty_rule_col = get_column_letter(ncol + 3)
+    for c, h in ((ncol + 1, '辅助质保结束日'),
+                 (ncol + 2, '辅助质保待确认'),
+                 (ncol + 3, '辅助质保规则')):
+        set_cell(ws, 2, c, h, font=Font(size=9, color='808080'),
+                 fill=PatternFill('solid', fgColor='F5F5F5'), align=AL_C)
+        ws.column_dimensions[get_column_letter(c)].hidden = True
 
     rows = compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices, rules)
     r = 3
@@ -886,10 +990,13 @@ def build_unpaid_sheet(wb, contracts, terms, shipments, invoices, payments, devi
                      f"SUMIFS('{job}'!${pay_c}$6:${pay_c}${last},"
                      f"'{job}'!${batch_c}$6:${batch_c}${last},$C{r}),2))")
             warn_f = (f'=IF($H{r}<={tol:g},"已回清",'
+                      f'IF(${warranty_pending_col}{r},"④待确认",'
+                      f'IF(AND(${warranty_rule_col}{r}=1,${warranty_end_col}{r}<>"",'
+                      f'TODAY()<=${warranty_end_col}{r}),"③未到期",'
                       f'IF({row["warn_exempt"]},"④待确认",'
                       f'IF($G{r}="","④待确认",'
                       f'IF($G{r}<TODAY(),"①已逾期",'
-                      f'IF($G{r}<=TODAY()+{days},"②临近","③未到期")))))')
+                      f'IF($G{r}<=TODAY()+{days},"②临近","③未到期"))))))')
             reason_f = f'=IF($H{r}<={tol:g},"","{row["未回收原因"]}")'
             vals = [row['客户'], f'=HYPERLINK("#\'{job}\'!A1","{job}")',
                     row['批次'], row['款类'], warn_f, row['inv_dt'],
@@ -915,6 +1022,9 @@ def build_unpaid_sheet(wb, contracts, terms, shipments, invoices, payments, devi
             trusted_formula = c == 2 or (not row['static'] and c in (5, 8, 9))
             set_cell(ws, r, c, v, align=align, fmt=fmt, fill=fill,
                      trusted_formula=trusted_formula)
+        set_cell(ws, r, ncol + 1, row.get('_warranty_end'), align=AL_C, fmt=FMT_DATE)
+        set_cell(ws, r, ncol + 2, 1 if row.get('_warranty_pending') else 0, align=AL_C)
+        set_cell(ws, r, ncol + 3, 1 if row.get('_warranty_rule') else 0, align=AL_C)
         style_link(ws.cell(r, 2))
         if row['客户'] != prev_cust:
             if prev_cust is not None and cust_start < r - 1:

@@ -23,6 +23,8 @@ build_win.bat
 GitHub Actions 是推荐构建路径：Windows 与 macOS 均会先运行可靠性测试，再打包产物。
 标签发布时 Windows 产物使用 `.zip`，可直接用 Win11 资源管理器解压。
 
+设置页的“检查更新”检查的是 GitHub Release，不是普通的 `main` 分支 push。发布新版本时需要先提交代码，再创建版本标签（本次为 `v1.5.3`），GitHub Actions 才会生成 Windows zip。Windows 端点击“下载并打开”会下载并解压到 `下载\BKTC_Ledger_update`，然后请退出正在运行的旧程序，用新目录替换旧程序目录；当前不会在运行中的 exe 上自动覆盖更新。
+
 ## 首次选择数据
 
 推荐给数据库使用 ASCII 文件名，例如 `ledger.db`：
@@ -39,6 +41,8 @@ GitHub Actions 是推荐构建路径：Windows 与 macOS 均会先运行可靠�
 旧版 `BKTC_STORE=<records.json>` / `--store <records.json>` 仍可用于一次性迁移。
 
 本机交付包的 `data\BKTC_Ledger.db` / `data\BKTC_Ledger.xlsx` 是当前项目数据；公开 GitHub Release 仍不上传客户数据。复制数据库前先退出应用，或复制 `备份/` 中的完整快照，避免遗漏 WAL 中尚未归档的事务。
+
+如果程序目录位于 `Program Files`、只读同步目录或受控文件夹，Windows 版会自动把缺少写权限的内置数据复制到 `%LOCALAPPDATA%\BKTC_Ledger\data`，并在设置中显示实际使用路径，请以设置页显示的路径为准。生成台账时如果 `BKTC_Ledger.xlsx` 正被 Excel 打开或标记为只读，应用会先保存数据库，再在同一目录生成带时间戳的备用 XLSX，并显示其完整路径；关闭 Excel 后即可重新生成到原文件。
 
 ## Windows 首次运行警告
 

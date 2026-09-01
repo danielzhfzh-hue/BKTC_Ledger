@@ -496,6 +496,39 @@ class CoreReliabilityTests(unittest.TestCase):
         self.assertEqual(payment["是否超期"], "是")
         self.assertEqual(payment["超期天数"], 4)
 
+    def test_warranty_invoice_and_payment_due_dates_use_warranty_end(self):
+        data = core.empty_data()
+        data["合同订单"] = [{"记录ID": "contract-1", "JOB No": "26BS001", "客户": "客户"}]
+        data["付款条件"] = [{
+            "记录ID": "term-1", "JOB No": "26BS001", "款类": "质保款",
+            "比例%": 10, "账期天数": 30, "触发条件": "质保期满后",
+        }]
+        data["发货批次"] = [{"记录ID": "shipment-1", "JOB No": "26BS001", "发货批次": "1"}]
+        data["设备台账"] = [{
+            "记录ID": "device-1", "JOB No": "26BS001", "製造番号": "26BS001-001",
+            "未税单价": 100, "是否无偿": "否", "发货批次": "1",
+            "质保开始日": "2098-01-01", "质保结束日": "2099-12-31",
+        }]
+        data["开票记录"] = [{
+            "记录ID": "invoice-1", "JOB No": "26BS001", "款类": "质保款",
+            "开票日": "2020-01-01", "状态": "已开", "含税金额": 5.65,
+            "覆盖批次": "1", "覆盖製造番号": "26BS001-001", "账期天数": 0,
+        }]
+        data["回款记录"] = [{
+            "记录ID": "payment-1", "JOB No": "26BS001", "款类": "质保款",
+            "回款日": "2020-01-02", "含税金额": 1,
+            "覆盖批次": "1", "覆盖製造番号": "26BS001-001",
+        }]
+
+        derived = core.derive(data)
+
+        self.assertEqual(derived["开票记录"][0]["应收回款日"], "2100-01-30")
+        self.assertEqual(derived["开票记录"][0]["回款状态"], "部分回款")
+        payment = derived["回款记录"][0]
+        self.assertEqual(payment["对应应收回款日"], "2100-01-30")
+        self.assertEqual(payment["是否超期"], "否")
+        self.assertEqual(payment["超期天数"], 0)
+
     def test_batch_coverage_count_includes_devices_without_serial_numbers(self):
         data = sample_data()
         data["设备台账"].append({

@@ -26,6 +26,9 @@ from build_ledger_main import (  # noqa: E402
     matching_records,
     num,
     s,
+    to_dt,
+    warranty_due_date,
+    warranty_term_settings,
 )
 
 TABLES = ["合同订单", "付款条件", "设备台账", "发货批次", "开票记录", "回款记录"]
@@ -245,6 +248,38 @@ def derive(data):
                 if s(d.get("是否无偿")) != "是"
                 and cov_match(record, s(d.get("製造番号")), s(d.get("发货批次")))]
 
+    def warranty_end_info(record, job_devices):
+        covered = covered_devices(record, job_devices)
+        if not covered:
+            return None, True
+        ends = []
+        missing = False
+        for dev in covered:
+            end = to_dt(dev.get("质保结束日"))
+            if end is None:
+                missing = True
+            else:
+                ends.append(end)
+        return max(ends, default=None), missing
+
+    terms_by_job_kind = {}
+    for job, terms in terms_by_job.items():
+        terms_by_job_kind[job] = {
+            s(term.get("款类")): term for term in terms if s(term.get("款类"))
+        }
+
+    # 质保期满后付款的发票，应收日以覆盖设备的最晚质保结束日为基准。
+    for inv in data["开票记录"]:
+        job = s(inv.get("JOB No"))
+        kind = s(inv.get("款类"))
+        term = terms_by_job_kind.get(job, {}).get(kind)
+        uses_warranty, _ = warranty_term_settings(kind, term)
+        if not uses_warranty:
+            continue
+        warranty_end, missing = warranty_end_info(inv, devs_by_job.get(job, []))
+        due = warranty_due_date(kind, term, warranty_end) if not missing else None
+        inv["应收回款日"] = due.strftime("%Y-%m-%d") if due else ""
+
     def allocated_amount(record, selected_devices, job_devices):
         all_covered = covered_devices(record, job_devices)
         total_price = sum(num(d.get("未税单价")) or 0 for d in all_covered)
@@ -317,14 +352,21 @@ def derive(data):
         else:
             relevant = candidates
         due_dates = []
-        for inv in relevant:
-            try:
-                due_dates.append(datetime.strptime(
-                    s(inv.get("应收回款日"))[:10], "%Y-%m-%d"
-                ).date())
-            except ValueError:
-                continue
-        due = min(due_dates) if due_dates else None
+        term = terms_by_job_kind.get(job, {}).get(kind)
+        uses_warranty, _ = warranty_term_settings(kind, term)
+        if uses_warranty:
+            warranty_end, missing = warranty_end_info(payment, job_devices)
+            warranty_due = warranty_due_date(kind, term, warranty_end) if not missing else None
+            due = warranty_due.date() if warranty_due else None
+        else:
+            for inv in relevant:
+                try:
+                    due_dates.append(datetime.strptime(
+                        s(inv.get("应收回款日"))[:10], "%Y-%m-%d"
+                    ).date())
+                except ValueError:
+                    continue
+            due = min(due_dates) if due_dates else None
         payment["对应应收回款日"] = due.strftime("%Y-%m-%d") if due else ""
         paid_on = None
         try:

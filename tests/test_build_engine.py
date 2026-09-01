@@ -139,6 +139,82 @@ class BuildEngineReliabilityTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertNotIn("未开票", rows[0]["未回收原因"])
 
+    def _warranty_rows(self, warranty_end):
+        contracts = [{"JOB No": "26BS001", "客户": "客户"}]
+        terms = [{"JOB No": "26BS001", "款类": "质保款", "比例%": 10,
+                  "账期天数": 30, "触发条件": "质保期满后"}]
+        shipments = [{"JOB No": "26BS001", "发货批次": "1"}]
+        devices = [{
+            "JOB No": "26BS001", "製造番号": "26BS001-001", "发货批次": "1",
+            "未税单价": 100, "是否无偿": "否", "验收状态": "已验收",
+            "质保结束日": warranty_end,
+        }]
+        invoices = [{
+            "记录ID": "full-1", "JOB No": "26BS001", "款类": "全额",
+            "开票日": "2020-01-01", "状态": "已开", "含税金额": 56.5,
+            "覆盖批次": "1", "覆盖製造番号": "26BS001-001",
+            "应收回款日": "2020-01-01",
+        }]
+        return ledger.compute_unpaid_rows(
+            contracts, terms, shipments, invoices, [], devices
+        )
+
+    def test_warranty_unexpired_is_not_marked_overdue(self):
+        rows = self._warranty_rows("2099-12-31")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["预定回收日期"], "2100/01/30")
+        self.assertEqual(rows[0]["预警等级"], "③未到期")
+        self.assertIn("质保未到期", rows[0]["未回收原因"])
+        self.assertNotIn("逾期", rows[0]["未回收原因"])
+
+    def test_warranty_expired_uses_warranty_end_plus_term_days(self):
+        rows = self._warranty_rows("2020-01-01")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["预定回收日期"], "2020/01/31")
+        self.assertEqual(rows[0]["预警等级"], "①已逾期")
+        self.assertIn("逾期", rows[0]["未回收原因"])
+        self.assertNotIn("质保未到期", rows[0]["未回收原因"])
+
+    def test_missing_warranty_end_requires_confirmation(self):
+        rows = self._warranty_rows("")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["预定回收日期"], "")
+        self.assertEqual(rows[0]["预警等级"], "④待确认")
+        self.assertIn("质保期未设置", rows[0]["未回收原因"])
+        self.assertNotIn("逾期", rows[0]["未回收原因"])
+
+    def test_job_sheet_warranty_due_does_not_fall_back_to_full_invoice_date(self):
+        ws = Workbook().active
+        contract = {"担当者": "担当", "客户": "客户", "JOB No": "26BS001",
+                    "订单内容": "设备", "付款条件": "", "发货方式": "",
+                    "发货地点": "", "送货地点": ""}
+        devices = [{
+            "JOB No": "26BS001", "製造番号": "26BS001-001", "发货批次": "1",
+            "设备型号": "KT1000", "未税单价": 100, "是否无偿": "否", "機番": "A1",
+            "PO No": "", "验收状态": "已验收", "质保开始日": "2098-01-01",
+            "质保结束日": "2099-12-31", "质保期": "2年", "送货单回收": "", "备注": "",
+        }]
+        terms = [{"JOB No": "26BS001", "款类": "质保款", "比例%": 10,
+                  "账期天数": 30, "触发条件": "质保期满后"}]
+        invoices = [{
+            "记录ID": "full-1", "款类": "全额", "开票日": "2020-01-01",
+            "含税金额": 56.5, "覆盖批次": "1", "覆盖製造番号": "26BS001-001",
+            "应收回款日": "2020-01-01",
+        }]
+
+        ledger.write_job_sheet(ws, "26BS001", contract, devices, terms, [],
+                               {("26BS001", "1"): {"出荷日": "2020-01-01", "台数": 1}},
+                               invoices, [])
+
+        headers = {ws.cell(5, col).value: col for col in range(1, ws.max_column + 1)}
+        due = ws.cell(6, headers["行应收回款日"]).value
+        self.assertEqual(due.strftime("%Y/%m/%d"), "2100/01/30")
+        self.assertIn("行质保待确认", headers)
+        self.assertIn("行质保规则", headers)
+
     def test_explicit_serial_matches_override_batch_fallback(self):
         fallback = {"记录ID": "batch", "覆盖批次": "1", "覆盖製造番号": ""}
         explicit = {"记录ID": "serial", "覆盖批次": "1",

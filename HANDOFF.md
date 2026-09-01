@@ -1,4 +1,4 @@
-# BKTC Ledger 工程交接（v1.5.2）
+# BKTC Ledger 工程交接（v1.5.3）
 
 ## 当前架构
 
@@ -83,7 +83,7 @@ node --check ui/app.js
 
 `.github/workflows/build.yml` 在 `windows-latest` / `macos-latest` 上安装依赖、运行 unittest，再用 PyInstaller onedir 打包。PR 与 push 到主分支触发构建；产物内含空白启动 DB/XLSX，tag `v*` 还会创建 Release（Windows zip、macOS tar.gz）。
 
-推送 `main` 会触发双平台构建；打 `v1.5.2` tag 会由工作流创建 GitHub Release，并上传 Windows zip 与 macOS tar.gz。
+推送 `main` 会触发双平台构建；打 `v1.5.3` tag 会由工作流创建 GitHub Release，并上传 Windows zip 与 macOS tar.gz。
 
 ## 外部同步
 

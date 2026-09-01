@@ -441,6 +441,35 @@ function isoFromMs(ms) {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
 }
 
+function warrantyTermSettings(kind, term) {
+  const days = term && Number.isFinite(Number(term["账期天数"]))
+    ? Math.max(0, Math.trunc(Number(term["账期天数"]))) : 0;
+  if (s(kind) !== "质保款") return { usesWarranty: false, days };
+  const trigger = term ? s(term["触发条件"]) : "";
+  if (term && trigger && trigger !== "质保期满后") return { usesWarranty: false, days };
+  return { usesWarranty: true, days };
+}
+
+function warrantyEndInfo(record, jobDevices) {
+  const covered = jobDevices.filter((dev) =>
+    s(dev["是否无偿"]) !== "是" && coverageMatches(record, dev));
+  if (!covered.length) return { end: null, missing: true };
+  const ends = [];
+  let missing = false;
+  for (const dev of covered) {
+    const end = isoDateValue(dev["质保结束日"]);
+    if (end === null) missing = true;
+    else ends.push(end);
+  }
+  return { end: ends.length ? Math.max(...ends) : null, missing };
+}
+
+function warrantyDueDate(kind, term, warrantyEnd) {
+  const settings = warrantyTermSettings(kind, term);
+  return settings.usesWarranty && warrantyEnd !== null
+    ? warrantyEnd + settings.days * 86400000 : null;
+}
+
 function recomputeDerived() {
   // 镜像 core.derive()：前端即时显示，保存时后端再权威计算。
   const d = state.data;
@@ -534,6 +563,13 @@ function recomputeDerived() {
     const meaningful = s(inv["款类"]) || s(inv["开票日"]) || Number(inv["含税金额"]) || s(inv["覆盖批次"]) || s(inv["覆盖製造番号"]);
     if (!meaningful) { inv["回款状态"] = ""; continue; }
     const job = s(inv["JOB No"]), kind = s(inv["款类"]), jobDevices = devicesByJob[job] || [];
+    const term = (termsByJob[job] || []).find((x) => s(x["款类"]) === kind);
+    const warranty = warrantyTermSettings(kind, term);
+    if (warranty.usesWarranty) {
+      const info = warrantyEndInfo(inv, jobDevices);
+      const warrantyDue = info.missing ? null : warrantyDueDate(kind, term, info.end);
+      inv["应收回款日"] = warrantyDue === null ? "" : isoFromMs(warrantyDue);
+    }
     const candidates = (paymentsByJob[job] || []).filter((p) => kind === "全额" || s(p["款类"]) === kind);
     const relatedInvoices = (invoicesByJob[job] || []).filter((other) => s(other["款类"]) === kind);
     const invDevices = coveredDevices(inv, jobDevices);
@@ -550,6 +586,8 @@ function recomputeDerived() {
   }
   for (const pay of d["回款记录"]) {
     const job = s(pay["JOB No"]), kind = s(pay["款类"]), jobDevices = devicesByJob[job] || [];
+    const term = (termsByJob[job] || []).find((x) => s(x["款类"]) === kind);
+    const warranty = warrantyTermSettings(kind, term);
     const candidates = (invoicesByJob[job] || []).filter((inv) => [kind, "全额"].includes(s(inv["款类"])));
     let relevant = candidates;
     if (jobDevices.length) {
@@ -558,8 +596,15 @@ function recomputeDerived() {
         for (const inv of matchingCoverageRecords(candidates, dev)) if (!relevant.includes(inv)) relevant.push(inv);
       }
     }
-    const dues = relevant.map((inv) => isoDateValue(inv["应收回款日"])).filter((v) => v !== null);
-    const due = dues.length ? Math.min(...dues) : null;
+    let due;
+    if (warranty.usesWarranty) {
+      const info = warrantyEndInfo(pay, jobDevices);
+      const warrantyDue = info.missing ? null : warrantyDueDate(kind, term, info.end);
+      due = warrantyDue;
+    } else {
+      const dues = relevant.map((inv) => isoDateValue(inv["应收回款日"])).filter((v) => v !== null);
+      due = dues.length ? Math.min(...dues) : null;
+    }
     pay["对应应收回款日"] = due === null ? "" : isoFromMs(due);
     const paidOn = isoDateValue(pay["回款日"]);
     if (due !== null && paidOn !== null) {
@@ -1810,9 +1855,10 @@ $("btnGenerate").addEventListener("click", async () => {
     applyBackendState(r);
     state.dirty = false;
     clearPendingAuditActions();
-    const msg = `已生成：${r.out}（未回收 ${r.counts["未回收行数"]} 行，合计 ${Number(r.counts["未回收合计"]).toLocaleString()}）`;
+    const msg = `已生成：${r.out}（未回收 ${r.counts["未回收行数"]} 行，合计 ${Number(r.counts["未回收合计"]).toLocaleString()}）` +
+      (r.notice ? `；${r.notice}` : "");
     setStatus(msg);
-    toast("台账已生成", "ok");
+    toast(r.notice ? "台账已生成备用文件" : "台账已生成", "ok");
     renderAll();
   } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
 });

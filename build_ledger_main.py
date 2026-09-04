@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BKTC 上海 POU 营业管理表生成器（源表单行样式）。
+上海康肯销售订单管理系统台账生成器（源表单行样式）。
 
 结构（每 JOB 一页）：
   第1行  受注管理情報
@@ -29,7 +29,8 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 EXPORT_DIR = '/tmp/export'
-OUT = '/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx'
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(PROJECT_DIR, 'data', 'BKTC_Ledger.xlsx')
 THIN = Side(style='thin', color='B7C3D0')
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 F_TITLE = Font(bold=True, size=14, color='1F4E79')
@@ -1092,7 +1093,7 @@ def build_from_data(contracts, terms, devices, shipments, invoices, payments, ou
     ws_nav.title = '导航页'
     ncol_nav = 13
     ws_nav.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol_nav)
-    set_cell(ws_nav, 1, 1, 'BKTC 上海 POU 营业管理表 — 导航页', font=F_TITLE, align=AL_C)
+    set_cell(ws_nav, 1, 1, '上海康肯销售订单管理系统 — 导航页', font=F_TITLE, align=AL_C)
     nav_headers = ['客户', 'JOB No', 'PO', '担当者', '订单内容', '总台数', '发货批次数',
                    '设备含税合计', '开票金额合计', '已回款合计', '回款率', '预警', '备注']
     for c, h in enumerate(nav_headers, 1):

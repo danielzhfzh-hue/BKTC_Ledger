@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""BKTC 台账维护工具（pywebview 桌面壳，macOS / Windows 通用）。"""
+"""上海康肯销售订单管理系统（pywebview 桌面壳，macOS / Windows 通用）。"""
 import argparse
 import errno
 import getpass
@@ -16,10 +16,10 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-import uuid
 import zipfile
 
-__version__ = "1.5.3"
+__version__ = "1.6.0"
+APP_DISPLAY_NAME = "上海康肯销售订单管理系统"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"
 
@@ -29,6 +29,7 @@ sys.path.insert(0, APP_DIR)
 
 import core  # noqa: E402
 import database  # noqa: E402
+import quotation as quotation_export  # noqa: E402
 import webview  # noqa: E402
 
 
@@ -69,17 +70,17 @@ def _load_config(path=None):
         return {}
     if not isinstance(raw, dict):
         return {}
-    config = {
-        key: os.path.abspath(os.path.expanduser(value))
-        for key in ("database_path", "xlsx_path")
-        if isinstance((value := raw.get(key)), str) and value.strip()
-    }
+    config = {}
+    if isinstance(raw.get("database_path"), str) and raw["database_path"].strip():
+        config["database_path"] = os.path.abspath(
+            os.path.expanduser(raw["database_path"])
+        )
     if isinstance(raw.get("operator_name"), str) and raw["operator_name"].strip():
         config["operator_name"] = raw["operator_name"].strip()
     return config
 
 
-def _save_config(database_path, xlsx_path, path=None, operator_name=None):
+def _save_config(database_path, path=None, operator_name=None):
     path = os.path.abspath(os.path.expanduser(path or _default_config_path()))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = path + ".tmp"
@@ -87,7 +88,6 @@ def _save_config(database_path, xlsx_path, path=None, operator_name=None):
         json.dump(
             {
                 "database_path": os.path.abspath(database_path),
-                "xlsx_path": os.path.abspath(xlsx_path),
                 "operator_name": str(operator_name or getpass.getuser()).strip(),
             },
             f,
@@ -95,6 +95,12 @@ def _save_config(database_path, xlsx_path, path=None, operator_name=None):
             indent=2,
         )
     os.replace(temporary, path)
+
+
+def _xlsx_path_for_database(database_path):
+    """The ledger workbook is always a generated sibling of the database."""
+    stem, _ = os.path.splitext(os.path.abspath(os.path.expanduser(database_path)))
+    return stem + ".xlsx"
 
 def _portable_default(filename, executable=None):
     """Find portable data in a sibling data directory or beside the executable."""
@@ -175,9 +181,9 @@ def _is_packaged_data_path(path, executable=None, platform_name=None, frozen=Non
         return False
 
 
-def _resolve_windows_data_paths(database_path, xlsx_path, *, executable=None,
-                                platform_name=None, frozen=None, user_data_dir=None):
-    """Move unwritable packaged data to a per-user directory, copying only missing files.
+def _resolve_windows_database_path(database_path, *, executable=None,
+                                   platform_name=None, frozen=None, user_data_dir=None):
+    """Move an unwritable packaged database to a per-user directory.
 
     Explicit paths outside the bundled ``data`` directory are never changed. This keeps
     portable builds usable from protected folders while preserving user-selected paths.
@@ -185,29 +191,22 @@ def _resolve_windows_data_paths(database_path, xlsx_path, *, executable=None,
     platform_name = sys.platform if platform_name is None else platform_name
     frozen = IS_FROZEN if frozen is None else bool(frozen)
     if not frozen or not str(platform_name).lower().startswith("win"):
-        return database_path, xlsx_path
+        return database_path
     db_packaged = _is_packaged_data_path(
         database_path, executable=executable, platform_name=platform_name, frozen=frozen
     )
-    xlsx_packaged = _is_packaged_data_path(
-        xlsx_path, executable=executable, platform_name=platform_name, frozen=frozen
-    )
     db_needs_move = db_packaged and not _path_is_writable(database_path)
-    xlsx_needs_move = xlsx_packaged and not _path_is_writable(xlsx_path)
-    if not db_needs_move and not xlsx_needs_move:
-        return database_path, xlsx_path
+    if not db_needs_move:
+        return database_path
 
     target_dir = os.path.abspath(os.path.expanduser(
         user_data_dir or _windows_user_data_dir()
     ))
     os.makedirs(target_dir, exist_ok=True)
-    new_db = os.path.join(target_dir, "BKTC_Ledger.db") if db_needs_move else database_path
-    new_xlsx = os.path.join(target_dir, "BKTC_Ledger.xlsx") if xlsx_needs_move else xlsx_path
-    for source, target in ((database_path, new_db), (xlsx_path, new_xlsx)):
-        if source == target or os.path.exists(target) or not os.path.exists(source):
-            continue
-        shutil.copy2(source, target)
-    return new_db, new_xlsx
+    new_db = os.path.join(target_dir, "BKTC_Ledger.db")
+    if not os.path.exists(new_db) and os.path.exists(database_path):
+        shutil.copy2(database_path, new_db)
+    return new_db
 
 
 def _is_write_permission_error(exc):
@@ -279,22 +278,11 @@ def _source_default(filename, legacy_path, platform=None):
 
 
 if IS_FROZEN:
-    DEFAULT_XLSX = _portable_default("BKTC_Ledger.xlsx")
     DEFAULT_DATABASE = _portable_default("BKTC_Ledger.db")
     DEFAULT_LEGACY_JSON = _portable_default("BKTC_Ledger.records.json")
 else:
-    DEFAULT_XLSX = _source_default(
-        "BKTC_Ledger.xlsx",
-        r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.xlsx",
-    )
-    DEFAULT_DATABASE = _source_default(
-        "BKTC_Ledger.db",
-        r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.db",
-    )
-    DEFAULT_LEGACY_JSON = _source_default(
-        "BKTC_Ledger.records.json",
-        r"/Users/danielzhu/projects/订单整理/BKTC上海POU营业管理表.records.json",
-    )
+    DEFAULT_DATABASE = _source_default("BKTC_Ledger.db", None)
+    DEFAULT_LEGACY_JSON = _source_default("BKTC_Ledger.records.json", None)
 
 
 def schema_for_js():
@@ -309,29 +297,29 @@ def schema_for_js():
 
 
 class Api:
-    def __init__(self, xlsx_path, data_path, legacy_json_path=None, config_path=None,
+    def __init__(self, data_path, legacy_json_path=None, config_path=None,
                  operator_name=None):
-        self.xlsx_path = xlsx_path
+        self.xlsx_path = ""
         self.database_path = ""
         self.database_revision = None
         self.legacy_json_path = None
         self.config_path = config_path
         self.operator_name = str(operator_name or getpass.getuser()).strip() or "unknown"
-        self._pending_imports = {}
         self._set_data_path(data_path)
         if legacy_json_path and not str(data_path).lower().endswith(".json"):
             self.legacy_json_path = legacy_json_path
 
-    def _relocate_windows_paths(self):
+    def _relocate_windows_database(self):
         """Retry a packaged Windows operation from the writable per-user data directory."""
-        old_db, old_xlsx = self.database_path, self.xlsx_path
-        new_db, new_xlsx = _resolve_windows_data_paths(old_db, old_xlsx)
-        if new_db == old_db and new_xlsx == old_xlsx:
+        old_db = self.database_path
+        new_db = _resolve_windows_database_path(old_db)
+        if new_db == old_db:
             return False
-        self.database_path, self.xlsx_path = new_db, new_xlsx
+        self.database_path = new_db
+        self.xlsx_path = _xlsx_path_for_database(new_db)
         self.database_revision = database.get_revision(new_db) if os.path.exists(new_db) else None
         if self.config_path:
-            _save_config(self.database_path, self.xlsx_path, self.config_path, self.operator_name)
+            _save_config(self.database_path, self.config_path, self.operator_name)
         return True
 
     def _save_database(self, data, rules=None, audit_context=None, source="manual_save"):
@@ -341,7 +329,7 @@ class Api:
                 audit_context=self._audit_context(audit_context, source),
             )
         except OSError as exc:
-            if not _is_write_permission_error(exc) or not self._relocate_windows_paths():
+            if not _is_write_permission_error(exc) or not self._relocate_windows_database():
                 raise RuntimeError(
                     f"无法写入数据库：{self.database_path}。请将程序移到可写目录，"
                     "或在设置中选择可写的 .db 文件。"
@@ -358,6 +346,7 @@ class Api:
         else:
             self.legacy_json_path = None
         self.database_path = database.database_path_for(path)
+        self.xlsx_path = _xlsx_path_for_database(self.database_path)
         self.database_revision = None
 
     def _init_database(self):
@@ -381,12 +370,9 @@ class Api:
             "hostname": platform.node(),
         }
 
-    def load_state(self, store=None, xlsx=None):
+    def load_state(self, store=None):
         if store:
             self._set_data_path(store)
-            self._pending_imports.clear()
-        if xlsx:
-            self.xlsx_path = os.path.abspath(os.path.expanduser(xlsx))
         migration = None
         if not os.path.exists(self.database_path):
             migration = self._init_database()
@@ -396,14 +382,12 @@ class Api:
         config_warning = None
         if self.config_path:
             try:
-                _save_config(
-                    self.database_path, self.xlsx_path, self.config_path,
-                    self.operator_name,
-                )
+                _save_config(self.database_path, self.config_path, self.operator_name)
             except OSError as exc:
                 config_warning = f"路径已切换，但无法保存下次启动设置：{exc}"
         return {"store_path": self.database_path, "database_path": self.database_path,
                 "xlsx_path": self.xlsx_path,
+                "xlsx_exists": os.path.isfile(self.xlsx_path),
                 "data": data, "schema": schema_for_js(),
                 "rules": database.get_rules(self.database_path),
                 "database_info": info,
@@ -423,8 +407,6 @@ class Api:
                 "audit_change_count": result["audit_change_count"]}
 
     def generate(self, data, rules=None, audit_context=None):
-        if not self.xlsx_path or not os.path.isdir(os.path.dirname(self.xlsx_path)):
-            raise RuntimeError("请先选择台账 Excel 文件")
         saved = self._save_database(data, rules, audit_context, "generate_ledger")
         self.database_revision = saved["revision"]
         out, issues, counts, notice = _generate_xlsx_with_fallback(
@@ -432,13 +414,81 @@ class Api:
         )
         return {"ok": True, "out": out, "issues": issues, "counts": counts,
                 "data": saved["data"], "revision": saved["revision"],
-                "xlsx_path": self.xlsx_path, "notice": notice,
+                "xlsx_path": out, "xlsx_exists": True, "notice": notice,
                 "audit_event_id": saved["audit_event_id"],
                 "audit_change_count": saved["audit_change_count"]}
 
     def get_unpaid_rows(self, data, rules=None):
         """Return the unpaid report using the same calculation as generated Excel."""
         return core.unpaid_report_rows(data, rules)
+
+    def list_quotations(self, search=""):
+        return database.list_quotations(self.database_path, search)
+
+    def get_quotation(self, quote_id):
+        return database.get_quotation(self.database_path, quote_id)
+
+    def suggest_quotation_number(self, quote_date=None):
+        return database.suggest_quotation_number(self.database_path, quote_date)
+
+    def quotation_defaults(self, job_no):
+        return database.quotation_defaults(self.database_path, job_no)
+
+    def quotation_history(self, customer, model, exclude_quote_id=None):
+        return database.quotation_history(
+            self.database_path, customer, model, exclude_quote_id
+        )
+
+    def save_quotation(self, quotation):
+        if not isinstance(quotation, dict):
+            raise RuntimeError("报价单数据格式无效")
+        action = "update_quotation" if quotation.get("quote_id") else "create_quotation"
+        context = self._audit_context({
+            "source": "quotation_save", "actions": [action],
+        }, "quotation_save")
+        try:
+            result = database.save_quotation(
+                self.database_path, quotation,
+                expected_revision=self.database_revision,
+                audit_context=context,
+            )
+        except OSError as exc:
+            if not _is_write_permission_error(exc) or not self._relocate_windows_database():
+                raise RuntimeError(
+                    f"无法写入数据库：{self.database_path}。请在设置中选择可写的 .db 文件。"
+                ) from exc
+            result = database.save_quotation(
+                self.database_path, quotation,
+                expected_revision=self.database_revision,
+                audit_context=context,
+            )
+        self.database_revision = result["revision"]
+        return result
+
+    def export_quotation(self, quote_id):
+        quotation = database.get_quotation(self.database_path, quote_id)
+        download_dir = os.path.join(os.path.expanduser("~"), "Downloads", "报价单")
+        os.makedirs(download_dir, exist_ok=True)
+        raw_name = f"报价单_{quotation['quote_no']}_{quotation['customer']}"
+        safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .")
+        safe_name = safe_name[:120] or "报价单"
+        path = os.path.join(download_dir, safe_name + ".xlsx")
+        notice = ""
+        try:
+            quotation_export.export_quotation_xlsx(quotation, path)
+        except OSError as exc:
+            if not _is_write_permission_error(exc):
+                raise
+            path = os.path.join(
+                download_dir,
+                f"{safe_name}_{time.strftime('%Y%m%d_%H%M%S')}.xlsx",
+            )
+            quotation_export.export_quotation_xlsx(quotation, path)
+            notice = "标准报价文件可能正被占用，已改用带时间戳文件"
+        return {
+            "ok": True, "path": path, "quote_id": quotation["quote_id"],
+            "quote_no": quotation["quote_no"], "notice": notice,
+        }
 
     def export_xlsx(self, table, rows, fields):
         """把筛选后的行 + 选定字段导出到 ~/Downloads/<表>_导出_<时间>.xlsx。"""
@@ -453,80 +503,13 @@ class Api:
         core.export_filtered(path, table, rows, fields)
         return {"ok": True, "path": path, "rows": len(rows), "fields": len(fields)}
 
-    def export_editable(self, data, rules=None, dirty=True, audit_context=None):
-        """Save current edits, then export a revision-bound six-table workbook."""
-        if dirty:
-            saved = self._save_database(data, rules, audit_context, "export_editable")
-            self.database_revision = saved["revision"]
-        else:
-            saved = {
-                "data": database.load_database(self.database_path),
-                "revision": database.get_revision(self.database_path),
-            }
-            self.database_revision = saved["revision"]
-        dl = os.path.join(os.path.expanduser("~"), "Downloads")
-        os.makedirs(dl, exist_ok=True)
-        path = os.path.join(
-            dl, f"BKTC_订单编辑_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
-        )
-        result = database.export_editable_workbook(self.database_path, path)
-        result.update({"data": saved["data"], "revision": saved["revision"]})
-        return result
-
-    def preview_import(self, path):
-        prepared = database.prepare_editable_import(self.database_path, path)
-        token = uuid.uuid4().hex
-        self._pending_imports = {token: prepared}  # 仅保留最后一次预览，避免误用旧令牌
-        warnings = [x for x in prepared.issues if x.get("severity") == "warning"]
-        return {
-            "ok": True,
-            "token": token,
-            "path": prepared.workbook_path,
-            "base_revision": prepared.base_revision,
-            "current_revision": prepared.current_revision,
-            "stale": prepared.stale,
-            "action_counts": prepared.action_counts,
-            "table_counts": prepared.table_counts,
-            "changes": prepared.changes[:500],
-            "changes_total": len(prepared.changes),
-            "changes_truncated": len(prepared.changes) > 500,
-            "warnings": warnings[:100],
-        }
-
-    def apply_import(self, token):
-        prepared = self._pending_imports.get(token)
-        if not prepared:
-            raise RuntimeError("差异预览已失效，请重新选择 Excel 并预览")
-        result = database.apply_editable_import(
-            self.database_path, prepared,
-            audit_context=self._audit_context(
-                {"source": "xlsx_import", "actions": ["xlsx_confirmed_import"]},
-                "xlsx_import",
-            ),
-        )
-        self._pending_imports.clear()
-        self.database_revision = result["revision"]
-        return {
-            "ok": True,
-            "path": self.database_path,
-            "data": result["data"],
-            "rules": database.get_rules(self.database_path),
-            "revision": result["revision"],
-            "backup": result["backup"],
-            "audit_event_id": result["audit_event_id"],
-            "audit_change_count": result["audit_change_count"],
-        }
-
     def set_operator_name(self, name):
         name = str(name or "").strip()
         if not name:
             raise RuntimeError("操作人不能为空")
         self.operator_name = name
         if self.config_path:
-            _save_config(
-                self.database_path, self.xlsx_path, self.config_path,
-                self.operator_name,
-            )
+            _save_config(self.database_path, self.config_path, self.operator_name)
         return {"ok": True, "operator_name": self.operator_name}
 
     def get_audit_events(self, filters=None, limit=500):
@@ -536,7 +519,9 @@ class Api:
         result = database.get_audit_events(self.database_path, filters, 5000)
         dl = os.path.join(os.path.expanduser("~"), "Downloads")
         os.makedirs(dl, exist_ok=True)
-        path = os.path.join(dl, f"BKTC_审计记录_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
+        path = os.path.join(
+            dl, f"上海康肯销售订单管理系统_审计记录_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        )
         database.export_audit_xlsx(path, result["events"])
         return {"ok": True, "path": path, "events": len(result["events"]),
                 "chain": result["chain"]}
@@ -547,18 +532,6 @@ class Api:
                                    file_types=("SQLite (*.db;*.sqlite;*.sqlite3)",
                                                "Legacy JSON (*.json)",
                                                "All files (*.*)"))
-        return res[0] if res else None
-
-    def pick_import_xlsx(self):
-        w = webview.windows[0]
-        res = w.create_file_dialog(webview.OPEN_DIALOG,
-                                   file_types=("Excel (*.xlsx)", "All files (*.*)"))
-        return res[0] if res else None
-
-    def pick_xlsx(self):
-        w = webview.windows[0]
-        res = w.create_file_dialog(webview.OPEN_DIALOG,
-                                   file_types=("Excel (*.xlsx)", "All files (*.*)"))
         return res[0] if res else None
 
     def check_update(self):
@@ -627,9 +600,7 @@ class Api:
 def main():
     config_path = _default_config_path()
     config = _load_config(config_path)
-    ap = argparse.ArgumentParser(description="BKTC 台账维护工具")
-    ap.add_argument("--xlsx",
-                    help="台账 Excel 路径（可用 --xlsx 或界面选择）")
+    ap = argparse.ArgumentParser(description=APP_DISPLAY_NAME)
     ap.add_argument("--database",
                     help="SQLite 数据库路径")
     ap.add_argument("--store",
@@ -637,25 +608,20 @@ def main():
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
-    xlsx_path = (
-        args.xlsx or os.environ.get("BKTC_XLSX")
-        or config.get("xlsx_path") or DEFAULT_XLSX
-    )
     data_path = (
         args.database or args.store or os.environ.get("BKTC_DATABASE")
         or os.environ.get("BKTC_STORE") or config.get("database_path")
         or DEFAULT_DATABASE
     )
     data_path = _prefer_canonical_mac_data(data_path, "BKTC_Ledger.db")
-    xlsx_path = _prefer_canonical_mac_data(xlsx_path, "BKTC_Ledger.xlsx")
-    data_path, xlsx_path = _resolve_windows_data_paths(data_path, xlsx_path)
+    data_path = _resolve_windows_database_path(data_path)
     legacy_json = DEFAULT_LEGACY_JSON if data_path == DEFAULT_DATABASE else None
     api = Api(
-        xlsx_path, data_path, legacy_json_path=legacy_json, config_path=config_path,
+        data_path, legacy_json_path=legacy_json, config_path=config_path,
         operator_name=config.get("operator_name"),
     )
     webview.create_window(
-        "BKTC 台账维护工具",
+        APP_DISPLAY_NAME,
         os.path.join(APP_DIR, "ui", "index.html"),
         js_api=api,
         width=1440,

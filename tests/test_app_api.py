@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import app
 import core
@@ -29,8 +30,7 @@ class ApiMigrationTests(unittest.TestCase):
             payload = {"tables": core.TABLES, "version": 1, "预警规则": {}}
             payload.update(core.empty_data())
             legacy.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-            api = app.Api(str(root / "ledger.xlsx"), str(root / "default.db"),
-                          legacy_json_path=str(legacy))
+            api = app.Api(str(root / "default.db"), legacy_json_path=str(legacy))
             self.assertEqual(api.legacy_json_path, str(legacy))
 
             api._set_data_path(str(root / "another.db"))
@@ -117,31 +117,87 @@ class ApiMigrationTests(unittest.TestCase):
             self.assertEqual(app.database.get_revision(database_path), 1)
             self.assertEqual(app.database.load_database(database_path), core.empty_data())
 
-    def test_selected_database_and_workbook_paths_are_persisted(self):
+    def test_selected_database_is_persisted_and_workbook_path_is_derived(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config_path = root / "config.json"
             database_path = root / "chosen.db"
-            workbook_path = root / "chosen.xlsx"
             api = app.Api(
-                str(root / "initial.xlsx"),
                 str(root / "initial.db"),
                 config_path=str(config_path),
             )
 
-            state = api.load_state(
-                store=str(database_path), xlsx=str(workbook_path)
-            )
+            state = api.load_state(store=str(database_path))
 
             self.assertEqual(state["database_path"], str(database_path))
-            self.assertEqual(state["xlsx_path"], str(workbook_path))
+            self.assertEqual(state["xlsx_path"], str(root / "chosen.xlsx"))
+            self.assertFalse(state["xlsx_exists"])
             self.assertEqual(
                 app._load_config(str(config_path)),
                 {
                     "database_path": str(database_path),
-                    "xlsx_path": str(workbook_path),
                     "operator_name": api.operator_name,
                 },
+            )
+            self.assertNotIn(
+                "xlsx_path",
+                json.loads(config_path.read_text(encoding="utf-8")),
+            )
+
+    def test_legacy_config_xlsx_path_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "database_path": str(root / "ledger.db"),
+                "xlsx_path": str(root / "elsewhere" / "old.xlsx"),
+            }), encoding="utf-8")
+
+            config = app._load_config(str(config_path))
+
+            self.assertEqual(config, {"database_path": str(root / "ledger.db")})
+
+    def test_excel_roundtrip_is_not_exposed_by_desktop_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            api = app.Api(str(Path(tmp) / "ledger.db"))
+
+            self.assertFalse(hasattr(api, "export_editable"))
+            self.assertFalse(hasattr(api, "preview_import"))
+            self.assertFalse(hasattr(api, "apply_import"))
+
+    def test_ui_exposes_quotation_workspace_without_excel_roundtrip_controls(self):
+        html = (Path(app.APP_DIR) / "ui" / "index.html").read_text(encoding="utf-8")
+        javascript = (Path(app.APP_DIR) / "ui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('data-tab="报价单"', html)
+        self.assertIn('id="btnQuoteNew"', html)
+        self.assertIn('id="quoteHistoryModal"', html)
+        self.assertIn('"quotation_history"', javascript)
+        self.assertIn('call("quotation_defaults"', javascript)
+        self.assertNotIn('id="btnExportEditable"', html)
+        self.assertNotIn('id="btnImport"', html)
+
+    def test_unwritable_packaged_windows_database_moves_without_xlsx_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = root / "app" / "BKTC_Ledger.exe"
+            packaged_db = executable.parent / "data" / "BKTC_Ledger.db"
+            packaged_db.parent.mkdir(parents=True)
+            packaged_db.write_bytes(b"database")
+            user_data = root / "user-data"
+
+            with mock.patch.object(app, "_path_is_writable", return_value=False):
+                resolved = app._resolve_windows_database_path(
+                    str(packaged_db), executable=str(executable),
+                    platform_name="win32", frozen=True,
+                    user_data_dir=str(user_data),
+                )
+
+            self.assertEqual(resolved, str(user_data / "BKTC_Ledger.db"))
+            self.assertEqual(Path(resolved).read_bytes(), b"database")
+            self.assertEqual(
+                app._xlsx_path_for_database(resolved),
+                str(user_data / "BKTC_Ledger.xlsx"),
             )
 
     def test_operator_name_is_persisted_and_used_for_audit(self):
@@ -149,7 +205,7 @@ class ApiMigrationTests(unittest.TestCase):
             root = Path(tmp)
             config_path = root / "config.json"
             api = app.Api(
-                str(root / "ledger.xlsx"), str(root / "ledger.db"),
+                str(root / "ledger.db"),
                 config_path=str(config_path), operator_name="初始操作人",
             )
             state = api.load_state()
@@ -173,8 +229,8 @@ class ApiMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             db = root / "shared.db"
-            first = app.Api(str(root / "ledger.xlsx"), str(db))
-            second = app.Api(str(root / "ledger.xlsx"), str(db))
+            first = app.Api(str(db))
+            second = app.Api(str(db))
             first_state = first.load_state()
             second_state = second.load_state()
 
@@ -193,7 +249,7 @@ class ApiMigrationTests(unittest.TestCase):
         }]
         data["发货批次"] = [{"JOB No": "26BS001", "发货批次": "1"}]
 
-        rows = app.Api("", "/tmp/bktc-query-test.db").get_unpaid_rows(data)
+        rows = app.Api("/tmp/bktc-query-test.db").get_unpaid_rows(data)
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["客户"], "测试客户")
@@ -201,6 +257,151 @@ class ApiMigrationTests(unittest.TestCase):
         self.assertEqual(rows[0]["未回收金额"], 113)
         self.assertNotIn("inv_dt", rows[0])
         json.dumps(rows, ensure_ascii=False)
+
+    def test_quotation_defaults_reuse_order_customer_model_and_terms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api = app.Api(str(root / "ledger.db"), operator_name="报价员")
+            state = api.load_state()
+            data = state["data"]
+            data["合同订单"] = [{
+                "记录ID": "contract-1", "JOB No": "26BS001", "客户": "客户A",
+                "担当者": "张三", "币种": "RMB", "送货地点": "上海",
+            }]
+            data["付款条件"] = [{
+                "记录ID": "term-1", "JOB No": "26BS001", "款类": "预付款",
+                "比例%": 100, "账期天数": 0, "说明": "全额预付",
+            }]
+            data["发货批次"] = [{
+                "记录ID": "ship-1", "JOB No": "26BS001", "发货批次": "1",
+            }]
+            data["设备台账"] = [
+                {"记录ID": "dev-1", "JOB No": "26BS001", "设备型号": "KT1000",
+                 "未税单价": 100, "是否无偿": "否", "发货批次": "1"},
+                {"记录ID": "dev-2", "JOB No": "26BS001", "设备型号": "KT1000",
+                 "未税单价": 100, "是否无偿": "否", "发货批次": "1"},
+            ]
+            api.save_data(data, state["rules"])
+
+            defaults = api.quotation_defaults("26BS001")
+            saved = api.save_quotation({
+                "quote_no": "BJ-001", "quote_date": "2026-09-03",
+                "customer": defaults["customer"], "source_job_no": "26BS001",
+                "currency": defaults["currency"], "tax_rate": 13,
+                "items": defaults["items"],
+            })
+            history = api.quotation_history("客户A", "KT1000")
+
+            self.assertEqual(defaults["salesperson"], "张三")
+            self.assertEqual(defaults["payment_terms"], "全额预付")
+            self.assertEqual(defaults["items"], [{
+                "model": "KT1000", "description": "", "quantity": 2,
+                "unit": "台", "unit_price": 100,
+            }])
+            self.assertEqual(saved["quotation"]["customer"], "客户A")
+            self.assertEqual(history[0]["quote_no"], "BJ-001")
+            self.assertEqual(api.database_revision, saved["revision"])
+
+    def test_saved_quotation_exports_to_downloads_without_changing_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api = app.Api(str(root / "ledger.db"), operator_name="报价员")
+            api.load_state()
+            saved = api.save_quotation({
+                "quote_no": "BJ/2026:001", "quote_date": "2026-09-03",
+                "customer": "客户A", "currency": "RMB", "tax_rate": 13,
+                "payment_terms": "签约后 30 日内付款",
+                "items": [{
+                    "model": "KT1000EPS-C300", "quantity": 2,
+                    "unit": "台", "unit_price": 1000000,
+                }],
+            })
+            revision = api.database_revision
+
+            with mock.patch.object(app.os.path, "expanduser", return_value=str(root)):
+                result = api.export_quotation(saved["quotation"]["quote_id"])
+
+            exported = Path(result["path"])
+            self.assertTrue(exported.is_file())
+            self.assertEqual(exported.parent, root / "Downloads" / "报价单")
+            self.assertNotIn("/", exported.name)
+            self.assertNotIn(":", exported.name)
+            self.assertEqual(api.database_revision, revision)
+            self.assertEqual(result["quote_no"], "BJ/2026:001")
+
+    def test_quotation_export_uses_timestamped_fallback_when_target_is_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api = app.Api(str(root / "ledger.db"))
+            api.load_state()
+            saved = api.save_quotation({
+                "quote_no": "BJ-OPEN", "quote_date": "2026-09-04",
+                "customer": "客户A", "items": [{
+                    "model": "KT1000", "quantity": 1, "unit_price": 100,
+                }],
+            })
+            real_export = app.quotation_export.export_quotation_xlsx
+            calls = []
+
+            def export_with_open_file_fallback(quotation, path):
+                calls.append(Path(path))
+                if len(calls) == 1:
+                    raise PermissionError(13, "file is open", path)
+                return real_export(quotation, path)
+
+            with mock.patch.object(app.os.path, "expanduser", return_value=str(root)), \
+                    mock.patch.object(
+                        app.quotation_export, "export_quotation_xlsx",
+                        side_effect=export_with_open_file_fallback,
+                    ):
+                result = api.export_quotation(saved["quotation"]["quote_id"])
+
+            self.assertEqual(len(calls), 2)
+            self.assertNotEqual(calls[0], calls[1])
+            self.assertTrue(Path(result["path"]).is_file())
+            self.assertIn("已改用带时间戳文件", result["notice"])
+
+    def test_quotation_defaults_keep_contract_model_when_order_has_no_device_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api = app.Api(str(root / "ledger.db"))
+            state = api.load_state()
+            state["data"]["合同订单"] = [{
+                "记录ID": "contract-1", "JOB No": "26BS009",
+                "客户": "客户A", "设备型号": "KT1000FI", "总台数": 0,
+            }]
+            api.save_data(state["data"], state["rules"])
+
+            defaults = api.quotation_defaults("26BS009")
+
+            self.assertEqual(defaults["items"], [{
+                "model": "KT1000FI", "description": "", "quantity": 1,
+                "unit": "台", "unit_price": 0,
+            }])
+
+    def test_quotation_subject_uses_every_model_found_in_device_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api = app.Api(str(root / "ledger.db"))
+            state = api.load_state()
+            state["data"]["合同订单"] = [{
+                "记录ID": "contract-1", "JOB No": "26BS008", "客户": "客户A",
+                "设备型号": "KT1000FI",
+            }]
+            state["data"]["发货批次"] = [{
+                "记录ID": "ship-1", "JOB No": "26BS008", "发货批次": "1",
+            }]
+            state["data"]["设备台账"] = [
+                {"记录ID": "dev-1", "JOB No": "26BS008", "设备型号": "KT1000FI",
+                 "未税单价": 100, "是否无偿": "否", "发货批次": "1"},
+                {"记录ID": "dev-2", "JOB No": "26BS008", "设备型号": "KT1000EPS-C300",
+                 "未税单价": 200, "是否无偿": "否", "发货批次": "1"},
+            ]
+            api.save_data(state["data"], state["rules"])
+
+            defaults = api.quotation_defaults("26BS008")
+
+            self.assertEqual(defaults["subject"], "KT1000FI / KT1000EPS-C300")
 
 
 if __name__ == "__main__":

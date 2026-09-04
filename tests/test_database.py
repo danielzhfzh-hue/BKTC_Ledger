@@ -387,6 +387,79 @@ class DatabaseTests(unittest.TestCase):
             for change in changes
         ))
 
+    def test_quotations_are_relational_audited_and_queryable_by_customer_model(self):
+        initial = database.save_database(
+            self.db, sample_data(), self.rules, backup=False,
+            reason="database_created",
+        )
+        context = {
+            "operator_name": "报价员", "source": "quotation_save",
+            "actions": ["create_quotation"], "app_version": "test",
+        }
+        first = database.save_quotation(
+            self.db,
+            {
+                "quote_no": "BJ-2026-001", "quote_date": "2026-09-01",
+                "customer": "原客户", "source_job_no": "26BS001",
+                "currency": "RMB", "tax_rate": 13, "status": "已报价",
+                "items": [{
+                    "model": "KT1000", "description": "测试设备",
+                    "quantity": 2, "unit": "台", "unit_price": 100,
+                }],
+            },
+            expected_revision=initial["revision"], audit_context=context, backup=False,
+        )
+        second = database.save_quotation(
+            self.db,
+            {
+                "quote_no": "BJ-2026-002", "quote_date": "2026-09-02",
+                "customer": "原客户", "currency": "RMB", "tax_rate": 13,
+                "items": [{
+                    "model": "KT1000", "quantity": 1,
+                    "unit": "台", "unit_price": 120,
+                }],
+            },
+            expected_revision=first["revision"], audit_context=context, backup=False,
+        )
+
+        self.assertEqual(first["quotation"]["subtotal"], 200)
+        self.assertEqual(first["quotation"]["tax_total"], 26)
+        self.assertEqual(first["quotation"]["grand_total"], 226)
+        self.assertEqual(len(database.list_quotations(self.db)), 2)
+        history = database.quotation_history(
+            self.db, " 原客户 ", "kt1000",
+            exclude_quote_id=second["quotation"]["quote_id"],
+        )
+        self.assertEqual([row["quote_no"] for row in history], ["BJ-2026-001"])
+        self.assertEqual(history[0]["unit_price"], 100)
+        self.assertEqual(history[0]["quantity"], 2)
+        self.assertEqual(
+            database.get_quotation(self.db, first["quotation"]["quote_id"])["items"][0]["model"],
+            "KT1000",
+        )
+        audit = database.get_audit_events(self.db)
+        self.assertTrue(audit["chain"]["ok"])
+        self.assertEqual(audit["events"][0]["source"], "quotation_save")
+        self.assertTrue(any(
+            change["table_name"] == "报价明细" and change["operation"] == "insert"
+            for change in audit["events"][0]["changes"]
+        ))
+
+    def test_invalid_quotation_does_not_change_database_revision(self):
+        initial = database.save_database(
+            self.db, sample_data(), self.rules, backup=False,
+            reason="database_created",
+        )
+
+        with self.assertRaises(database.QuotationValidationError):
+            database.save_quotation(
+                self.db,
+                {"customer": "原客户", "quote_date": "2026-09-01", "items": []},
+                expected_revision=initial["revision"], backup=False,
+            )
+
+        self.assertEqual(database.get_revision(self.db), initial["revision"])
+
 
 class CoreReliabilityTests(unittest.TestCase):
     def test_validation_catches_duplicate_contract_blank_child_and_invalid_date(self):

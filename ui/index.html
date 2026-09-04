@@ -3,19 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BKTC 台账维护工具</title>
+<title>上海康肯销售订单管理系统</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header class="app-header">
   <div class="brand-mark" aria-hidden="true"><span></span></div>
   <div class="brand-copy">
-    <div class="eyebrow">BKTC · ORDER OPERATIONS</div>
-    <div class="title">上海 POU 订单台账</div>
+    <div class="eyebrow">SHANGHAI KANKEN · SALES OPERATIONS</div>
+    <div class="title">上海康肯销售订单管理系统</div>
   </div>
   <div class="paths" aria-label="文件状态">
     <span class="path-chip" title="本地 SQLite 关系数据库"><i></i>数据库 <b id="badgeStore" class="no">未连接</b></span>
-    <span class="path-chip" title="生成的 Excel 台账"><i></i>台账 <b id="badgeXlsx" class="no">未选择</b></span>
+    <span class="path-chip" title="从数据库导出的 Excel 台账"><i></i>台账 <b id="badgeXlsx" class="no">未生成</b></span>
   </div>
   <button id="btnQuery" class="header-btn">跨表查询</button>
   <button id="btnSettings" class="header-btn settings-btn">设置</button>
@@ -24,13 +24,8 @@
 <div class="actionbar">
   <div class="action-group">
     <button id="btnSave">保存数据库</button>
-    <button id="btnGenerate" class="accent">生成台账</button>
+    <button id="btnGenerate" class="accent">导出台账</button>
     <button id="btnOpenXlsx">打开台账</button>
-  </div>
-  <span class="action-divider"></span>
-  <div class="action-group roundtrip-actions">
-    <button id="btnExportEditable" title="导出六表可编辑副本；隐藏记录ID用于可靠匹配">导出编辑副本</button>
-    <button id="btnImportChanges" title="预览 Excel 与数据库的差异，二次确认后写入">导入变更</button>
   </div>
   <span class="actionhint">SQLite 事务保存 · 外键校验 · 写入前自动备份</span>
 </div>
@@ -38,6 +33,7 @@
 <nav id="tabs">
   <button class="tab" data-tab="摘要">摘要</button>
   <button class="tab" data-tab="合同订单">合同订单</button>
+  <button class="tab" data-tab="报价单">报价单</button>
   <button class="tab" data-tab="付款条件">付款条件</button>
   <button class="tab" data-tab="设备台账">设备台账</button>
   <button class="tab" data-tab="发货批次">发货批次</button>
@@ -85,14 +81,114 @@
     </div>
   </section>
 
+  <section id="panel-报价单" class="panel hidden">
+    <div class="quote-page">
+      <aside class="quote-sidebar">
+        <div class="quote-sidebar-head">
+          <div>
+            <div class="eyebrow">QUOTATIONS</div>
+            <h3>报价记录</h3>
+          </div>
+          <button id="btnQuoteNew" class="primary">＋ 新建</button>
+        </div>
+        <input id="quoteSearch" class="quote-search" placeholder="搜索编号 / 客户 / 型号 / JOB…">
+        <div id="quoteList" class="quote-list"><div class="quote-list-empty">正在读取…</div></div>
+      </aside>
+
+      <div class="quote-workspace">
+        <div id="quoteEmpty" class="quote-empty">
+          <div class="quote-empty-mark">Q</div>
+          <h2>制作报价单</h2>
+          <p>可从已有 JOB 带入客户、型号、数量、单价和付款条件，也可直接建立独立报价。</p>
+          <button id="btnQuoteEmptyNew" class="primary">新建报价单</button>
+        </div>
+
+        <div id="quoteEditor" class="quote-editor hidden">
+          <div class="quote-editor-head">
+            <div>
+              <div class="eyebrow">QUOTATION EDITOR</div>
+              <h2 id="quoteEditorTitle">新报价单</h2>
+              <span id="quoteEditorState" class="quote-editor-state">尚未保存</span>
+            </div>
+            <div class="quote-actions">
+              <button id="btnQuoteSave" class="primary">保存报价</button>
+              <button id="btnQuoteExport" class="accent">导出 XLSX</button>
+            </div>
+          </div>
+
+          <div class="quote-scroll">
+            <section class="quote-section">
+              <h3>基础信息</h3>
+              <div class="quote-fields quote-fields-four">
+                <label>报价编号<input id="quoteNo" data-qf="quote_no" autocomplete="off"></label>
+                <label>版本<input id="quoteRev" data-qf="revision_label" autocomplete="off"></label>
+                <label>报价日期<input id="quoteDate" data-qf="quote_date" type="date"></label>
+                <label>状态<select id="quoteStatus" data-qf="status"><option>草稿</option><option>已发送</option><option>已接受</option><option>已拒绝</option><option>已过期</option></select></label>
+                <label>来源 JOB<select id="quoteJob" data-qf="source_job_no"></select></label>
+                <label>客户<input id="quoteCustomer" data-qf="customer" list="dlCustomer" autocomplete="off"></label>
+                <label>客户联系人<input id="quoteContact" data-qf="contact" autocomplete="off"></label>
+                <label>担当者<input id="quoteSalesperson" data-qf="salesperson" list="dlAssist" autocomplete="off"></label>
+                <label class="quote-span-two">客户地址<textarea id="quoteCustomerAddress" data-qf="customer_address" rows="2"></textarea></label>
+                <label class="quote-span-two">报价主题<input id="quoteSubject" data-qf="subject" autocomplete="off"></label>
+                <label>币种<select id="quoteCurrency" data-qf="currency"><option>RMB</option><option>USD</option><option>JPY</option><option>EUR</option></select></label>
+                <label>税率 %<input id="quoteTax" data-qf="tax_rate" type="number" min="0" max="100" step="any"></label>
+                <label>有效期至<input id="quoteValidUntil" data-qf="valid_until" autocomplete="off" placeholder="YYYY-MM-DD（可留空）"></label>
+              </div>
+              <details class="quote-issuer">
+                <summary>报价方抬头与联系信息</summary>
+                <div class="quote-fields">
+                  <label>报价方名称<input id="quoteIssuerName" data-qf="issuer_name" autocomplete="off" placeholder="留空时使用标准抬头"></label>
+                  <label>报价方联系信息<input id="quoteIssuerContact" data-qf="issuer_contact" autocomplete="off"></label>
+                  <label class="quote-span-two">报价方地址<input id="quoteIssuerAddress" data-qf="issuer_address" autocomplete="off"></label>
+                </div>
+              </details>
+            </section>
+
+            <section class="quote-section">
+              <div class="quote-section-head"><h3>报价明细</h3><button id="btnQuoteAddItem">＋ 添加明细</button></div>
+              <div class="quote-items-wrap">
+                <table class="quote-items">
+                  <thead><tr><th>No.</th><th>型号 / 项目</th><th>说明</th><th>数量</th><th>单位</th><th>未税单价</th><th>金额</th><th>备注</th><th></th></tr></thead>
+                  <tbody id="quoteItemRows"></tbody>
+                </table>
+              </div>
+              <div class="quote-totals">
+                <span>未税合计 <b id="quoteSubtotal">0.00</b></span>
+                <span>税额 <b id="quoteTaxTotal">0.00</b></span>
+                <span>含税合计 <b id="quoteGrandTotal">0.00</b></span>
+              </div>
+            </section>
+
+            <section class="quote-section">
+              <h3>商务条款</h3>
+              <div class="quote-fields">
+                <label>质保条款<input id="quoteWarranty" data-qf="warranty" autocomplete="off"></label>
+                <label>贸易条款 / Incoterm<input id="quoteIncoterm" data-qf="incoterm" autocomplete="off"></label>
+                <label>送货地点<input id="quoteShipTo" data-qf="ship_to" list="dlShipTo" autocomplete="off"></label>
+                <label>交货期<input id="quoteDeliveryTerms" data-qf="delivery_terms" autocomplete="off"></label>
+                <label class="quote-span-two">项目说明<textarea id="quoteDescription" data-qf="description" rows="2"></textarea></label>
+                <label class="quote-span-two">付款条件<textarea id="quotePaymentTerms" data-qf="payment_terms" rows="2"></textarea></label>
+                <label class="quote-span-two">备注<textarea id="quoteNotes" data-qf="notes" rows="2"></textarea></label>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section id="panel-使用指南" class="panel hidden">
     <div class="guide">
-      <h3>操作对照（改完记得「保存数据库」→「生成台账」）</h3>
+      <h3>操作对照（订单改完「保存数据库」→「导出台账」；报价在报价页单独保存/导出）</h3>
       <table>
         <thead><tr><th>要做什么</th><th>在哪个页面</th><th>说明 / 注意</th></tr></thead>
         <tbody>
           <tr><td>新建订单</td><td>合同订单页「＋ 新建订单」</td>
               <td>一次填写订单头、设备、发货和付款条件，自动建立六表关联与稳定记录 ID；比逐表添加更可靠。</td></tr>
+          <tr><td>制作报价单</td><td>报价单页「＋ 新建」</td>
+              <td>可选择来源 JOB 自动带入客户、担当者、全部型号、数量、未税单价、送货地点和付款条件；保存后才能从数据库导出标准报价 XLSX。</td></tr>
+          <tr><td>查询历史价格</td><td>报价明细行「历史报价」</td>
+              <td>显示同一客户、同一型号过去已保存的报价日期、编号、来源 JOB、数量和单价；当前正在编辑的报价不会重复计入。</td></tr>
           <tr><td>修改订单</td><td>合同订单</td>
               <td>筛选 JOB 后直接改单元格；总台数/设备型号是自动列，不用改。</td></tr>
           <tr><td>录入付款方式</td><td>付款条件 →「录入付款条件」</td>
@@ -114,11 +210,11 @@
           <tr><td>添加/修改回款</td><td>回款记录 →「新增回款记录」</td>
               <td>选择 JOB 后客户自动带入，款类来自付款条件；日期、金额独立填写，批次/制造番号严格限定在该 JOB，覆盖台数自动计算。</td></tr>
           <tr><td>修改待回收预警条件</td><td>预警规则</td>
-              <td>可配置临近天数（默认 30）、金额容差（默认 0.01）、未验收/发票异常是否归④待确认；保存后重新「生成台账」生效。</td></tr>
+              <td>可配置临近天数（默认 30）、金额容差（默认 0.01）、未验收/发票异常是否归④待确认；保存后重新「导出台账」生效。</td></tr>
           <tr><td>追溯新增/修改/删除</td><td>审计记录</td>
               <td>保存数据库后按操作人、JOB、业务表查询字段旧值和新值；legacy 历史不回填，审计启用后的变化会进入连续哈希链。</td></tr>
-          <tr><td>看首页/待回收页效果</td><td>摘要 + 生成台账</td>
-              <td>「生成台账」会重建导航页、未回收管理表、全部 JOB 页；摘要页先看校验问题。</td></tr>
+          <tr><td>看首页/待回收页效果</td><td>摘要 + 导出台账</td>
+              <td>「导出台账」会从数据库重建导航页、未回收管理表、全部 JOB 页；摘要页先看校验问题。</td></tr>
         </tbody>
       </table>
       <h3>为什么“发货页面改无效、台账页面改有效”</h3>
@@ -133,7 +229,7 @@
 
   <section id="panel-预警规则" class="panel hidden">
     <div class="guide">
-      <h3>待回收预警规则（改完点「保存数据」→「生成台账」生效）</h3>
+      <h3>待回收预警规则（改完点「保存数据」→「导出台账」生效）</h3>
       <table>
         <thead><tr><th style="width:160px">规则</th><th style="width:220px">设置</th><th>说明</th></tr></thead>
         <tbody>
@@ -154,7 +250,7 @@
         </tbody>
       </table>
       <p><button id="btnRulesDefault">恢复默认</button>
-         <span style="color:#777">　首页/待回收页由「生成台账」自动重建，不需要手工改 Excel。</span></p>
+         <span style="color:#777">　首页/待回收页由「导出台账」从数据库自动重建，不需要手工改 Excel。</span></p>
     </div>
   </section>
 
@@ -175,7 +271,7 @@
         <div class="qb-box">
           <div class="qb-box-h">筛选条件（全部满足）<button id="qbAddFilter" class="qb-mini">＋ 添加</button></div>
           <div id="qbFilters" class="qb-filters"></div>
-          <div class="qb-tip muted">默认提供「未付款订单」与「未回款明细」，与生成台账的未回收管理表使用同一计算口径；等于/包含=文本；大于/小于=数字或日期(YYYY-MM-DD)；为空/不为空无需填值。</div>
+          <div class="qb-tip muted">默认提供「未付款订单」与「未回款明细」，与导出台账的未回收管理表使用同一计算口径；等于/包含=文本；大于/小于=数字或日期(YYYY-MM-DD)；为空/不为空无需填值。</div>
         </div>
       </div>
       <div class="qb-box">
@@ -200,7 +296,7 @@
         <label>结束日期<input id="auditDateTo" type="date"></label>
         <label>操作人<input id="auditOperator" placeholder="包含…"></label>
         <label>JOB No<input id="auditJob" placeholder="包含…"></label>
-        <label>保存来源<select id="auditSource"><option value="">全部</option><option value="manual_save">手动保存</option><option value="generate_ledger">生成台账</option><option value="export_editable">导出编辑副本</option><option value="xlsx_import">Excel 回导</option></select></label>
+        <label>保存来源<select id="auditSource"><option value="">全部</option><option value="manual_save">手动保存</option><option value="generate_ledger">导出台账</option><option value="quotation_save">报价保存</option></select></label>
         <label>业务表<select id="auditTable"><option value="">全部</option></select></label>
         <label>类型<select id="auditOperation"><option value="">全部</option><option value="insert">新增</option><option value="update">修改</option><option value="delete">删除</option></select></label>
         <button id="btnAuditRefresh" class="primary">查询并验证</button>
@@ -234,11 +330,10 @@
           <tr><td>当前操作人</td>
               <td><input id="setOperatorName" class="path-input" placeholder="审计记录中的操作人"></td>
               <td><button id="btnSetOperator">保存操作人</button></td></tr>
-          <tr><td>台账文件</td>
-              <td><span id="setXlsx" class="path">（未选择）</span><br>
-                <input id="setXlsxInput" class="path-input" placeholder="也可粘贴 .xlsx 路径"></td>
-              <td><button id="btnPickXlsx">更换…</button>
-                <button id="btnApplyXlsxPath">应用路径</button></td></tr>
+          <tr><td>台账导出文件</td>
+              <td><span id="setXlsx" class="path">（由数据库自动确定）</span><br>
+                <span class="muted">与数据库同目录、同文件名，仅扩展名为 .xlsx</span></td>
+              <td><span class="muted">无需关联 XLSX</span></td></tr>
           <tr><td>当前版本</td>
               <td><span id="setVersion">v?</span>　<span id="updateInfo" class="muted"></span></td>
               <td><button id="btnCheckUpdate">检查更新</button>　<button id="btnDownloadUpdate" class="primary hidden">下载并打开</button></td></tr>
@@ -247,10 +342,10 @@
       <h3>说明</h3>
       <p>· <b>保存数据库</b>：在一个事务内校验并写入本地 <code>.db</code>；失败会整体回滚，写入前自动在 <code>备份/</code> 保留数据库快照。<br>
          · <b>旧 JSON 迁移</b>：选择 <code>*.records.json</code> 时会在同目录创建 <code>.db</code>，原 JSON 保留不动。<br>
-         · <b>文件路径</b>：在上方选择或粘贴 DB/XLSX 路径后立即生效，并保存为当前 Windows/macOS 用户的下次启动设置。<br>
-         · <b>外部表格编辑</b>：先「导出编辑副本」，在 Excel/WPS 修改六表，再「导入变更」；应用会展示新增/修改/删除明细，必须二次确认才写入。旧修订副本会被拒绝。<br>
+         · <b>文件路径</b>：只需选择或粘贴数据库路径；路径会保存为当前 Windows/macOS 用户的下次启动设置。<br>
+         · <b>单一数据源</b>：数据库是唯一权威数据源，Excel 仅作为导出结果，不会从外部表格回写数据库。<br>
          · <b>审计记录</b>：新增、删除和实质字段修改与业务数据在同一事务写入；失败保存不会留下审计记录。请先设置正确的“当前操作人”。<br>
-         · <b>生成台账</b>：按数据库重写 <code>xlsx</code>（导航页 / 未回收管理表 / 各 JOB 页），旧版自动进同目录 <code>备份/</code>（留近 10 份）。<br>
+         · <b>导出台账</b>：按数据库重写同目录同名 <code>xlsx</code>（导航页 / 未回收管理表 / 各 JOB 页），旧版自动进同目录 <code>备份/</code>（留近 10 份）。<br>
          · <b>检查更新</b>：联网查 GitHub 最新 Release（仅 push 到 main 还不会产生可更新版本）；有新版可点「下载并打开」，解压到下载目录后，<b>请退出本程序，用其中的新版本替换旧文件夹</b>（未签名，首开仍需 Mac 右键打开 / Windows SmartScreen「仍要运行」）。</p>
     </div>
   </section>
@@ -344,6 +439,25 @@
   </div>
 </div>
 
+<div id="quoteHistoryModal" class="modal hidden">
+  <div class="modal-card quote-history-card">
+    <div class="modal-head">
+      <div><span class="modal-kicker">PRICE HISTORY</span><strong id="quoteHistoryTitle">历史报价</strong></div>
+      <button id="quoteHistoryClose" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="quoteHistorySummary" class="quote-history-summary"></div>
+      <div class="quote-history-wrap">
+        <table class="quote-history-table">
+          <thead><tr><th>日期</th><th>报价编号</th><th>状态</th><th>来源 JOB</th><th>数量</th><th>币种</th><th>未税单价</th><th>金额</th></tr></thead>
+          <tbody id="quoteHistoryBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-foot"><button id="quoteHistoryOk" class="primary">关闭</button></div>
+  </div>
+</div>
+
 <div id="newOrderModal" class="modal hidden">
   <div class="modal-card noc-card">
     <div class="modal-head"><span>新建订单</span><button id="nocClose" title="关闭">✕</button></div>
@@ -406,31 +520,6 @@
       </div>
     </div>
     <div class="modal-foot"><button id="nocCancel">取消</button><button id="nocOk" class="primary">创建订单</button></div>
-  </div>
-</div>
-
-<div id="importModal" class="modal hidden">
-  <div class="modal-card import-card">
-    <div class="modal-head">
-      <div><span class="modal-kicker">EXCEL CHANGE REVIEW</span><strong>导入差异预览</strong></div>
-      <button id="importClose" title="关闭">✕</button>
-    </div>
-    <div class="modal-body">
-      <div id="importStatus" class="import-status"></div>
-      <div id="importCounts" class="import-counts"></div>
-      <div id="importTableCounts" class="import-table-counts"></div>
-      <div class="import-list-head"><span>变更明细</span><span id="importFile" class="path"></span></div>
-      <div id="importChanges" class="import-changes"></div>
-      <label id="importConfirmLabel" class="confirm-check">
-        <input id="importConfirm" type="checkbox">
-        <span>我已核对以上新增、修改和删除，确认将这些差异写入本地数据库。</span>
-      </label>
-    </div>
-    <div class="modal-foot">
-      <span class="modal-safety">提交前会再次核对数据库修订与文件指纹，并自动备份。</span>
-      <button id="importCancel">取消</button>
-      <button id="importApply" class="primary" disabled>确认应用变更</button>
-    </div>
   </div>
 </div>
 

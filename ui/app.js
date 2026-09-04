@@ -1,12 +1,13 @@
 "use strict";
 
 const state = {
-  storePath: "", xlsxPath: "", data: null, schema: null,
+  storePath: "", xlsxPath: "", xlsxExists: false, data: null, schema: null,
   tab: "摘要", dirty: false, selection: new Set(), anchor: null,
   filter: "", colFilters: {}, sortBy: {}, rules: {}, jobFilter: null,
   customerFilter: null,
-  version: "?", update: null, databaseInfo: null, pendingImport: null,
+  version: "?", update: null, databaseInfo: null,
   operatorName: "", auditActions: new Set(), auditEvents: [], auditChain: null,
+  quotations: [], currentQuotation: null, quoteDirty: false,
 };
 
 const ROW_H = 31, BUFFER = 20;
@@ -98,14 +99,11 @@ function renderAll() {
     const b = $(id); b.textContent = ok ? yes : no; b.className = ok ? "ok" : "no";
   };
   setBadge("badgeStore", !!state.storePath, "已连接", "未连接");
-  setBadge("badgeXlsx", !!state.xlsxPath, "已选择", "未选择");
+  setBadge("badgeXlsx", state.xlsxExists, "已生成", "未生成");
   $("setStore").textContent = state.storePath || "（未选择）";
-  $("setXlsx").textContent = state.xlsxPath || "（未选择）";
+  $("setXlsx").textContent = state.xlsxPath || "（由数据库自动确定）";
   if (document.activeElement !== $("setStoreInput")) {
     $("setStoreInput").value = state.storePath || "";
-  }
-  if (document.activeElement !== $("setXlsxInput")) {
-    $("setXlsxInput").value = state.xlsxPath || "";
   }
   if (document.activeElement !== $("setOperatorName")) {
     $("setOperatorName").value = state.operatorName || "";
@@ -164,7 +162,8 @@ function renderCounts() {
   const revision = state.databaseInfo?.revision;
   $("counts").textContent = parts.join(" ｜ ") +
     (revision !== undefined ? ` ｜ DB r${revision}` : "") +
-    (state.dirty ? " ｜ ● 未保存" : "");
+    (state.dirty ? " ｜ ● 订单未保存" : "") +
+    (state.quoteDirty ? " ｜ ● 报价未保存" : "");
   const saveState = $("saveState");
   if (saveState) {
     saveState.classList.toggle("dirty", state.dirty);
@@ -320,7 +319,8 @@ function switchTab(tab) {
   document.querySelectorAll(".tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === tab));
   $("panel-摘要").classList.toggle("hidden", tab !== "摘要");
-  $("panel-表格").classList.toggle("hidden", ["摘要", "使用指南", "预警规则", "审计记录"].includes(tab));
+  $("panel-表格").classList.toggle("hidden", ["摘要", "报价单", "使用指南", "预警规则", "审计记录"].includes(tab));
+  $("panel-报价单").classList.toggle("hidden", tab !== "报价单");
   $("panel-使用指南").classList.toggle("hidden", tab !== "使用指南");
   $("panel-预警规则").classList.toggle("hidden", tab !== "预警规则");
   $("panel-审计记录").classList.toggle("hidden", tab !== "审计记录");
@@ -329,7 +329,8 @@ function switchTab(tab) {
   const addButton = $("btnAddRecord");
   if (addButton && ENTRY_ACTION_LABELS[tab]) addButton.textContent = ENTRY_ACTION_LABELS[tab];
   if (tab === "审计记录") loadAuditEvents();
-  if (!['摘要', '使用指南', '预警规则', '审计记录'].includes(tab)) renderGrid();
+  if (tab === "报价单") loadQuotations($("quoteSearch").value.trim());
+  if (state.schema?.[tab]) renderGrid();
 }
 
 $("summaryCards").addEventListener("click", (e) => {
@@ -620,7 +621,7 @@ function recomputeDerived() {
 
 function renderGrid() {
   const table = state.tab;
-  if (table === "摘要" || !state.data) return;
+  if (!state.schema?.[table] || !state.data) return;
   const fields = fieldsOf(table);
   const all = visibleRows(table);
   const total = all.length;
@@ -1541,7 +1542,7 @@ async function qbDoExport() {
   }).catch((e) => { setStatus(String(e), "error"); toast(String(e), "error"); });
 }
 $("btnQuery").addEventListener("click", () => {
-  ["摘要", "表格", "使用指南", "预警规则", "设置"].forEach((p) => $("panel-" + p).classList.add("hidden"));
+  ["摘要", "表格", "报价单", "使用指南", "预警规则", "审计记录", "设置"].forEach((p) => $("panel-" + p).classList.add("hidden"));
   $("panel-跨表查询").classList.remove("hidden");
   document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
   openQueryBuilder();
@@ -1806,7 +1807,8 @@ async function call(name, ...args) {
 
 function applyBackendState(r) {
   if (r.store_path || r.database_path) state.storePath = r.database_path || r.store_path;
-  if (r.xlsx_path) state.xlsxPath = r.xlsx_path;
+  if (r.xlsx_path !== undefined) state.xlsxPath = r.xlsx_path;
+  if (r.xlsx_exists !== undefined) state.xlsxExists = !!r.xlsx_exists;
   if (r.data) state.data = r.data;
   if (r.schema) state.schema = r.schema;
   if (r.rules) state.rules = r.rules;
@@ -1850,7 +1852,7 @@ $("btnSave").addEventListener("click", async () => {
 
 $("btnGenerate").addEventListener("click", async () => {
   try {
-    setStatus("生成台账中…");
+    setStatus("正在从数据库导出台账…");
     const r = await call("generate", state.data, state.rules, pendingAuditContext("generate_ledger"));
     applyBackendState(r);
     state.dirty = false;
@@ -1858,14 +1860,14 @@ $("btnGenerate").addEventListener("click", async () => {
     const msg = `已生成：${r.out}（未回收 ${r.counts["未回收行数"]} 行，合计 ${Number(r.counts["未回收合计"]).toLocaleString()}）` +
       (r.notice ? `；${r.notice}` : "");
     setStatus(msg);
-    toast(r.notice ? "台账已生成备用文件" : "台账已生成", "ok");
+    toast(r.notice ? "台账已导出到备用文件" : "台账已导出", "ok");
     renderAll();
   } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
 });
 
-async function refreshWithFeedback(store, xlsx) {
+async function refreshWithFeedback(store) {
   try {
-    await refresh(store, xlsx);
+    await refresh(store);
   } catch (err) {
     setStatus("路径切换失败：" + String(err), "error");
     toast("路径切换失败：" + String(err), "error");
@@ -1873,27 +1875,13 @@ async function refreshWithFeedback(store, xlsx) {
 }
 
 $("btnPickStore").addEventListener("click", async () => {
-  if (state.dirty && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
+  if ((state.dirty || state.quoteDirty) && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
   try {
     let p = await call("pick_store");
     if (!p) p = window.prompt("请输入 SQLite 或 JSON 文件的完整路径：", state.storePath || "");
     if (p) {
       $("setStoreInput").value = p;
-      await refreshWithFeedback(p, null);
-    }
-  } catch (err) {
-    setStatus("无法打开文件选择器，请粘贴完整路径：" + String(err), "error");
-    toast("无法打开文件选择器，请使用下方输入框", "error");
-  }
-});
-
-$("btnPickXlsx").addEventListener("click", async () => {
-  try {
-    let p = await call("pick_xlsx");
-    if (!p) p = window.prompt("请输入 XLSX 文件的完整路径：", state.xlsxPath || "");
-    if (p) {
-      $("setXlsxInput").value = p;
-      await refreshWithFeedback(null, p);
+      await refreshWithFeedback(p);
     }
   } catch (err) {
     setStatus("无法打开文件选择器，请粘贴完整路径：" + String(err), "error");
@@ -1902,16 +1890,10 @@ $("btnPickXlsx").addEventListener("click", async () => {
 });
 
 $("btnApplyStorePath").addEventListener("click", async () => {
-  if (state.dirty && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
+  if ((state.dirty || state.quoteDirty) && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
   const p = $("setStoreInput").value.trim();
   if (!p) return toast("请先输入数据库路径", "error");
-  await refreshWithFeedback(p, null);
-});
-
-$("btnApplyXlsxPath").addEventListener("click", async () => {
-  const p = $("setXlsxInput").value.trim();
-  if (!p) return toast("请先输入 XLSX 路径", "error");
-  await refreshWithFeedback(null, p);
+  await refreshWithFeedback(p);
 });
 
 $("btnSetOperator").addEventListener("click", async () => {
@@ -1980,7 +1962,7 @@ function renderAuditEvents(result) {
 async function loadAuditEvents() {
   if (!state.storePath) return;
   if ($("auditTable").options.length === 1 && state.schema) {
-    for (const table of [...Object.keys(state.schema), "预警规则"]) {
+    for (const table of [...Object.keys(state.schema), "预警规则", "报价单", "报价明细"]) {
       $("auditTable").insertAdjacentHTML("beforeend", `<option value="${esc(table)}">${esc(table)}</option>`);
     }
   }
@@ -2004,7 +1986,7 @@ $("btnAuditExport").addEventListener("click", async () => {
 });
 
 $("btnSettings").addEventListener("click", () => {
-  ["摘要", "表格", "使用指南", "预警规则", "审计记录"].forEach((p) => $("panel-" + p).classList.add("hidden"));
+  ["摘要", "表格", "报价单", "使用指南", "预警规则", "审计记录", "跨表查询"].forEach((p) => $("panel-" + p).classList.add("hidden"));
   $("panel-设置").classList.remove("hidden");
   document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
   $("setVersion").textContent = "v" + state.version;
@@ -2045,129 +2027,15 @@ $("btnDownloadUpdate").addEventListener("click", async () => {
 });
 
 $("btnOpenXlsx").addEventListener("click", async () => {
-  if (state.xlsxPath) await call("open_path", state.xlsxPath);
+  if (!state.xlsxExists) return toast("请先从数据库导出台账", "error");
+  await call("open_path", state.xlsxPath);
 });
 
-function diffValue(value) {
-  if (value === null || value === undefined || value === "") return "（空）";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
-
-function closeImportPreview() {
-  $("importModal").classList.add("hidden");
-  $("importConfirm").checked = false;
-  $("importApply").disabled = true;
-  state.pendingImport = null;
-}
-
-function renderImportPreview(result) {
-  state.pendingImport = result;
-  const total = result.changes_total || 0;
-  const blocked = result.stale || total === 0;
-  const status = $("importStatus");
-  status.classList.toggle("stale", result.stale);
-  status.textContent = result.stale
-    ? `此工作簿基于数据库修订 ${result.base_revision}，当前已是修订 ${result.current_revision}。为防止覆盖新数据，不能应用；请重新导出编辑副本。`
-    : total ? `工作簿与数据库修订 ${result.current_revision} 匹配。请逐项核对后完成二次确认。`
-      : "工作簿与当前数据库没有差异，无需导入。";
-  const ac = result.action_counts || {};
-  $("importCounts").innerHTML = [
-    ["新增", ac["新增"] || 0, "add"], ["修改", ac["修改"] || 0, "change"],
-    ["删除", ac["删除"] || 0, "delete"],
-  ].map(([label, value, cls]) => `<div class="import-count ${cls}"><span>${label}</span><b>${value}</b></div>`).join("");
-  $("importTableCounts").innerHTML = Object.entries(result.table_counts || {}).map(([table, counts]) => {
-    const parts = ["新增", "修改", "删除"].filter((key) => counts[key]).map((key) => `${key}${counts[key]}`);
-    return parts.length ? `<span>${esc(table)} · ${parts.join(" / ")}</span>` : "";
-  }).join("");
-  $("importFile").textContent = result.path || "";
-  $("importChanges").innerHTML = (result.changes || []).map((change) => {
-    const cls = change.action === "新增" ? "add" : (change.action === "删除" ? "delete" : "change");
-    const fields = (change.fields || []).slice(0, 12).map((field) =>
-      `<div><code>${esc(field.field)}${field.derived ? "（自动）" : ""}</code>：` +
-      `${esc(diffValue(field.before))} → ${esc(diffValue(field.after))}</div>`).join("");
-    return `<div class="import-change"><div class="import-change-head">` +
-      `<span class="import-action ${cls}">${change.action}</span><b>${esc(change.table)}</b>` +
-      `<span>${esc(change.label)}</span></div>` +
-      (fields ? `<div class="import-change-fields">${fields}</div>` : "") + `</div>`;
-  }).join("") || '<div class="import-change muted">没有变更</div>';
-  if (result.changes_truncated) {
-    $("importChanges").insertAdjacentHTML("beforeend", `<div class="import-change muted">仅展示前 500 项，共 ${total} 项；统计数量为完整结果。</div>`);
-  }
-  if (result.warnings?.length) {
-    $("importChanges").insertAdjacentHTML("beforeend", result.warnings.slice(0, 20).map((warning) =>
-      `<div class="import-change"><span class="import-action change">提示</span> ${esc(warning.msg)}</div>`).join(""));
-  }
-  $("importConfirm").checked = false;
-  $("importConfirm").disabled = blocked;
-  $("importConfirmLabel").classList.toggle("disabled", blocked);
-  $("importApply").disabled = true;
-  $("importModal").classList.remove("hidden");
-}
-
-$("btnExportEditable").addEventListener("click", async () => {
-  try {
-    setStatus("正在保存并生成可编辑副本…");
-    const r = await call(
-      "export_editable", state.data, state.rules, state.dirty,
-      pendingAuditContext("export_editable")
-    );
-    applyBackendState(r);
-    state.dirty = false;
-    clearPendingAuditActions();
-    renderAll();
-    setStatus(`已导出编辑副本：${r.path}（数据库修订 ${r.revision}）`);
-    toast("六表编辑副本已导出到 Downloads", "ok");
-    await call("open_path", r.path);
-  } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
-});
-
-$("btnImportChanges").addEventListener("click", async () => {
-  try {
-    if (state.dirty) {
-      if (!confirm("导入差异基于已保存数据库。当前有未保存更改，是否先保存再选择 Excel？")) return;
-      if (!await saveCurrent(true)) return;
-    }
-    const path = await call("pick_import_xlsx");
-    if (!path) return;
-    setStatus("正在读取 Excel 并计算差异…");
-    const result = await call("preview_import", path);
-    renderImportPreview(result);
-    setStatus(`差异预览完成：新增 ${result.action_counts["新增"]} / 修改 ${result.action_counts["修改"]} / 删除 ${result.action_counts["删除"]}`);
-  } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
-});
-
-$("importConfirm").addEventListener("change", (e) => {
-  $("importApply").disabled = !e.target.checked || !state.pendingImport || state.pendingImport.stale;
-});
-$("importApply").addEventListener("click", async () => {
-  if (!state.pendingImport || !$("importConfirm").checked) return;
-  try {
-    $("importApply").disabled = true;
-    setStatus("正在复核修订并应用 Excel 差异…");
-    const r = await call("apply_import", state.pendingImport.token);
-    applyBackendState(r);
-    state.dirty = false;
-    clearPendingAuditActions();
-    closeImportPreview();
-    renderRules();
-    renderAll();
-    switchTab("摘要");
-    setStatus(`Excel 变更已写入数据库（修订 ${r.revision}）`);
-    toast("差异已通过二次确认并写入，原数据库已备份", "ok");
-  } catch (err) {
-    setStatus(String(err), "error");
-    toast(String(err), "error");
-    $("importApply").disabled = false;
-  }
-});
-$("importCancel").addEventListener("click", closeImportPreview);
-$("importClose").addEventListener("click", closeImportPreview);
-
-async function refresh(store, xlsx) {
-  const r = await call("load_state", store, xlsx);
+async function refresh(store) {
+  const r = await call("load_state", store);
   applyBackendState(r);
   state.dirty = false;
+  resetQuotationWorkspace();
   clearPendingAuditActions();
   renderAll();
   renderRules();
@@ -2181,7 +2049,7 @@ async function refresh(store, xlsx) {
 
 window.addEventListener("pywebviewready", async () => {
   try {
-    const r = await call("load_state", null, null);
+    const r = await call("load_state", null);
     applyBackendState(r);
     state.dirty = false;
     renderAll();
@@ -2198,9 +2066,381 @@ window.addEventListener("pywebviewready", async () => {
 });
 
 window.addEventListener("beforeunload", (e) => {
-  if (!state.dirty) return;
+  if (!state.dirty && !state.quoteDirty) return;
   e.preventDefault();
   e.returnValue = "";
+});
+
+// ========== 报价单：数据库保存、订单字段复用、同客户同型号历史价格 ==========
+const QUOTE_FIELD_IDS = {
+  quote_no: "quoteNo", revision_label: "quoteRev", quote_date: "quoteDate",
+  status: "quoteStatus", source_job_no: "quoteJob", customer: "quoteCustomer",
+  contact: "quoteContact", customer_address: "quoteCustomerAddress",
+  salesperson: "quoteSalesperson", subject: "quoteSubject", currency: "quoteCurrency",
+  tax_rate: "quoteTax", valid_until: "quoteValidUntil", issuer_name: "quoteIssuerName",
+  issuer_address: "quoteIssuerAddress", issuer_contact: "quoteIssuerContact",
+  warranty: "quoteWarranty", incoterm: "quoteIncoterm", ship_to: "quoteShipTo",
+  delivery_terms: "quoteDeliveryTerms", description: "quoteDescription",
+  payment_terms: "quotePaymentTerms", notes: "quoteNotes",
+};
+
+function quoteToday() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function quoteCopy(value) {
+  return JSON.parse(JSON.stringify(value || {}));
+}
+
+function quoteMoney(value) {
+  const number = Number(value) || 0;
+  return number.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function quoteSelectValue(element, value) {
+  const text = s(value);
+  if (text && ![...element.options].some((option) => option.value === text)) {
+    element.add(new Option(text, text));
+  }
+  element.value = text;
+}
+
+function populateQuoteJobs(selected = "") {
+  const jobs = (state.data?.["合同订单"] || [])
+    .map((row) => ({ job: s(row["JOB No"]), customer: s(row["客户"]) }))
+    .filter((row) => row.job)
+    .sort((a, b) => b.job.localeCompare(a.job));
+  $("quoteJob").innerHTML = '<option value="">（独立报价，不关联 JOB）</option>' + jobs.map((row) =>
+    `<option value="${esc(row.job)}">${esc(row.job)} · ${esc(row.customer)}</option>`
+  ).join("");
+  quoteSelectValue($("quoteJob"), selected);
+  $("quoteJob").dataset.previous = s(selected);
+}
+
+function quoteItemRowHtml(item, index) {
+  const quantity = item.quantity ?? 1;
+  const unitPrice = item.unit_price ?? 0;
+  const amount = Number(quantity || 0) * Number(unitPrice || 0);
+  return `<tr data-item-id="${esc(item.item_id || newLocalId())}">
+    <td class="quote-item-no">${index + 1}</td>
+    <td><input data-if="model" list="dlModel" value="${esc(item.model)}" autocomplete="off"></td>
+    <td><input data-if="description" value="${esc(item.description)}" autocomplete="off"></td>
+    <td><input data-if="quantity" type="number" min="0" step="any" value="${esc(quantity)}"></td>
+    <td><input data-if="unit" value="${esc(item.unit || "台")}" autocomplete="off"></td>
+    <td><input data-if="unit_price" type="number" min="0" step="any" value="${esc(unitPrice)}"></td>
+    <td class="quote-item-amount">${quoteMoney(amount)}</td>
+    <td><input data-if="remark" value="${esc(item.remark)}" autocomplete="off"></td>
+    <td><div class="quote-item-actions"><button type="button" class="quote-item-history" title="查询同一客户、同一型号的历史报价">历史报价</button><button type="button" class="quote-item-del" title="删除明细">✕</button></div></td>
+  </tr>`;
+}
+
+function renderQuoteItems(items) {
+  const rows = items?.length ? items : [{ quantity: 1, unit: "台", unit_price: 0 }];
+  $("quoteItemRows").innerHTML = rows.map(quoteItemRowHtml).join("");
+  updateQuoteTotals();
+}
+
+function readQuoteItems() {
+  return [...document.querySelectorAll("#quoteItemRows tr")].map((row, index) => {
+    const get = (field) => row.querySelector(`[data-if="${field}"]`)?.value ?? "";
+    return {
+      item_id: row.dataset.itemId || "", line_no: index + 1,
+      model: get("model").trim(), description: get("description").trim(),
+      quantity: Number(get("quantity")), unit: get("unit").trim() || "台",
+      unit_price: Number(get("unit_price")), remark: get("remark").trim(),
+    };
+  });
+}
+
+function readQuoteForm() {
+  const result = { quote_id: state.currentQuotation?.quote_id || "" };
+  for (const [field, id] of Object.entries(QUOTE_FIELD_IDS)) {
+    result[field] = $(id).value;
+  }
+  result.tax_rate = Number(result.tax_rate);
+  result.items = readQuoteItems();
+  return result;
+}
+
+function updateQuoteTotals() {
+  const subtotal = readQuoteItems().reduce(
+    (sum, item) => sum + Number(item.quantity || 0) * Number(item.unit_price || 0), 0
+  );
+  const tax = subtotal * (Number($("quoteTax").value) || 0) / 100;
+  $("quoteSubtotal").textContent = quoteMoney(subtotal);
+  $("quoteTaxTotal").textContent = quoteMoney(tax);
+  $("quoteGrandTotal").textContent = quoteMoney(subtotal + tax);
+  document.querySelectorAll("#quoteItemRows tr").forEach((row) => {
+    const qty = Number(row.querySelector('[data-if="quantity"]').value) || 0;
+    const price = Number(row.querySelector('[data-if="unit_price"]').value) || 0;
+    row.querySelector(".quote-item-amount").textContent = quoteMoney(qty * price);
+  });
+}
+
+function setQuoteDirty(dirty) {
+  state.quoteDirty = !!dirty;
+  const label = $("quoteEditorState");
+  if (state.currentQuotation) {
+    label.textContent = dirty ? "有未保存更改" : (state.currentQuotation.quote_id
+      ? (state.currentQuotation.updated_at
+        ? `已保存 · ${state.currentQuotation.updated_at.replace("T", " ")}` : "已保存")
+      : "尚未保存");
+    label.classList.toggle("dirty", !!dirty);
+  }
+  renderCounts();
+}
+
+function renderQuotationList() {
+  const activeId = state.currentQuotation?.quote_id || "";
+  $("quoteList").innerHTML = state.quotations.length ? state.quotations.map((quote) =>
+    `<button type="button" class="quote-list-item${quote.quote_id === activeId ? " active" : ""}" data-quote-id="${esc(quote.quote_id)}">
+      <span class="quote-list-line"><span class="quote-list-no">${esc(quote.quote_no)}</span><span class="quote-status-pill">${esc(quote.status)}</span></span>
+      <span class="quote-list-line"><span class="quote-list-customer">${esc(quote.customer)}</span><span class="quote-list-date">${esc(quote.quote_date)}</span></span>
+      <span class="quote-list-subject">${esc(quote.models || quote.subject || "（无型号）")}</span>
+      <span class="quote-list-line"><span class="quote-list-total">${esc(quote.currency)} ${quoteMoney(quote.grand_total)}</span><span class="quote-list-meta">${esc(quote.source_job_no || "独立报价")}</span></span>
+    </button>`
+  ).join("") : '<div class="quote-list-empty">没有符合条件的报价单。<br>点击“新建”开始制作。</div>';
+}
+
+async function loadQuotations(search = "") {
+  if (!state.storePath) return;
+  const request = (state._quoteListRequest || 0) + 1;
+  state._quoteListRequest = request;
+  try {
+    const quotations = await call("list_quotations", search);
+    if (request !== state._quoteListRequest) return;
+    state.quotations = quotations;
+    renderQuotationList();
+  } catch (error) {
+    if (request !== state._quoteListRequest) return;
+    $("quoteList").innerHTML = `<div class="quote-list-empty">读取失败：${esc(String(error))}</div>`;
+  }
+}
+
+function resetQuotationWorkspace() {
+  state.quotations = [];
+  state.currentQuotation = null;
+  state.quoteDirty = false;
+  state._quoteListRequest = (state._quoteListRequest || 0) + 1;
+  $("quoteSearch").value = "";
+  $("quoteList").innerHTML = '<div class="quote-list-empty">正在读取…</div>';
+  $("quoteEditor").classList.add("hidden");
+  $("quoteEmpty").classList.remove("hidden");
+}
+
+function applyQuotationToForm(quotation, dirty = false) {
+  const quote = quoteCopy(quotation);
+  quote.items ||= [];
+  state.currentQuotation = quote;
+  buildNocDatalists();
+  populateQuoteJobs(quote.source_job_no);
+  for (const [field, id] of Object.entries(QUOTE_FIELD_IDS)) {
+    const element = $(id);
+    const value = quote[field] ?? (field === "tax_rate" ? 13 : "");
+    if (element.tagName === "SELECT") quoteSelectValue(element, value);
+    else element.value = value;
+  }
+  $("quoteJob").dataset.previous = s(quote.source_job_no);
+  renderQuoteItems(quote.items);
+  $("quoteEmpty").classList.add("hidden");
+  $("quoteEditor").classList.remove("hidden");
+  $("quoteEditorTitle").textContent = quote.quote_no || "新报价单";
+  setQuoteDirty(dirty);
+  renderQuotationList();
+}
+
+async function newQuotation() {
+  if (state.quoteDirty && !confirm("当前报价有未保存更改，确定放弃并新建吗？")) return;
+  const quoteDate = quoteToday();
+  try {
+    const quoteNo = await call("suggest_quotation_number", quoteDate);
+    applyQuotationToForm({
+      quote_no: quoteNo, revision_label: "1.0", quote_date: quoteDate,
+      status: "草稿", currency: "RMB", tax_rate: 13,
+      items: [{ quantity: 1, unit: "台", unit_price: 0 }],
+    }, false);
+  } catch (error) {
+    toast(String(error), "error");
+  }
+}
+
+async function openQuotation(quoteId) {
+  if (!quoteId || quoteId === state.currentQuotation?.quote_id) return;
+  if (state.quoteDirty && !confirm("当前报价有未保存更改，确定放弃并打开另一份报价吗？")) return;
+  try {
+    applyQuotationToForm(await call("get_quotation", quoteId), false);
+  } catch (error) {
+    toast(String(error), "error");
+  }
+}
+
+async function loadQuoteJobDefaults(nextJob) {
+  const select = $("quoteJob");
+  const previous = select.dataset.previous || "";
+  if (!nextJob) {
+    select.dataset.previous = "";
+    setQuoteDirty(true);
+    return;
+  }
+  if (state.dirty) {
+    toast("订单数据有未保存更改，请先保存数据库再带入 JOB", "error");
+    select.value = previous;
+    return;
+  }
+  const draft = readQuoteForm();
+  const hasEnteredData = draft.customer || draft.items.some((item) => item.model);
+  if (state.quoteDirty && hasEnteredData && !confirm("带入 JOB 会更新客户、型号、数量、单价、送货地点和付款条件，确定继续吗？")) {
+    select.value = previous;
+    return;
+  }
+  try {
+    const defaults = await call("quotation_defaults", nextJob);
+    const merged = {
+      ...draft, ...defaults,
+      quote_id: draft.quote_id,
+      quote_no: draft.quote_no || defaults.quote_no,
+      revision_label: draft.revision_label || defaults.revision_label,
+      quote_date: draft.quote_date || defaults.quote_date,
+      status: draft.status || defaults.status,
+      tax_rate: Number.isFinite(draft.tax_rate) ? draft.tax_rate : defaults.tax_rate,
+    };
+    applyQuotationToForm(merged, true);
+    toast(`已从 ${nextJob} 带入客户、型号、数量、价格和条款`, "ok");
+  } catch (error) {
+    select.value = previous;
+    toast(String(error), "error");
+  }
+}
+
+async function saveQuotation(silent = false) {
+  if (!state.currentQuotation || state._quoteSaving) return false;
+  state._quoteSaving = true;
+  $("btnQuoteSave").disabled = true;
+  try {
+    if (!silent) setStatus("正在校验并保存报价单…");
+    const result = await call("save_quotation", readQuoteForm());
+    applyBackendState(result);
+    applyQuotationToForm(result.quotation, false);
+    await loadQuotations($("quoteSearch").value.trim());
+    setStatus(`报价单已保存：${result.quotation.quote_no}（数据库修订 ${result.revision}）`);
+    if (!silent) toast("报价单已保存并写入审计记录", "ok");
+    return true;
+  } catch (error) {
+    setStatus(String(error), "error");
+    toast(String(error), "error");
+    return false;
+  } finally {
+    state._quoteSaving = false;
+    $("btnQuoteSave").disabled = false;
+  }
+}
+
+async function exportQuotation() {
+  if (!state.currentQuotation) return;
+  if (state.quoteDirty || !state.currentQuotation.quote_id) {
+    if (!confirm("导出只使用数据库中的已保存版本。是否先保存当前报价再导出？")) return;
+    if (!await saveQuotation(true)) return;
+  }
+  try {
+    setStatus("正在生成标准报价单 XLSX…");
+    const result = await call("export_quotation", state.currentQuotation.quote_id);
+    setStatus(`报价单已导出：${result.path}${result.notice ? `；${result.notice}` : ""}`);
+    toast(result.notice || "报价单已导出到 Downloads/报价单", "ok");
+    await call("open_path", result.path);
+  } catch (error) {
+    setStatus(String(error), "error");
+    toast(String(error), "error");
+  }
+}
+
+async function showQuoteHistory(row) {
+  const customer = $("quoteCustomer").value.trim();
+  const model = row.querySelector('[data-if="model"]').value.trim();
+  if (!customer || !model) {
+    toast("请先填写客户和该行型号", "error");
+    return;
+  }
+  try {
+    const history = await call(
+      "quotation_history", customer, model, state.currentQuotation?.quote_id || null
+    );
+    $("quoteHistoryTitle").textContent = `${customer} · ${model} · 历史报价`;
+    $("quoteHistorySummary").textContent = history.length
+      ? `共找到 ${history.length} 条已保存明细；当前正在编辑的报价不计入历史。`
+      : "没有找到同一客户、同一型号的历史报价。";
+    $("quoteHistoryBody").innerHTML = history.length ? history.map((item) => `<tr>
+      <td>${esc(item.quote_date)}</td><td>${esc(item.quote_no)}</td><td>${esc(item.status)}</td>
+      <td>${esc(item.source_job_no || "—")}</td><td>${esc(item.quantity)} ${esc(item.unit)}</td>
+      <td>${esc(item.currency)}</td><td>${quoteMoney(item.unit_price)}</td><td>${quoteMoney(item.amount)}</td>
+    </tr>`).join("") : '<tr><td colspan="8" class="muted">暂无历史记录</td></tr>';
+    $("quoteHistoryModal").classList.remove("hidden");
+  } catch (error) {
+    toast(String(error), "error");
+  }
+}
+
+function closeQuoteHistory() {
+  $("quoteHistoryModal").classList.add("hidden");
+}
+
+$("btnQuoteNew").addEventListener("click", newQuotation);
+$("btnQuoteEmptyNew").addEventListener("click", newQuotation);
+$("btnQuoteSave").addEventListener("click", () => saveQuotation(false));
+$("btnQuoteExport").addEventListener("click", exportQuotation);
+$("btnQuoteAddItem").addEventListener("click", () => {
+  const draft = readQuoteForm();
+  draft.items.push({ quantity: 1, unit: "台", unit_price: 0 });
+  applyQuotationToForm(draft, true);
+  $("quoteItemRows").lastElementChild?.querySelector('[data-if="model"]')?.focus();
+});
+$("quoteList").addEventListener("click", (event) => {
+  const item = event.target.closest(".quote-list-item");
+  if (item) openQuotation(item.dataset.quoteId);
+});
+let _quoteSearchTimer = null;
+$("quoteSearch").addEventListener("input", (event) => {
+  clearTimeout(_quoteSearchTimer);
+  _quoteSearchTimer = setTimeout(() => loadQuotations(event.target.value.trim()), 180);
+});
+$("quoteEditor").addEventListener("input", (event) => {
+  if (!event.target.matches("[data-qf], [data-if]")) return;
+  setQuoteDirty(true);
+  if (event.target.dataset.if || event.target.id === "quoteTax") updateQuoteTotals();
+  if (event.target.id === "quoteNo") $("quoteEditorTitle").textContent = event.target.value || "新报价单";
+});
+$("quoteEditor").addEventListener("change", (event) => {
+  if (event.target.id === "quoteJob") {
+    loadQuoteJobDefaults(event.target.value);
+  } else if (event.target.matches("[data-qf], [data-if]")) {
+    setQuoteDirty(true);
+    updateQuoteTotals();
+  }
+});
+$("quoteItemRows").addEventListener("click", (event) => {
+  const row = event.target.closest("tr");
+  if (!row) return;
+  if (event.target.closest(".quote-item-history")) {
+    showQuoteHistory(row);
+    return;
+  }
+  if (event.target.closest(".quote-item-del")) {
+    if (document.querySelectorAll("#quoteItemRows tr").length === 1) {
+      toast("报价单至少保留一条明细", "error");
+      return;
+    }
+    row.remove();
+    document.querySelectorAll("#quoteItemRows .quote-item-no").forEach(
+      (cell, index) => { cell.textContent = index + 1; }
+    );
+    setQuoteDirty(true);
+    updateQuoteTotals();
+  }
+});
+$("quoteHistoryClose").addEventListener("click", closeQuoteHistory);
+$("quoteHistoryOk").addEventListener("click", closeQuoteHistory);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("quoteHistoryModal").classList.contains("hidden")) closeQuoteHistory();
 });
 
 // ========== 各业务表独立录入 modal ==========

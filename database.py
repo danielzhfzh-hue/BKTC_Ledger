@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SQLite persistence and safe round-trip Excel editing for BKTC Ledger."""
+"""SQLite persistence for 上海康肯销售订单管理系统."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 import core
 
 
-DATABASE_VERSION = 3
+DATABASE_VERSION = 4
 WORKBOOK_VERSION = 2
 META_SHEET = "_BKTC_META"
 HELP_SHEET = "使用说明"
@@ -47,6 +48,10 @@ class SpreadsheetFormatError(ValueError):
 
 
 class StaleImportError(RuntimeError):
+    pass
+
+
+class QuotationValidationError(ValueError):
     pass
 
 
@@ -164,12 +169,60 @@ def _create_schema(conn):
             FOREIGN KEY ("event_id") REFERENCES "_audit_event" ("event_id")
                 ON DELETE RESTRICT
         );
+        CREATE TABLE IF NOT EXISTS "quotation" (
+            "quote_id" TEXT PRIMARY KEY,
+            "quote_no" TEXT NOT NULL UNIQUE,
+            "revision_label" TEXT NOT NULL DEFAULT '1.0',
+            "quote_date" TEXT NOT NULL,
+            "issuer_name" TEXT NOT NULL DEFAULT '',
+            "issuer_address" TEXT NOT NULL DEFAULT '',
+            "issuer_contact" TEXT NOT NULL DEFAULT '',
+            "customer" TEXT NOT NULL,
+            "customer_address" TEXT NOT NULL DEFAULT '',
+            "contact" TEXT NOT NULL DEFAULT '',
+            "salesperson" TEXT NOT NULL DEFAULT '',
+            "source_job_no" TEXT NOT NULL DEFAULT '',
+            "currency" TEXT NOT NULL DEFAULT 'RMB',
+            "tax_rate" REAL NOT NULL DEFAULT 13,
+            "valid_until" TEXT NOT NULL DEFAULT '',
+            "subject" TEXT NOT NULL DEFAULT '',
+            "warranty" TEXT NOT NULL DEFAULT '',
+            "incoterm" TEXT NOT NULL DEFAULT '',
+            "ship_to" TEXT NOT NULL DEFAULT '',
+            "description" TEXT NOT NULL DEFAULT '',
+            "payment_terms" TEXT NOT NULL DEFAULT '',
+            "delivery_terms" TEXT NOT NULL DEFAULT '',
+            "status" TEXT NOT NULL DEFAULT '草稿',
+            "notes" TEXT NOT NULL DEFAULT '',
+            "created_at" TEXT NOT NULL,
+            "updated_at" TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS "quotation_item" (
+            "item_id" TEXT PRIMARY KEY,
+            "quote_id" TEXT NOT NULL,
+            "line_no" INTEGER NOT NULL,
+            "model" TEXT NOT NULL,
+            "description" TEXT NOT NULL DEFAULT '',
+            "quantity" REAL NOT NULL,
+            "unit" TEXT NOT NULL DEFAULT '台',
+            "unit_price" REAL NOT NULL,
+            "amount" REAL NOT NULL,
+            "remark" TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY ("quote_id") REFERENCES "quotation" ("quote_id")
+                ON UPDATE CASCADE ON DELETE CASCADE
+        );
         CREATE INDEX IF NOT EXISTS "idx_audit_event_created"
             ON "_audit_event" ("created_at");
         CREATE INDEX IF NOT EXISTS "idx_audit_change_event"
             ON "_audit_change" ("event_id", "change_id");
         CREATE INDEX IF NOT EXISTS "idx_audit_change_job"
             ON "_audit_change" ("job_no");
+        CREATE INDEX IF NOT EXISTS "idx_quotation_customer"
+            ON "quotation" ("customer", "quote_date");
+        CREATE INDEX IF NOT EXISTS "idx_quotation_item_quote"
+            ON "quotation_item" ("quote_id", "line_no");
+        CREATE INDEX IF NOT EXISTS "idx_quotation_item_model"
+            ON "quotation_item" ("model");
         CREATE TRIGGER IF NOT EXISTS "audit_event_no_update"
             BEFORE UPDATE ON "_audit_event"
             BEGIN SELECT RAISE(ABORT, 'audit events are append-only'); END;
@@ -653,6 +706,472 @@ def get_database_info(path):
         conn.close()
 
 
+QUOTATION_FIELDS = (
+    "quote_no", "revision_label", "quote_date", "issuer_name", "issuer_address",
+    "issuer_contact", "customer", "customer_address", "contact", "salesperson",
+    "source_job_no", "currency", "tax_rate", "valid_until", "subject",
+    "warranty", "incoterm", "ship_to", "description", "payment_terms",
+    "delivery_terms", "status", "notes",
+)
+QUOTATION_ITEM_FIELDS = (
+    "line_no", "model", "description", "quantity", "unit", "unit_price",
+    "amount", "remark",
+)
+QUOTATION_FIELD_LABELS = {
+    "quote_no": "报价单号", "revision_label": "版本", "quote_date": "报价日期",
+    "issuer_name": "报价方", "issuer_address": "报价方地址",
+    "issuer_contact": "报价方联系方式", "customer": "客户",
+    "customer_address": "客户地址", "contact": "客户联系人",
+    "salesperson": "担当者", "source_job_no": "来源 JOB", "currency": "币种",
+    "tax_rate": "税率%", "valid_until": "有效期至", "subject": "报价主题",
+    "warranty": "质保条款", "incoterm": "贸易条款", "ship_to": "交货地点",
+    "description": "说明", "payment_terms": "付款条件",
+    "delivery_terms": "交期", "status": "状态", "notes": "备注",
+}
+QUOTATION_ITEM_LABELS = {
+    "line_no": "序号", "model": "型号/项目", "description": "项目说明",
+    "quantity": "数量", "unit": "单位", "unit_price": "未税单价",
+    "amount": "未税金额", "remark": "明细备注",
+}
+
+
+def _quote_text(value):
+    return "" if value is None else str(value).strip()
+
+
+def _quote_decimal(value, label, *, minimum=None):
+    try:
+        result = Decimal(str(value if value not in (None, "") else 0))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise QuotationValidationError(f"{label}必须是数字") from exc
+    if not result.is_finite():
+        raise QuotationValidationError(f"{label}必须是有限数字")
+    if minimum is not None and result < Decimal(str(minimum)):
+        raise QuotationValidationError(f"{label}不能小于 {minimum}")
+    return result
+
+
+def _validate_quote_date(value, label, required=False):
+    value = _quote_text(value)
+    if not value and not required:
+        return ""
+    if not value:
+        raise QuotationValidationError(f"{label}不能为空")
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise QuotationValidationError(f"{label}必须为 YYYY-MM-DD") from exc
+    return value
+
+
+def _suggest_quotation_number_from_connection(conn, quote_date=None):
+    quote_date = _validate_quote_date(
+        quote_date or date.today().isoformat(), "报价日期", required=True
+    )
+    day = date.fromisoformat(quote_date)
+    base = f"{day:%y}SHMT{day:%m%d}"
+    existing = {
+        row[0] for row in conn.execute(
+            'SELECT "quote_no" FROM "quotation" WHERE "quote_no" LIKE ?',
+            (base + "%",),
+        )
+    }
+    if base not in existing:
+        return base
+    sequence = 2
+    while f"{base}-{sequence:02d}" in existing:
+        sequence += 1
+    return f"{base}-{sequence:02d}"
+
+
+def suggest_quotation_number(path, quote_date=None):
+    conn = _connect(path)
+    try:
+        return _suggest_quotation_number_from_connection(conn, quote_date)
+    finally:
+        conn.close()
+
+
+def _normalize_quotation(conn, quotation):
+    quotation = quotation if isinstance(quotation, dict) else {}
+    quote_id = _quote_text(quotation.get("quote_id")) or "quote-" + uuid.uuid4().hex
+    quote_date = _validate_quote_date(
+        quotation.get("quote_date") or date.today().isoformat(),
+        "报价日期", required=True,
+    )
+    customer = _quote_text(quotation.get("customer"))
+    if not customer:
+        raise QuotationValidationError("客户不能为空")
+    valid_until = _validate_quote_date(quotation.get("valid_until"), "有效期")
+    tax_rate = _quote_decimal(quotation.get("tax_rate", 13), "税率", minimum=0)
+    if tax_rate > 100:
+        raise QuotationValidationError("税率不能大于 100")
+    raw_items = quotation.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise QuotationValidationError("至少需要一条报价明细")
+    items = []
+    seen_ids = set()
+    for index, raw in enumerate(raw_items, 1):
+        raw = raw if isinstance(raw, dict) else {}
+        model = _quote_text(raw.get("model"))
+        if not model:
+            raise QuotationValidationError(f"第 {index} 条明细缺少型号/项目")
+        quantity = _quote_decimal(raw.get("quantity"), f"第 {index} 条数量")
+        if quantity <= 0:
+            raise QuotationValidationError(f"第 {index} 条数量必须大于 0")
+        unit_price = _quote_decimal(
+            raw.get("unit_price"), f"第 {index} 条未税单价", minimum=0
+        )
+        item_id = _quote_text(raw.get("item_id"))
+        if not item_id or item_id in seen_ids:
+            item_id = "quote-item-" + uuid.uuid4().hex
+        seen_ids.add(item_id)
+        amount = (quantity * unit_price).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        items.append({
+            "item_id": item_id,
+            "line_no": index,
+            "model": model,
+            "description": _quote_text(raw.get("description")),
+            "quantity": float(quantity),
+            "unit": _quote_text(raw.get("unit")) or "台",
+            "unit_price": float(unit_price),
+            "amount": float(amount),
+            "remark": _quote_text(raw.get("remark")),
+        })
+    subject = _quote_text(quotation.get("subject"))
+    if not subject:
+        subject = " / ".join(dict.fromkeys(item["model"] for item in items))
+    result = {
+        "quote_id": quote_id,
+        "quote_no": _quote_text(quotation.get("quote_no"))
+                    or _suggest_quotation_number_from_connection(conn, quote_date),
+        "revision_label": _quote_text(quotation.get("revision_label")) or "1.0",
+        "quote_date": quote_date,
+        "issuer_name": _quote_text(quotation.get("issuer_name")),
+        "issuer_address": _quote_text(quotation.get("issuer_address")),
+        "issuer_contact": _quote_text(quotation.get("issuer_contact")),
+        "customer": customer,
+        "customer_address": _quote_text(quotation.get("customer_address")),
+        "contact": _quote_text(quotation.get("contact")),
+        "salesperson": _quote_text(quotation.get("salesperson")),
+        "source_job_no": _quote_text(quotation.get("source_job_no")),
+        "currency": _quote_text(quotation.get("currency")) or "RMB",
+        "tax_rate": float(tax_rate),
+        "valid_until": valid_until,
+        "subject": subject,
+        "warranty": _quote_text(quotation.get("warranty")),
+        "incoterm": _quote_text(quotation.get("incoterm")),
+        "ship_to": _quote_text(quotation.get("ship_to")),
+        "description": _quote_text(quotation.get("description")),
+        "payment_terms": _quote_text(quotation.get("payment_terms")),
+        "delivery_terms": _quote_text(quotation.get("delivery_terms")),
+        "status": _quote_text(quotation.get("status")) or "草稿",
+        "notes": _quote_text(quotation.get("notes")),
+        "items": items,
+    }
+    return result
+
+
+def _quotation_from_connection(conn, quote_id):
+    row = conn.execute(
+        'SELECT * FROM "quotation" WHERE "quote_id" = ?', (quote_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    result = {field: row[field] for field in ("quote_id", *QUOTATION_FIELDS)}
+    result["created_at"] = row["created_at"]
+    result["updated_at"] = row["updated_at"]
+    result["items"] = [
+        {field: item[field] for field in ("item_id", *QUOTATION_ITEM_FIELDS)}
+        for item in conn.execute(
+            'SELECT * FROM "quotation_item" WHERE "quote_id" = ? '
+            'ORDER BY "line_no", "item_id"', (quote_id,),
+        )
+    ]
+    subtotal = sum(Decimal(str(item["amount"] or 0)) for item in result["items"])
+    subtotal = subtotal.quantize(Decimal("0.01"), ROUND_HALF_UP)
+    tax_total = (subtotal * Decimal(str(result["tax_rate"] or 0)) / 100).quantize(
+        Decimal("0.01"), ROUND_HALF_UP
+    )
+    result["subtotal"] = float(subtotal)
+    result["tax_total"] = float(tax_total)
+    result["grand_total"] = float(subtotal + tax_total)
+    return result
+
+
+def get_quotation(path, quote_id):
+    conn = _connect(path)
+    try:
+        result = _quotation_from_connection(conn, quote_id)
+        if result is None:
+            raise KeyError(f"报价单不存在：{quote_id}")
+        return result
+    finally:
+        conn.close()
+
+
+def list_quotations(path, search=""):
+    conn = _connect(path)
+    try:
+        params = []
+        where = ""
+        if _quote_text(search):
+            where = (
+                'WHERE q."quote_no" LIKE ? OR q."customer" LIKE ? '
+                'OR q."subject" LIKE ? OR q."source_job_no" LIKE ?'
+            )
+            needle = "%" + _quote_text(search) + "%"
+            params = [needle] * 4
+        ids = [row[0] for row in conn.execute(
+            f'SELECT q."quote_id" FROM "quotation" q {where} '
+            'ORDER BY q."quote_date" DESC, q."updated_at" DESC, q."quote_no" DESC',
+            params,
+        )]
+        result = []
+        for quote_id in ids:
+            quote = _quotation_from_connection(conn, quote_id)
+            result.append({
+                "quote_id": quote["quote_id"], "quote_no": quote["quote_no"],
+                "quote_date": quote["quote_date"], "customer": quote["customer"],
+                "subject": quote["subject"], "source_job_no": quote["source_job_no"],
+                "currency": quote["currency"], "status": quote["status"],
+                "models": " / ".join(dict.fromkeys(
+                    item["model"] for item in quote["items"] if item["model"]
+                )),
+                "item_count": len(quote["items"]), "subtotal": quote["subtotal"],
+                "grand_total": quote["grand_total"], "updated_at": quote["updated_at"],
+            })
+        return result
+    finally:
+        conn.close()
+
+
+def quotation_history(path, customer, model, exclude_quote_id=None):
+    customer = _quote_text(customer)
+    model = _quote_text(model)
+    if not customer or not model:
+        return []
+    conn = _connect(path)
+    try:
+        sql = (
+            'SELECT q."quote_id", q."quote_no", q."revision_label", q."quote_date", '
+            'q."customer", q."currency", q."tax_rate", q."status", q."source_job_no", '
+            'i."item_id", i."model", i."description", i."quantity", i."unit", '
+            'i."unit_price", i."amount", i."remark" '
+            'FROM "quotation" q JOIN "quotation_item" i ON i."quote_id" = q."quote_id" '
+            'WHERE LOWER(TRIM(q."customer")) = LOWER(TRIM(?)) '
+            'AND LOWER(TRIM(i."model")) = LOWER(TRIM(?))'
+        )
+        params = [customer, model]
+        if exclude_quote_id:
+            sql += ' AND q."quote_id" <> ?'
+            params.append(_quote_text(exclude_quote_id))
+        sql += ' ORDER BY q."quote_date" DESC, q."updated_at" DESC, i."line_no"'
+        return [dict(row) for row in conn.execute(sql, params)]
+    finally:
+        conn.close()
+
+
+def _quotation_audit_snapshot(quote):
+    return {
+        QUOTATION_FIELD_LABELS[field]: quote.get(field)
+        for field in QUOTATION_FIELDS
+    }
+
+
+def _quotation_item_audit_snapshot(item):
+    return {
+        QUOTATION_ITEM_LABELS[field]: item.get(field)
+        for field in QUOTATION_ITEM_FIELDS
+    }
+
+
+def _quotation_audit_changes(old, new):
+    changes = []
+    job_no = new.get("source_job_no") or (old or {}).get("source_job_no") or ""
+    quote_id = new["quote_id"]
+    if old is None:
+        changes.append({
+            "table_name": "报价单", "record_id": quote_id, "job_no": job_no,
+            "operation": "insert", "field_name": "", "old_value": None,
+            "new_value": _quotation_audit_snapshot(new), "origin": "user",
+        })
+    else:
+        for field in QUOTATION_FIELDS:
+            if old.get(field) != new.get(field):
+                changes.append({
+                    "table_name": "报价单", "record_id": quote_id, "job_no": job_no,
+                    "operation": "update", "field_name": QUOTATION_FIELD_LABELS[field],
+                    "old_value": old.get(field), "new_value": new.get(field),
+                    "origin": "user",
+                })
+    old_items = {item["item_id"]: item for item in (old or {}).get("items", [])}
+    new_items = {item["item_id"]: item for item in new.get("items", [])}
+    for item_id in sorted(set(old_items) | set(new_items)):
+        before, after = old_items.get(item_id), new_items.get(item_id)
+        if before is None:
+            changes.append({
+                "table_name": "报价明细", "record_id": item_id, "job_no": job_no,
+                "operation": "insert", "field_name": "", "old_value": None,
+                "new_value": _quotation_item_audit_snapshot(after), "origin": "user",
+            })
+        elif after is None:
+            changes.append({
+                "table_name": "报价明细", "record_id": item_id, "job_no": job_no,
+                "operation": "delete", "field_name": "",
+                "old_value": _quotation_item_audit_snapshot(before), "new_value": None,
+                "origin": "user",
+            })
+        else:
+            for field in QUOTATION_ITEM_FIELDS:
+                if before.get(field) != after.get(field):
+                    changes.append({
+                        "table_name": "报价明细", "record_id": item_id,
+                        "job_no": job_no, "operation": "update",
+                        "field_name": QUOTATION_ITEM_LABELS[field],
+                        "old_value": before.get(field), "new_value": after.get(field),
+                        "origin": "user",
+                    })
+    return changes
+
+
+def save_quotation(path, quotation, *, expected_revision=None, audit_context=None,
+                   backup=True):
+    path = os.path.abspath(os.fspath(path))
+    early_revision = get_revision(path) if os.path.exists(path) else 0
+    if expected_revision is not None and early_revision != expected_revision:
+        raise StaleImportError(
+            f"数据库已从修订 {expected_revision} 更新到 {early_revision}，请重新加载后再保存报价"
+        )
+    backup_path = _backup_database(path) if backup else None
+    conn = _connect(path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current_revision = int(_meta(conn, "revision", "0") or 0)
+        if expected_revision is not None and current_revision != expected_revision:
+            raise StaleImportError(
+                f"数据库已从修订 {expected_revision} 更新到 {current_revision}，请重新加载后再保存报价"
+            )
+        prepared = _normalize_quotation(conn, quotation)
+        old = _quotation_from_connection(conn, prepared["quote_id"])
+        duplicate = conn.execute(
+            'SELECT "quote_id" FROM "quotation" WHERE "quote_no" = ? AND "quote_id" <> ?',
+            (prepared["quote_no"], prepared["quote_id"]),
+        ).fetchone()
+        if duplicate:
+            raise QuotationValidationError(f"报价单号已存在：{prepared['quote_no']}")
+        now = datetime.now().isoformat(timespec="seconds")
+        prepared["created_at"] = old["created_at"] if old else now
+        prepared["updated_at"] = now
+        changes = _quotation_audit_changes(old, prepared)
+        header_columns = ["quote_id", *QUOTATION_FIELDS, "created_at", "updated_at"]
+        updates = [field for field in header_columns if field != "quote_id"]
+        conn.execute(
+            f'INSERT INTO "quotation" ({", ".join(_q(x) for x in header_columns)}) '
+            f'VALUES ({", ".join("?" for _ in header_columns)}) '
+            f'ON CONFLICT("quote_id") DO UPDATE SET '
+            + ", ".join(f'{_q(field)}=excluded.{_q(field)}' for field in updates),
+            [prepared[field] for field in header_columns],
+        )
+        conn.execute('DELETE FROM "quotation_item" WHERE "quote_id" = ?',
+                     (prepared["quote_id"],))
+        item_columns = ["item_id", "quote_id", *QUOTATION_ITEM_FIELDS]
+        item_sql = (
+            f'INSERT INTO "quotation_item" ({", ".join(_q(x) for x in item_columns)}) '
+            f'VALUES ({", ".join("?" for _ in item_columns)})'
+        )
+        for item in prepared["items"]:
+            values = [item["item_id"], prepared["quote_id"]]
+            values.extend(item[field] for field in QUOTATION_ITEM_FIELDS)
+            conn.execute(item_sql, values)
+        foreign_key_issues = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_key_issues:
+            raise sqlite3.IntegrityError(f"外键检查失败：{foreign_key_issues[:3]}")
+        revision = current_revision + 1
+        _set_meta(conn, "revision", revision)
+        _set_meta(conn, "last_saved_at", now)
+        summary = {"报价单": 1, "报价明细": len(prepared["items"])}
+        conn.execute(
+            "INSERT INTO _change_log(revision, created_at, reason, summary_json) "
+            "VALUES(?, ?, ?, ?)",
+            (revision, now, "quotation_save", json.dumps(summary, ensure_ascii=False)),
+        )
+        audit_event_id = None
+        if changes:
+            audit_event_id, _ = _append_audit_event(
+                conn, revision, now, "quotation_save", changes, audit_context
+            )
+        conn.commit()
+        saved = _quotation_from_connection(conn, prepared["quote_id"])
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        raise QuotationValidationError(f"报价数据关系检查失败：{exc}") from exc
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {
+        "ok": True, "revision": revision, "backup": backup_path,
+        "audit_event_id": audit_event_id,
+        "audit_change_count": len(changes) if audit_event_id else 0,
+        "quotation": saved,
+    }
+
+
+def quotation_defaults(path, job_no):
+    job_no = _quote_text(job_no)
+    data = core.derive(load_database(path))
+    contract = next(
+        (row for row in data["合同订单"] if _quote_text(row.get("JOB No")) == job_no),
+        None,
+    )
+    if contract is None:
+        raise QuotationValidationError(f"未找到订单：{job_no}")
+    grouped = {}
+    for device in data["设备台账"]:
+        if _quote_text(device.get("JOB No")) != job_no:
+            continue
+        model = _quote_text(device.get("设备型号"))
+        if not model:
+            continue
+        price = float(device.get("未税单价") or 0)
+        key = (model, price)
+        grouped[key] = grouped.get(key, 0) + 1
+    items = [{
+        "model": model, "description": "", "quantity": quantity,
+        "unit": "台", "unit_price": price,
+    } for (model, price), quantity in grouped.items()]
+    if not items:
+        contract_models = [
+            value.strip() for value in re.split(
+                r"[;；、\n]+", _quote_text(contract.get("设备型号"))
+            ) if value.strip()
+        ]
+        for model in dict.fromkeys(contract_models):
+            items.append({
+                "model": model, "description": "", "quantity": 1,
+                "unit": "台", "unit_price": 0,
+            })
+    subject = " / ".join(dict.fromkeys(item["model"] for item in items))
+    return {
+        "quote_date": date.today().isoformat(),
+        "quote_no": suggest_quotation_number(path),
+        "revision_label": "1.0",
+        "customer": _quote_text(contract.get("客户")),
+        "salesperson": _quote_text(contract.get("担当者")),
+        "source_job_no": job_no,
+        "currency": _quote_text(contract.get("币种")) or "RMB",
+        "subject": subject or _quote_text(contract.get("设备型号")),
+        "ship_to": _quote_text(contract.get("送货地点")),
+        "description": _quote_text(contract.get("订单内容")),
+        "payment_terms": _quote_text(contract.get("付款条件")),
+        "tax_rate": 13,
+        "status": "草稿",
+        "items": items,
+    }
+
+
 def _decoded_json(value):
     try:
         return json.loads(value)
@@ -871,13 +1390,13 @@ def export_editable_workbook(database_path, workbook_path):
     help_ws = wb.active
     help_ws.title = HELP_SHEET
     help_ws.sheet_view.showGridLines = False
-    help_ws["A1"] = "BKTC 订单数据 · 外部编辑副本"
+    help_ws["A1"] = "上海康肯销售订单管理系统 · 外部编辑副本"
     help_ws["A1"].font = Font(name="Noto Sans SC", size=20, bold=True, color="004494")
     instructions = [
         "使用方法",
         "1. 在六个业务工作表中修改数据；可新增整行，也可删除整行。",
         "2. 不要重命名工作表或表头；隐藏的 _记录ID 列用于可靠识别原记录。",
-        "3. 自动计算字段未导出，重新导入后由 BKTC Ledger 统一计算。",
+        "3. 自动计算字段未导出，重新导入后由上海康肯销售订单管理系统统一计算。",
         "4. 回到应用点击“导入变更”，先核对差异，再勾选二次确认后写入。",
         "5. 若数据库在导出后已被保存过，旧副本会被拒绝，请重新导出，避免覆盖新数据。",
         "安全保障：导入使用事务、外键校验和写入前数据库备份。",
@@ -969,7 +1488,7 @@ def export_editable_workbook(database_path, workbook_path):
 
 def _workbook_metadata(wb):
     if META_SHEET not in wb.sheetnames:
-        raise SpreadsheetFormatError("这不是 BKTC Ledger 导出的可编辑工作簿（缺少元数据）")
+        raise SpreadsheetFormatError("这不是上海康肯销售订单管理系统导出的可编辑工作簿（缺少元数据）")
     ws = wb[META_SHEET]
     return {str(row[0].value): row[1].value for row in ws.iter_rows(min_col=1, max_col=2)
             if row[0].value not in (None, "")}

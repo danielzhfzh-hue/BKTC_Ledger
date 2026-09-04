@@ -28,5 +28,5 @@ if errorlevel 1 goto :failed
 exit /b 0
 
 :failed
-echo BKTC Ledger failed to start. See the error above.
+echo Shanghai Kanken Sales Order Management System failed to start. See the error above.
 pause

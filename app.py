@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 APP_DISPLAY_NAME = "上海康肯销售订单管理系统"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"

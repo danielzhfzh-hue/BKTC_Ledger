@@ -145,6 +145,8 @@ button.primary { color: #fff; background: var(--brand); border-color: var(--bran
 button.primary:hover { background: var(--brand-deep); border-color: var(--brand-deep); }
 button.accent { color: #063c3d; background: var(--teal); border-color: var(--teal); }
 button.accent:hover { color: #fff; background: var(--teal-deep); border-color: var(--teal-deep); }
+button.danger { color: #fff; background: var(--danger); border-color: var(--danger); }
+button.danger:hover { background: #8d1c26; border-color: #8d1c26; }
 
 nav#tabs {
   min-height: 42px;
@@ -262,7 +264,7 @@ th {
   letter-spacing: .02em;
   white-space: nowrap;
 }
-td input, td select {
+td input, td select, td textarea {
   width: 100%;
   min-width: 72px;
   min-height: 30px;
@@ -273,9 +275,15 @@ td input, td select {
   outline: 0;
   font: inherit;
 }
-td input:focus, td select:focus { background: #effbfa; box-shadow: inset 0 0 0 2px var(--teal); }
+td textarea { display: block; min-height: 40px; padding: 5px 7px; resize: vertical; white-space: pre-wrap; overflow-wrap: anywhere; }
+td input:focus, td select:focus, td textarea:focus { background: #effbfa; box-shadow: inset 0 0 0 2px var(--teal); }
+td.grid-wrap-cell { white-space: normal; overflow-wrap: anywhere; }
+td.grid-wrap-cell input, td.grid-wrap-cell textarea { white-space: pre-wrap; overflow-wrap: anywhere; }
+td.grid-nowrap-cell, td.grid-nowrap-cell input, td.grid-nowrap-cell select { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 td.auto { color: #60707d; background: #f3f6f8; font-size: 11px; }
 td.auto span { display: block; min-width: 72px; padding: 6px 7px; }
+td.auto.grid-wrap-cell span { white-space: pre-wrap; overflow-wrap: anywhere; }
+td.auto.grid-nowrap-cell span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 td.coverage-cell { min-width: 132px; padding: 3px 5px; background: #fbfdff; }
 .coverage-picker {
   width: 100%; min-height: 25px; padding: 3px 7px; color: var(--brand);
@@ -298,6 +306,10 @@ th.col-h .col-h-name { display: inline; }
 th.col-h .sort-ind { display: inline-block; min-width: 12px; margin-left: 3px; color: #7de1d8; font-size: 11px; }
 th.col-h:hover { background: #0755a4; }
 th.col-h.filt-on { background: var(--teal-deep); }
+th.col-h { position: sticky; }
+.col-resize-handle { position: absolute; top: 0; right: -3px; z-index: 4; width: 7px; height: 100%; cursor: col-resize; }
+.col-resize-handle:hover, body.resizing-grid-column .col-resize-handle { background: var(--teal); }
+body.resizing-grid-column { cursor: col-resize; user-select: none; }
 .col-filt {
   display: inline-block;
   min-width: 22px;

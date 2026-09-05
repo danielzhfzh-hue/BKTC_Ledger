@@ -25,7 +25,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 import core
 
 
-DATABASE_VERSION = 4
+DATABASE_VERSION = 5
 WORKBOOK_VERSION = 2
 META_SHEET = "_BKTC_META"
 HELP_SHEET = "使用说明"
@@ -177,6 +177,7 @@ def _create_schema(conn):
             "issuer_name" TEXT NOT NULL DEFAULT '',
             "issuer_address" TEXT NOT NULL DEFAULT '',
             "issuer_contact" TEXT NOT NULL DEFAULT '',
+            "issuer_key" TEXT NOT NULL DEFAULT '',
             "customer" TEXT NOT NULL,
             "customer_address" TEXT NOT NULL DEFAULT '',
             "contact" TEXT NOT NULL DEFAULT '',
@@ -191,6 +192,7 @@ def _create_schema(conn):
             "ship_to" TEXT NOT NULL DEFAULT '',
             "description" TEXT NOT NULL DEFAULT '',
             "payment_terms" TEXT NOT NULL DEFAULT '',
+            "payment_language" TEXT NOT NULL DEFAULT 'zh',
             "delivery_terms" TEXT NOT NULL DEFAULT '',
             "status" TEXT NOT NULL DEFAULT '草稿',
             "notes" TEXT NOT NULL DEFAULT '',
@@ -211,6 +213,27 @@ def _create_schema(conn):
             FOREIGN KEY ("quote_id") REFERENCES "quotation" ("quote_id")
                 ON UPDATE CASCADE ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS "quotation_payment_item" (
+            "payment_item_id" TEXT PRIMARY KEY,
+            "quote_id" TEXT NOT NULL,
+            "line_no" INTEGER NOT NULL,
+            "kind" TEXT NOT NULL DEFAULT '',
+            "ratio" REAL NOT NULL DEFAULT 0,
+            "days" INTEGER NOT NULL DEFAULT 0,
+            "trigger" TEXT NOT NULL DEFAULT '',
+            "description_zh" TEXT NOT NULL DEFAULT '',
+            "description_en" TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY ("quote_id") REFERENCES "quotation" ("quote_id")
+                ON UPDATE CASCADE ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS "quotation_option" (
+            "option_id" TEXT PRIMARY KEY,
+            "kind" TEXT NOT NULL,
+            "value" TEXT NOT NULL,
+            "language" TEXT NOT NULL DEFAULT 'zh',
+            "updated_at" TEXT NOT NULL,
+            UNIQUE ("kind", "value", "language")
+        );
         CREATE INDEX IF NOT EXISTS "idx_audit_event_created"
             ON "_audit_event" ("created_at");
         CREATE INDEX IF NOT EXISTS "idx_audit_change_event"
@@ -223,6 +246,10 @@ def _create_schema(conn):
             ON "quotation_item" ("quote_id", "line_no");
         CREATE INDEX IF NOT EXISTS "idx_quotation_item_model"
             ON "quotation_item" ("model");
+        CREATE INDEX IF NOT EXISTS "idx_quotation_payment_quote"
+            ON "quotation_payment_item" ("quote_id", "line_no");
+        CREATE INDEX IF NOT EXISTS "idx_quotation_option_recent"
+            ON "quotation_option" ("kind", "language", "updated_at");
         CREATE TRIGGER IF NOT EXISTS "audit_event_no_update"
             BEFORE UPDATE ON "_audit_event"
             BEGIN SELECT RAISE(ABORT, 'audit events are append-only'); END;
@@ -237,6 +264,16 @@ def _create_schema(conn):
             BEGIN SELECT RAISE(ABORT, 'audit changes are append-only'); END;
         """
     )
+    # v4 databases already contain quotation, so add v5 fields explicitly.
+    quotation_columns = {
+        row[1] for row in conn.execute('PRAGMA table_info("quotation")')
+    }
+    for field, definition in (
+        ("issuer_key", "TEXT NOT NULL DEFAULT ''"),
+        ("payment_language", "TEXT NOT NULL DEFAULT 'zh'"),
+    ):
+        if field not in quotation_columns:
+            conn.execute(f'ALTER TABLE "quotation" ADD COLUMN "{field}" {definition}')
     for table in core.TABLES:
         columns = [f'{_q("记录ID")} TEXT PRIMARY KEY']
         for field, field_type, *_ in core.SCHEMA[table]:
@@ -708,30 +745,65 @@ def get_database_info(path):
 
 QUOTATION_FIELDS = (
     "quote_no", "revision_label", "quote_date", "issuer_name", "issuer_address",
-    "issuer_contact", "customer", "customer_address", "contact", "salesperson",
+    "issuer_contact", "issuer_key", "customer", "customer_address", "contact", "salesperson",
     "source_job_no", "currency", "tax_rate", "valid_until", "subject",
-    "warranty", "incoterm", "ship_to", "description", "payment_terms",
+    "warranty", "incoterm", "ship_to", "description", "payment_terms", "payment_language",
     "delivery_terms", "status", "notes",
 )
 QUOTATION_ITEM_FIELDS = (
     "line_no", "model", "description", "quantity", "unit", "unit_price",
     "amount", "remark",
 )
+QUOTATION_PAYMENT_FIELDS = (
+    "line_no", "kind", "ratio", "days", "trigger", "description_zh", "description_en",
+)
+ISSUER_PRESETS = {
+    "beijing": {
+        "key": "beijing",
+        "label": "北京康肯环境保护设备有限公司",
+        "name": "Beijing Kanken Environmental Protection Equipment Co.,Ltd",
+        "address": "Rm No.A-1501, No.8,building No.129,eight Li Zhuang,Chaoyang District,Beijing,10025,China",
+        "contact": "Tel : 021-61253711   Fax:021-61253710",
+    },
+    "japan": {
+        "key": "japan",
+        "label": "KANKEN TECHNO（日本）",
+        "name": "KANKEN TECHNO CO.,LTD",
+        "address": "30-2 Ota Kotari, Nagokakyo,Kyoto,Japan",
+        "contact": "Tel : +81-75-955-8826   Fax:+81-75-955-8915",
+    },
+}
+DEFAULT_WARRANTY = "设备验收后12个月或设备到货后15个月"
+DEFAULT_INCOTERMS = ("CIP", "CIF", "DAP", "FOB", "FCA", "DDP")
+PAYMENT_KIND_EN = {
+    "预付款": "Advance payment", "发货款": "Shipment payment", "到货款": "Arrival payment",
+    "验收款": "Acceptance payment", "质保款": "Warranty payment", "全额": "Full payment",
+}
+PAYMENT_TRIGGER_EN = {
+    "开票后": "after invoicing", "货到签收后": "after delivery and receipt",
+    "验收合格后": "after acceptance", "验收后": "after acceptance",
+    "质保期满后": "after the warranty period expires", "合同生效后": "after the contract takes effect",
+    "月结次月月底": "at the end of the month following the monthly settlement month",
+}
 QUOTATION_FIELD_LABELS = {
     "quote_no": "报价单号", "revision_label": "版本", "quote_date": "报价日期",
     "issuer_name": "报价方", "issuer_address": "报价方地址",
-    "issuer_contact": "报价方联系方式", "customer": "客户",
+    "issuer_contact": "报价方联系方式", "issuer_key": "报价主体", "customer": "客户",
     "customer_address": "客户地址", "contact": "客户联系人",
     "salesperson": "担当者", "source_job_no": "来源 JOB", "currency": "币种",
     "tax_rate": "税率%", "valid_until": "有效期至", "subject": "报价主题",
     "warranty": "质保条款", "incoterm": "贸易条款", "ship_to": "交货地点",
-    "description": "说明", "payment_terms": "付款条件",
+    "description": "说明", "payment_terms": "付款条件", "payment_language": "付款条件语言",
     "delivery_terms": "交期", "status": "状态", "notes": "备注",
 }
 QUOTATION_ITEM_LABELS = {
     "line_no": "序号", "model": "型号/项目", "description": "项目说明",
     "quantity": "数量", "unit": "单位", "unit_price": "未税单价",
     "amount": "未税金额", "remark": "明细备注",
+}
+QUOTATION_PAYMENT_LABELS = {
+    "line_no": "序号", "kind": "款类", "ratio": "比例%", "days": "账期天数",
+    "trigger": "触发条件", "description_zh": "中文说明", "description_en": "英文说明",
 }
 
 
@@ -764,6 +836,44 @@ def _validate_quote_date(value, label, required=False):
     return value
 
 
+def _payment_description_en(kind, ratio, days, trigger):
+    kind_text = PAYMENT_KIND_EN.get(kind, kind or "Payment")
+    trigger_text = PAYMENT_TRIGGER_EN.get(trigger, trigger or "as agreed")
+    ratio_text = f"{ratio:g}%" if ratio is not None else ""
+    days = int(days or 0)
+    due_text = f"within {days} days " if days else ""
+    return " ".join(x for x in (ratio_text, kind_text, due_text + trigger_text) if x).strip()
+
+
+def _normalize_payment_items(raw_items):
+    if not isinstance(raw_items, list):
+        return []
+    result = []
+    seen = set()
+    for index, raw in enumerate(raw_items, 1):
+        raw = raw if isinstance(raw, dict) else {}
+        kind = _quote_text(raw.get("kind") or raw.get("款类"))
+        if not kind:
+            continue
+        ratio = _quote_decimal(raw.get("ratio", raw.get("比例%", 0)), f"第 {index} 条付款比例", minimum=0)
+        days = _quote_decimal(raw.get("days", raw.get("账期天数", 0)), f"第 {index} 条账期天数", minimum=0)
+        if days != days.to_integral_value():
+            raise QuotationValidationError(f"第 {index} 条账期天数必须是整数")
+        trigger = _quote_text(raw.get("trigger") or raw.get("触发条件"))
+        desc_zh = _quote_text(raw.get("description_zh") or raw.get("desc") or raw.get("说明"))
+        desc_en = _quote_text(raw.get("description_en")) or _payment_description_en(kind, float(ratio), int(days), trigger)
+        payment_id = _quote_text(raw.get("payment_item_id"))
+        if not payment_id or payment_id in seen:
+            payment_id = "quote-payment-" + uuid.uuid4().hex
+        seen.add(payment_id)
+        result.append({
+            "payment_item_id": payment_id, "line_no": index, "kind": kind,
+            "ratio": float(ratio), "days": int(days), "trigger": trigger,
+            "description_zh": desc_zh, "description_en": desc_en,
+        })
+    return result
+
+
 def _suggest_quotation_number_from_connection(conn, quote_date=None):
     quote_date = _validate_quote_date(
         quote_date or date.today().isoformat(), "报价日期", required=True
@@ -794,6 +904,7 @@ def suggest_quotation_number(path, quote_date=None):
 
 def _normalize_quotation(conn, quotation):
     quotation = quotation if isinstance(quotation, dict) else {}
+    is_new = not _quote_text(quotation.get("quote_id"))
     quote_id = _quote_text(quotation.get("quote_id")) or "quote-" + uuid.uuid4().hex
     quote_date = _validate_quote_date(
         quotation.get("quote_date") or date.today().isoformat(),
@@ -841,15 +952,22 @@ def _normalize_quotation(conn, quotation):
     subject = _quote_text(quotation.get("subject"))
     if not subject:
         subject = " / ".join(dict.fromkeys(item["model"] for item in items))
+    issuer_key = _quote_text(quotation.get("issuer_key"))
+    issuer = ISSUER_PRESETS.get(issuer_key)
+    payment_items = _normalize_payment_items(quotation.get("payment_items"))
+    payment_language = _quote_text(quotation.get("payment_language")) or "zh"
+    if payment_language not in {"zh", "en"}:
+        payment_language = "zh"
     result = {
         "quote_id": quote_id,
         "quote_no": _quote_text(quotation.get("quote_no"))
                     or _suggest_quotation_number_from_connection(conn, quote_date),
         "revision_label": _quote_text(quotation.get("revision_label")) or "1.0",
         "quote_date": quote_date,
-        "issuer_name": _quote_text(quotation.get("issuer_name")),
-        "issuer_address": _quote_text(quotation.get("issuer_address")),
-        "issuer_contact": _quote_text(quotation.get("issuer_contact")),
+        "issuer_name": _quote_text(quotation.get("issuer_name")) or (issuer or {}).get("name", ""),
+        "issuer_address": _quote_text(quotation.get("issuer_address")) or (issuer or {}).get("address", ""),
+        "issuer_contact": _quote_text(quotation.get("issuer_contact")) or (issuer or {}).get("contact", ""),
+        "issuer_key": issuer_key,
         "customer": customer,
         "customer_address": _quote_text(quotation.get("customer_address")),
         "contact": _quote_text(quotation.get("contact")),
@@ -859,15 +977,17 @@ def _normalize_quotation(conn, quotation):
         "tax_rate": float(tax_rate),
         "valid_until": valid_until,
         "subject": subject,
-        "warranty": _quote_text(quotation.get("warranty")),
-        "incoterm": _quote_text(quotation.get("incoterm")),
+        "warranty": _quote_text(quotation.get("warranty")) or (DEFAULT_WARRANTY if is_new else ""),
+        "incoterm": _quote_text(quotation.get("incoterm")) or (DEFAULT_INCOTERMS[0] if is_new else ""),
         "ship_to": _quote_text(quotation.get("ship_to")),
         "description": _quote_text(quotation.get("description")),
         "payment_terms": _quote_text(quotation.get("payment_terms")),
+        "payment_language": payment_language,
         "delivery_terms": _quote_text(quotation.get("delivery_terms")),
         "status": _quote_text(quotation.get("status")) or "草稿",
         "notes": _quote_text(quotation.get("notes")),
         "items": items,
+        "payment_items": payment_items,
     }
     return result
 
@@ -886,6 +1006,13 @@ def _quotation_from_connection(conn, quote_id):
         for item in conn.execute(
             'SELECT * FROM "quotation_item" WHERE "quote_id" = ? '
             'ORDER BY "line_no", "item_id"', (quote_id,),
+        )
+    ]
+    result["payment_items"] = [
+        {field: item[field] for field in ("payment_item_id", *QUOTATION_PAYMENT_FIELDS)}
+        for item in conn.execute(
+            'SELECT * FROM "quotation_payment_item" WHERE "quote_id" = ? '
+            'ORDER BY "line_no", "payment_item_id"', (quote_id,),
         )
     ]
     subtotal = sum(Decimal(str(item["amount"] or 0)) for item in result["items"])
@@ -918,10 +1045,11 @@ def list_quotations(path, search=""):
         if _quote_text(search):
             where = (
                 'WHERE q."quote_no" LIKE ? OR q."customer" LIKE ? '
-                'OR q."subject" LIKE ? OR q."source_job_no" LIKE ?'
+                'OR q."subject" LIKE ? OR q."source_job_no" LIKE ? '
+                'OR EXISTS (SELECT 1 FROM "quotation_item" qi WHERE qi."quote_id" = q."quote_id" AND qi."model" LIKE ?)'
             )
             needle = "%" + _quote_text(search) + "%"
-            params = [needle] * 4
+            params = [needle] * 5
         ids = [row[0] for row in conn.execute(
             f'SELECT q."quote_id" FROM "quotation" q {where} '
             'ORDER BY q."quote_date" DESC, q."updated_at" DESC, q."quote_no" DESC',
@@ -949,7 +1077,7 @@ def list_quotations(path, search=""):
 def quotation_history(path, customer, model, exclude_quote_id=None):
     customer = _quote_text(customer)
     model = _quote_text(model)
-    if not customer or not model:
+    if not model:
         return []
     conn = _connect(path)
     try:
@@ -959,10 +1087,12 @@ def quotation_history(path, customer, model, exclude_quote_id=None):
             'i."item_id", i."model", i."description", i."quantity", i."unit", '
             'i."unit_price", i."amount", i."remark" '
             'FROM "quotation" q JOIN "quotation_item" i ON i."quote_id" = q."quote_id" '
-            'WHERE LOWER(TRIM(q."customer")) = LOWER(TRIM(?)) '
-            'AND LOWER(TRIM(i."model")) = LOWER(TRIM(?))'
+            'WHERE LOWER(TRIM(i."model")) = LOWER(TRIM(?))'
         )
-        params = [customer, model]
+        params = [model]
+        if customer:
+            sql += ' AND LOWER(TRIM(q."customer")) = LOWER(TRIM(?))'
+            params.append(customer)
         if exclude_quote_id:
             sql += ' AND q."quote_id" <> ?'
             params.append(_quote_text(exclude_quote_id))
@@ -970,6 +1100,135 @@ def quotation_history(path, customer, model, exclude_quote_id=None):
         return [dict(row) for row in conn.execute(sql, params)]
     finally:
         conn.close()
+
+
+def _payment_option_from_term(term):
+    kind = _quote_text(term.get("款类"))
+    ratio = float(term.get("比例%") or 0)
+    days = int(term.get("账期天数") or 0)
+    trigger = _quote_text(term.get("触发条件"))
+    desc_zh = _quote_text(term.get("说明"))
+    if not desc_zh:
+        desc_zh = f"{trigger + '，' if trigger else ''}{ratio:g}% {kind}"
+    return {
+        "kind": kind, "ratio": ratio, "days": days, "trigger": trigger,
+        "description_zh": desc_zh,
+        "description_en": _payment_description_en(kind, ratio, days, trigger),
+    }
+
+
+def quotation_options(path, customer="", language="zh"):
+    customer = _quote_text(customer)
+    language = "en" if _quote_text(language).lower().startswith("en") else "zh"
+    conn = _connect(path)
+    try:
+        data = _data_from_connection(conn)
+        exact = customer.casefold()
+        payment_options = []
+        seen = set()
+        grouped = {}
+        for term in data["付款条件"]:
+            term_customer = _quote_text(term.get("客户"))
+            option = _payment_option_from_term(term)
+            if not option["kind"]:
+                continue
+            group_key = (term_customer.casefold(), _quote_text(term.get("JOB No")))
+            grouped.setdefault(group_key, {"customer": term_customer, "job_no": _quote_text(term.get("JOB No")), "items": []})["items"].append(option)
+        for group in grouped.values():
+            items = group["items"]
+            key = json.dumps(items, ensure_ascii=False, sort_keys=True)
+            if key in seen:
+                continue
+            seen.add(key)
+            payment_options.append({
+                "customer": group["customer"], "job_no": group["job_no"], "items": items,
+                "description_zh": "；".join(x["description_zh"] for x in items),
+                "description_en": "; ".join(x["description_en"] for x in items),
+                "kind": items[0]["kind"], "ratio": items[0]["ratio"], "days": items[0]["days"],
+                "trigger": items[0]["trigger"],
+                "priority": 0 if exact and group["customer"].casefold() == exact else 1,
+            })
+        for row in conn.execute(
+            'SELECT q."customer", q."quote_no", p.* FROM "quotation_payment_item" p '
+            'JOIN "quotation" q ON q."quote_id" = p."quote_id" '
+            'ORDER BY q."quote_date" DESC, q."updated_at" DESC, p."line_no"'
+        ):
+            # Quotation child rows are grouped into one reusable payment preset.
+            option = {field: row[field] for field in QUOTATION_PAYMENT_FIELDS if field != "line_no"}
+            key = (row["customer"], row["quote_no"])
+            group = next((x for x in payment_options if x.get("quote_no") == row["quote_no"]), None)
+            if group is None:
+                group = {"customer": row["customer"], "job_no": "", "quote_no": row["quote_no"], "items": [], "priority": 0 if exact and _quote_text(row["customer"]).casefold() == exact else 1}
+                payment_options.append(group)
+            group["items"].append(option)
+        for option in payment_options:
+            if option.get("items"):
+                option["description_zh"] = "；".join(x.get("description_zh", "") for x in option["items"])
+                option["description_en"] = "; ".join(x.get("description_en", "") for x in option["items"])
+                first = option["items"][0]
+                option.setdefault("kind", first.get("kind", "")); option.setdefault("ratio", first.get("ratio", 0)); option.setdefault("days", first.get("days", 0)); option.setdefault("trigger", first.get("trigger", ""))
+        payment_options.sort(key=lambda x: (x.get("priority", 1), -len(_quote_text(x.get("job_no"))), _quote_text(x.get("job_no"))))
+        recent_warranty = [row[0] for row in conn.execute(
+            'SELECT value FROM "quotation_option" WHERE kind = ? AND language = ? '
+            'ORDER BY updated_at DESC LIMIT 20', ("warranty", "zh")
+        )]
+        recent_incoterm = [row[0] for row in conn.execute(
+            'SELECT value FROM "quotation_option" WHERE kind = ? AND language = ? '
+            'ORDER BY updated_at DESC LIMIT 20', ("incoterm", "zh")
+        )]
+        warranty_options = list(dict.fromkeys([DEFAULT_WARRANTY, *recent_warranty]))
+        incoterm_options = list(dict.fromkeys([*DEFAULT_INCOTERMS, *recent_incoterm]))
+        return {
+            "issuer_presets": list(ISSUER_PRESETS.values()),
+            "default_issuer_key": "beijing",
+            "default_warranty": DEFAULT_WARRANTY,
+            "default_incoterm": DEFAULT_INCOTERMS[0],
+            "default_payment_language": language,
+            "warranty_options": warranty_options,
+            "incoterm_options": incoterm_options,
+            "payment_options": payment_options,
+            "payment_language": language,
+        }
+    finally:
+        conn.close()
+
+
+def delete_quotation(path, quote_id, *, expected_revision=None, audit_context=None, backup=True):
+    path = os.path.abspath(os.fspath(path))
+    early_revision = get_revision(path) if os.path.exists(path) else 0
+    if expected_revision is not None and early_revision != expected_revision:
+        raise StaleImportError(f"数据库已从修订 {expected_revision} 更新到 {early_revision}，请重新加载后再删除报价")
+    backup_path = _backup_database(path) if backup else None
+    conn = _connect(path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current_revision = int(_meta(conn, "revision", "0") or 0)
+        if expected_revision is not None and current_revision != expected_revision:
+            raise StaleImportError(f"数据库已从修订 {expected_revision} 更新到 {current_revision}，请重新加载后再删除报价")
+        old = _quotation_from_connection(conn, _quote_text(quote_id))
+        if old is None:
+            raise KeyError(f"报价单不存在：{quote_id}")
+        conn.execute('DELETE FROM "quotation" WHERE "quote_id" = ?', (old["quote_id"],))
+        revision = current_revision + 1
+        now = datetime.now().isoformat(timespec="seconds")
+        _set_meta(conn, "revision", revision)
+        _set_meta(conn, "last_saved_at", now)
+        conn.execute(
+            "INSERT INTO _change_log(revision, created_at, reason, summary_json) VALUES(?, ?, ?, ?)",
+            (revision, now, "quotation_delete", json.dumps({"报价单": 1, "报价明细": len(old["items"])}, ensure_ascii=False)),
+        )
+        # Record an immutable deletion snapshot for the header and every item.
+        changes = [{"table_name": "报价单", "record_id": old["quote_id"], "job_no": old.get("source_job_no", ""), "operation": "delete", "field_name": "", "old_value": _quotation_audit_snapshot(old), "new_value": None, "origin": "user"}]
+        changes.extend({"table_name": "报价明细", "record_id": item["item_id"], "job_no": old.get("source_job_no", ""), "operation": "delete", "field_name": "", "old_value": _quotation_item_audit_snapshot(item), "new_value": None, "origin": "user"} for item in old["items"])
+        changes.extend({"table_name": "报价付款条件", "record_id": item["payment_item_id"], "job_no": old.get("source_job_no", ""), "operation": "delete", "field_name": "", "old_value": _quotation_payment_audit_snapshot(item), "new_value": None, "origin": "user"} for item in old["payment_items"])
+        audit_event_id, _ = _append_audit_event(conn, revision, now, "quotation_delete", changes, audit_context)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"ok": True, "quote_id": old["quote_id"], "revision": revision, "backup": backup_path, "audit_event_id": audit_event_id, "audit_change_count": len(changes)}
 
 
 def _quotation_audit_snapshot(quote):
@@ -983,6 +1242,13 @@ def _quotation_item_audit_snapshot(item):
     return {
         QUOTATION_ITEM_LABELS[field]: item.get(field)
         for field in QUOTATION_ITEM_FIELDS
+    }
+
+
+def _quotation_payment_audit_snapshot(item):
+    return {
+        QUOTATION_PAYMENT_LABELS[field]: item.get(field)
+        for field in QUOTATION_PAYMENT_FIELDS
     }
 
 
@@ -1032,6 +1298,18 @@ def _quotation_audit_changes(old, new):
                         "old_value": before.get(field), "new_value": after.get(field),
                         "origin": "user",
                     })
+    old_payments = {item["payment_item_id"]: item for item in (old or {}).get("payment_items", [])}
+    new_payments = {item["payment_item_id"]: item for item in new.get("payment_items", [])}
+    for item_id in sorted(set(old_payments) | set(new_payments)):
+        before, after = old_payments.get(item_id), new_payments.get(item_id)
+        if before is None:
+            changes.append({"table_name": "报价付款条件", "record_id": item_id, "job_no": job_no, "operation": "insert", "field_name": "", "old_value": None, "new_value": _quotation_payment_audit_snapshot(after), "origin": "user"})
+        elif after is None:
+            changes.append({"table_name": "报价付款条件", "record_id": item_id, "job_no": job_no, "operation": "delete", "field_name": "", "old_value": _quotation_payment_audit_snapshot(before), "new_value": None, "origin": "user"})
+        else:
+            for field in QUOTATION_PAYMENT_FIELDS:
+                if before.get(field) != after.get(field):
+                    changes.append({"table_name": "报价付款条件", "record_id": item_id, "job_no": job_no, "operation": "update", "field_name": QUOTATION_PAYMENT_LABELS[field], "old_value": before.get(field), "new_value": after.get(field), "origin": "user"})
     return changes
 
 
@@ -1084,6 +1362,24 @@ def save_quotation(path, quotation, *, expected_revision=None, audit_context=Non
             values = [item["item_id"], prepared["quote_id"]]
             values.extend(item[field] for field in QUOTATION_ITEM_FIELDS)
             conn.execute(item_sql, values)
+        conn.execute('DELETE FROM "quotation_payment_item" WHERE "quote_id" = ?',
+                     (prepared["quote_id"],))
+        payment_columns = ["payment_item_id", "quote_id", *QUOTATION_PAYMENT_FIELDS]
+        payment_sql = (
+            f'INSERT INTO "quotation_payment_item" ({", ".join(_q(x) for x in payment_columns)}) '
+            f'VALUES ({", ".join("?" for _ in payment_columns)})'
+        )
+        for item in prepared["payment_items"]:
+            values = [item["payment_item_id"], prepared["quote_id"]]
+            values.extend(item[field] for field in QUOTATION_PAYMENT_FIELDS)
+            conn.execute(payment_sql, values)
+        for kind, value in (("warranty", prepared["warranty"]), ("incoterm", prepared["incoterm"])):
+            if value:
+                conn.execute(
+                    'INSERT INTO "quotation_option" (option_id, kind, value, language, updated_at) '
+                    'VALUES (?, ?, ?, ?, ?) ON CONFLICT(kind, value, language) DO UPDATE SET updated_at=excluded.updated_at',
+                    (f"option-{uuid.uuid4().hex}", kind, value, "zh", now),
+                )
         foreign_key_issues = conn.execute("PRAGMA foreign_key_check").fetchall()
         if foreign_key_issues:
             raise sqlite3.IntegrityError(f"外键检查失败：{foreign_key_issues[:3]}")

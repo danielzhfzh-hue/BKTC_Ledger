@@ -7,10 +7,61 @@ const state = {
   customerFilter: null,
   version: "?", update: null, databaseInfo: null,
   operatorName: "", auditActions: new Set(), auditEvents: [], auditChain: null,
-  quotations: [], currentQuotation: null, quoteDirty: false,
+  quotations: [], currentQuotation: null, quoteDirty: false, quoteOptions: null,
+  quotePaymentItems: [],
+  columnWidths: (() => { try { return JSON.parse(localStorage.getItem("bktcLedgerColumnWidths") || "{}"); } catch (_) { return {}; } })(),
 };
 
-const ROW_H = 31, BUFFER = 20;
+const ROW_H = 44, BUFFER = 20;
+
+const GRID_WRAP_FIELDS = new Set(["订单内容", "设备型号", "付款条件", "说明", "备注"]);
+
+function columnWidthKey(table, field) { return `${table}::${field}`; }
+function defaultColumnWidth(table, field) {
+  if (field === "客户") return 220;
+  if (field === "JOB No") return 105;
+  if (field === "担当者") return 105;
+  if (GRID_WRAP_FIELDS.has(field)) return 220;
+  if (["比例%", "账期天数", "总台数", "台数", "覆盖台数", "税率%"].includes(field)) return 92;
+  if (["未税单价", "未税合计", "含税合计", "含税金额", "超期天数"].includes(field)) return 120;
+  return 145;
+}
+function columnWidth(table, field) {
+  const saved = Number(state.columnWidths?.[columnWidthKey(table, field)]);
+  return Number.isFinite(saved) && saved > 0 ? saved : defaultColumnWidth(table, field);
+}
+function persistColumnWidths() {
+  localStorage.setItem("bktcLedgerColumnWidths", JSON.stringify(state.columnWidths || {}));
+}
+function applyColumnWidth(table, field, width, save = true) {
+  const key = columnWidthKey(table, field);
+  state.columnWidths[key] = Math.max(68, Math.min(420, Math.round(width)));
+  const col = [...document.querySelectorAll("#grid col[data-field]")]
+    .find((node) => node.dataset.field === field);
+  if (col) col.style.width = `${state.columnWidths[key]}px`;
+  if (save) persistColumnWidths();
+}
+function autofitGridColumns(table = state.tab) {
+  const fields = fieldsOf(table);
+  for (const field of fields) {
+    let max = field.name.length * 9 + 34;
+    const sample = (state.data?.[table] || []).slice(0, 300);
+    for (const rec of sample) {
+      const text = s(rec[field.name]);
+      max = Math.max(max, Math.min(48, text.length) * 8 + 28);
+    }
+    const min = field.name === "客户" ? 180 : (GRID_WRAP_FIELDS.has(field.name) ? 160 : 76);
+    const cap = field.name === "客户" ? 360 : (GRID_WRAP_FIELDS.has(field.name) ? 340 : 260);
+    state.columnWidths[columnWidthKey(table, field.name)] = Math.max(min, Math.min(cap, max));
+  }
+  persistColumnWidths();
+  renderGrid();
+}
+function resetGridColumnWidths(table = state.tab) {
+  for (const field of fieldsOf(table)) delete state.columnWidths[columnWidthKey(table, field.name)];
+  persistColumnWidths();
+  renderGrid();
+}
 
 const TAB_HINTS = {
   "合同订单": "本页 = 合同头信息。总台数、设备型号和付款条件文本自动汇总；修改 JOB No 会同步更新六表关联。",
@@ -627,6 +678,15 @@ function renderGrid() {
   const total = all.length;
   const so = state.sortBy[state.tab];
   const cfT = state.colFilters[state.tab] || {};
+  const colgroup = `<col data-field="__check" style="width:36px">` + fields.map((f) =>
+    `<col data-field="${esc(f.name)}" style="width:${columnWidth(table, f.name)}px">`
+  ).join("");
+  let cg = $("grid").querySelector("colgroup");
+  if (!cg) {
+    cg = document.createElement("colgroup");
+    $("grid").insertBefore(cg, $("grid").firstChild);
+  }
+  cg.innerHTML = colgroup;
   const head = `<tr><th class="cb"></th>` +
     fields.map((f) => {
       const ind = (so && so.field === f.name) ? (so.dir === 1 ? "▲" : "▼") : "";
@@ -636,7 +696,8 @@ function renderGrid() {
       return `<th class="col-h${act}" data-field="${esc(f.name)}" title="${esc(f.name)}（点击排序）">` +
         `<span class="col-h-name">${esc(f.name)}${f.derived ? " (自动)" : ""}</span>` +
         `<span class="sort-ind">${ind}</span>` +
-        `<span class="col-filt" data-field="${esc(f.name)}" title="筛选">▾</span></th>`;
+        `<span class="col-filt" data-field="${esc(f.name)}" title="筛选">▾</span>` +
+        `<span class="col-resize-handle" data-resize-field="${esc(f.name)}" title="拖动调整列宽"></span></th>`;
     }).join("") + "</tr>";
   const wrap = $("gridWrap");
   const viewH = wrap.clientHeight || 600;
@@ -655,8 +716,9 @@ function renderGrid() {
     const warn = table === "发货批次" && !Number(rec["台数"] || 0) ? " warn-row" : "";
     const cells = fields.map((f) => {
       const v = val(rec, f.name);
+      const wrapClass = GRID_WRAP_FIELDS.has(f.name) ? " grid-wrap-cell" : " grid-nowrap-cell";
       if (f.derived) {
-        return `<td class="auto" title="自动计算"><span>${esc(v)}</span></td>`;
+        return `<td class="auto${wrapClass}" title="自动计算"><span>${esc(v)}</span></td>`;
       }
       if (["开票记录", "回款记录"].includes(table)
           && ["覆盖批次", "覆盖製造番号"].includes(f.name)) {
@@ -686,7 +748,10 @@ function renderGrid() {
       if (f.type === "number" || f.type === "int") {
         return `<td><input type="number" step="any" data-f="${esc(f.name)}" value="${esc(v)}"></td>`;
       }
-      return `<td><input type="text" data-f="${esc(f.name)}" value="${esc(v)}"></td>`;
+      if (GRID_WRAP_FIELDS.has(f.name)) {
+        return `<td class="${wrapClass.trim()}"><textarea rows="2" data-f="${esc(f.name)}" title="${esc(v)}">${esc(v)}</textarea></td>`;
+      }
+      return `<td class="${wrapClass.trim()}" title="${esc(v)}"><input type="text" data-f="${esc(f.name)}" value="${esc(v)}"></td>`;
     }).join("");
     return `<tr data-ri="${ri}" class="${sel}${warn}">` +
       `<td class="cb"><input type="checkbox" ${sel ? "checked" : ""}></td>${cells}</tr>`;
@@ -1658,6 +1723,7 @@ $("btnClearFilter").addEventListener("click", () => {
 
 // 表头：点列名=排序(升→降→取消)；点 ▾=打开该列筛选
 $("gridHead").addEventListener("click", (e) => {
+  if (e.target.closest(".col-resize-handle")) return;
   const fb = e.target.closest(".col-filt");
   if (fb) { openColFilter(fb.dataset.field); return; }
   const th = e.target.closest("th.col-h");
@@ -1672,6 +1738,31 @@ $("gridHead").addEventListener("click", (e) => {
   else delete state.sortBy[state.tab];
   renderGrid();
 });
+
+let _gridResize = null;
+$("gridHead").addEventListener("pointerdown", (e) => {
+  const handle = e.target.closest(".col-resize-handle");
+  if (!handle) return;
+  e.preventDefault();
+  const field = handle.dataset.resizeField;
+  const th = handle.closest("th");
+  _gridResize = { table: state.tab, field, startX: e.clientX, startWidth: th.getBoundingClientRect().width };
+  handle.setPointerCapture?.(e.pointerId);
+  document.body.classList.add("resizing-grid-column");
+});
+document.addEventListener("pointermove", (e) => {
+  if (!_gridResize) return;
+  applyColumnWidth(_gridResize.table, _gridResize.field,
+    _gridResize.startWidth + e.clientX - _gridResize.startX, false);
+});
+document.addEventListener("pointerup", () => {
+  if (!_gridResize) return;
+  persistColumnWidths();
+  _gridResize = null;
+  document.body.classList.remove("resizing-grid-column");
+});
+$("btnGridAutofit").addEventListener("click", () => autofitGridColumns(state.tab));
+$("btnGridResetWidths").addEventListener("click", () => resetGridColumnWidths(state.tab));
 
 let _cfAllVals = [];
 function openColFilter(field) {
@@ -2074,14 +2165,14 @@ window.addEventListener("beforeunload", (e) => {
 // ========== 报价单：数据库保存、订单字段复用、同客户同型号历史价格 ==========
 const QUOTE_FIELD_IDS = {
   quote_no: "quoteNo", revision_label: "quoteRev", quote_date: "quoteDate",
-  status: "quoteStatus", source_job_no: "quoteJob", customer: "quoteCustomer",
+  status: "quoteStatus", customer: "quoteCustomer",
   contact: "quoteContact", customer_address: "quoteCustomerAddress",
   salesperson: "quoteSalesperson", subject: "quoteSubject", currency: "quoteCurrency",
   tax_rate: "quoteTax", valid_until: "quoteValidUntil", issuer_name: "quoteIssuerName",
-  issuer_address: "quoteIssuerAddress", issuer_contact: "quoteIssuerContact",
+  issuer_address: "quoteIssuerAddress", issuer_contact: "quoteIssuerContact", issuer_key: "quoteIssuerKey",
   warranty: "quoteWarranty", incoterm: "quoteIncoterm", ship_to: "quoteShipTo",
   delivery_terms: "quoteDeliveryTerms", description: "quoteDescription",
-  payment_terms: "quotePaymentTerms", notes: "quoteNotes",
+  payment_terms: "quotePaymentTerms", payment_language: "quotePaymentLanguage", notes: "quoteNotes",
 };
 
 function quoteToday() {
@@ -2106,17 +2197,68 @@ function quoteSelectValue(element, value) {
   element.value = text;
 }
 
-function populateQuoteJobs(selected = "") {
-  const jobs = (state.data?.["合同订单"] || [])
-    .map((row) => ({ job: s(row["JOB No"]), customer: s(row["客户"]) }))
-    .filter((row) => row.job)
-    .sort((a, b) => b.job.localeCompare(a.job));
-  $("quoteJob").innerHTML = '<option value="">（独立报价，不关联 JOB）</option>' + jobs.map((row) =>
-    `<option value="${esc(row.job)}">${esc(row.job)} · ${esc(row.customer)}</option>`
-  ).join("");
-  quoteSelectValue($("quoteJob"), selected);
-  $("quoteJob").dataset.previous = s(selected);
+function applyIssuerPreset(key) {
+  const preset = state.quoteOptions?.issuer_presets?.find((item) => item.key === key);
+  if (!preset) return;
+  $("quoteIssuerKey").value = preset.key;
+  $("quoteIssuerName").value = preset.name;
+  $("quoteIssuerAddress").value = preset.address;
+  $("quoteIssuerContact").value = preset.contact;
 }
+
+function renderQuoteOptions(options, quote = {}) {
+  state.quoteOptions = options || state.quoteOptions || {};
+  const issuers = state.quoteOptions.issuer_presets || [];
+  $("quoteIssuerKey").innerHTML = issuers.map((item) =>
+    `<option value="${esc(item.key)}">${esc(item.label || item.name)}</option>`).join("");
+  const issuerKey = s(quote.issuer_key) || state.quoteOptions.default_issuer_key || issuers[0]?.key || "";
+  quoteSelectValue($("quoteIssuerKey"), issuerKey);
+  applyIssuerPreset(issuerKey);
+  const fillSelect = (id, values) => {
+    const current = s(quote?.[id === "quoteWarranty" ? "warranty" : "incoterm"]);
+    $(id).innerHTML = [...new Set([current, ...(values || [])].filter(Boolean))]
+      .map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join("");
+    quoteSelectValue($(id), current || (values || [])[0] || "");
+  };
+  fillSelect("quoteWarranty", state.quoteOptions.warranty_options);
+  fillSelect("quoteIncoterm", state.quoteOptions.incoterm_options);
+  renderQuotePaymentPresets(quote);
+}
+
+function renderQuotePaymentPresets(quote = state.currentQuotation || {}) {
+  const language = $("quotePaymentLanguage")?.value || "zh";
+  const options = state.quoteOptions?.payment_options || [];
+  $("quotePaymentPreset").innerHTML = '<option value="">手动输入 / 选择历史条款</option>' + options.map((item, index) => {
+    const text = language === "en" ? item.description_en : item.description_zh;
+    const customer = item.customer ? ` · ${item.customer}` : "";
+    return `<option value="${index}">${esc(text || `${item.ratio}% ${item.kind}`)}${esc(customer)}</option>`;
+  }).join("");
+  $("quotePaymentPreset").value = "";
+  const items = quote.payment_items?.length ? quote.payment_items : (state.quotePaymentItems || []);
+  const first = options.findIndex((item) => items.length && item.kind === items[0].kind && Number(item.ratio) === Number(items[0].ratio) && Number(item.days) === Number(items[0].days));
+  if (first >= 0) $("quotePaymentPreset").value = String(first);
+}
+
+async function loadQuoteOptions(customer = $("quoteCustomer")?.value || "", language = $("quotePaymentLanguage")?.value || "zh") {
+  try {
+    const options = await call("quotation_options", customer, language);
+    // Keep values currently being edited when the customer/language changes.
+    // Falling back to state.currentQuotation would silently replace unsaved
+    // warranty, Incoterm, or issuer edits with the newest preset.
+    const draft = {
+      ...(state.currentQuotation || {}),
+      issuer_key: $("quoteIssuerKey")?.value || state.currentQuotation?.issuer_key || "",
+      warranty: $("quoteWarranty")?.value || state.currentQuotation?.warranty || "",
+      incoterm: $("quoteIncoterm")?.value || state.currentQuotation?.incoterm || "",
+    };
+    renderQuoteOptions(options, draft);
+    return options;
+  } catch (error) {
+    toast(String(error), "error");
+    return null;
+  }
+}
+// Legacy endpoint kept for old databases/releases: call("quotation_defaults", jobNo)
 
 function quoteItemRowHtml(item, index) {
   const quantity = item.quantity ?? 1;
@@ -2160,6 +2302,7 @@ function readQuoteForm() {
   }
   result.tax_rate = Number(result.tax_rate);
   result.items = readQuoteItems();
+  result.payment_items = quoteCopy(state.quotePaymentItems || []);
   return result;
 }
 
@@ -2198,7 +2341,7 @@ function renderQuotationList() {
       <span class="quote-list-line"><span class="quote-list-no">${esc(quote.quote_no)}</span><span class="quote-status-pill">${esc(quote.status)}</span></span>
       <span class="quote-list-line"><span class="quote-list-customer">${esc(quote.customer)}</span><span class="quote-list-date">${esc(quote.quote_date)}</span></span>
       <span class="quote-list-subject">${esc(quote.models || quote.subject || "（无型号）")}</span>
-      <span class="quote-list-line"><span class="quote-list-total">${esc(quote.currency)} ${quoteMoney(quote.grand_total)}</span><span class="quote-list-meta">${esc(quote.source_job_no || "独立报价")}</span></span>
+      <span class="quote-list-line"><span class="quote-list-total">${esc(quote.currency)} ${quoteMoney(quote.grand_total)}</span><span class="quote-list-meta">${esc(quote.item_count)} 项</span></span>
     </button>`
   ).join("") : '<div class="quote-list-empty">没有符合条件的报价单。<br>点击“新建”开始制作。</div>';
 }
@@ -2222,6 +2365,7 @@ function resetQuotationWorkspace() {
   state.quotations = [];
   state.currentQuotation = null;
   state.quoteDirty = false;
+  state.quotePaymentItems = [];
   state._quoteListRequest = (state._quoteListRequest || 0) + 1;
   $("quoteSearch").value = "";
   $("quoteList").innerHTML = '<div class="quote-list-empty">正在读取…</div>';
@@ -2232,17 +2376,21 @@ function resetQuotationWorkspace() {
 function applyQuotationToForm(quotation, dirty = false) {
   const quote = quoteCopy(quotation);
   quote.items ||= [];
+  quote.payment_items ||= [];
   state.currentQuotation = quote;
+  state.quotePaymentItems = quoteCopy(quote.payment_items);
   buildNocDatalists();
-  populateQuoteJobs(quote.source_job_no);
+  renderQuoteOptions(state.quoteOptions || {}, quote);
   for (const [field, id] of Object.entries(QUOTE_FIELD_IDS)) {
     const element = $(id);
+    if (["issuer_key", "issuer_name", "issuer_address", "issuer_contact"].includes(field)
+        && !s(quote[field])) continue;
     const value = quote[field] ?? (field === "tax_rate" ? 13 : "");
     if (element.tagName === "SELECT") quoteSelectValue(element, value);
     else element.value = value;
   }
-  $("quoteJob").dataset.previous = s(quote.source_job_no);
   renderQuoteItems(quote.items);
+  renderQuotePaymentPresets(quote);
   $("quoteEmpty").classList.add("hidden");
   $("quoteEditor").classList.remove("hidden");
   $("quoteEditorTitle").textContent = quote.quote_no || "新报价单";
@@ -2255,9 +2403,14 @@ async function newQuotation() {
   const quoteDate = quoteToday();
   try {
     const quoteNo = await call("suggest_quotation_number", quoteDate);
+    const options = await loadQuoteOptions();
     applyQuotationToForm({
       quote_no: quoteNo, revision_label: "1.0", quote_date: quoteDate,
       status: "草稿", currency: "RMB", tax_rate: 13,
+      issuer_key: options?.default_issuer_key || "beijing",
+      warranty: options?.default_warranty || "设备验收后12个月或设备到货后15个月",
+      incoterm: options?.default_incoterm || "CIP",
+      payment_language: options?.default_payment_language || "zh",
       items: [{ quantity: 1, unit: "台", unit_price: 0 }],
     }, false);
   } catch (error) {
@@ -2269,46 +2422,10 @@ async function openQuotation(quoteId) {
   if (!quoteId || quoteId === state.currentQuotation?.quote_id) return;
   if (state.quoteDirty && !confirm("当前报价有未保存更改，确定放弃并打开另一份报价吗？")) return;
   try {
-    applyQuotationToForm(await call("get_quotation", quoteId), false);
+    const quote = await call("get_quotation", quoteId);
+    await loadQuoteOptions(quote.customer, quote.payment_language);
+    applyQuotationToForm(quote, false);
   } catch (error) {
-    toast(String(error), "error");
-  }
-}
-
-async function loadQuoteJobDefaults(nextJob) {
-  const select = $("quoteJob");
-  const previous = select.dataset.previous || "";
-  if (!nextJob) {
-    select.dataset.previous = "";
-    setQuoteDirty(true);
-    return;
-  }
-  if (state.dirty) {
-    toast("订单数据有未保存更改，请先保存数据库再带入 JOB", "error");
-    select.value = previous;
-    return;
-  }
-  const draft = readQuoteForm();
-  const hasEnteredData = draft.customer || draft.items.some((item) => item.model);
-  if (state.quoteDirty && hasEnteredData && !confirm("带入 JOB 会更新客户、型号、数量、单价、送货地点和付款条件，确定继续吗？")) {
-    select.value = previous;
-    return;
-  }
-  try {
-    const defaults = await call("quotation_defaults", nextJob);
-    const merged = {
-      ...draft, ...defaults,
-      quote_id: draft.quote_id,
-      quote_no: draft.quote_no || defaults.quote_no,
-      revision_label: draft.revision_label || defaults.revision_label,
-      quote_date: draft.quote_date || defaults.quote_date,
-      status: draft.status || defaults.status,
-      tax_rate: Number.isFinite(draft.tax_rate) ? draft.tax_rate : defaults.tax_rate,
-    };
-    applyQuotationToForm(merged, true);
-    toast(`已从 ${nextJob} 带入客户、型号、数量、价格和条款`, "ok");
-  } catch (error) {
-    select.value = previous;
     toast(String(error), "error");
   }
 }
@@ -2357,21 +2474,21 @@ async function exportQuotation() {
 async function showQuoteHistory(row) {
   const customer = $("quoteCustomer").value.trim();
   const model = row.querySelector('[data-if="model"]').value.trim();
-  if (!customer || !model) {
-    toast("请先填写客户和该行型号", "error");
+  if (!model) {
+    toast("请先填写该行型号", "error");
     return;
   }
   try {
     const history = await call(
       "quotation_history", customer, model, state.currentQuotation?.quote_id || null
     );
-    $("quoteHistoryTitle").textContent = `${customer} · ${model} · 历史报价`;
+    $("quoteHistoryTitle").textContent = `${customer ? customer + " · " : ""}${model} · 历史报价`;
     $("quoteHistorySummary").textContent = history.length
       ? `共找到 ${history.length} 条已保存明细；当前正在编辑的报价不计入历史。`
       : "没有找到同一客户、同一型号的历史报价。";
     $("quoteHistoryBody").innerHTML = history.length ? history.map((item) => `<tr>
       <td>${esc(item.quote_date)}</td><td>${esc(item.quote_no)}</td><td>${esc(item.status)}</td>
-      <td>${esc(item.source_job_no || "—")}</td><td>${esc(item.quantity)} ${esc(item.unit)}</td>
+      <td>${esc(item.customer || "—")}</td><td>${esc(item.quantity)} ${esc(item.unit)}</td>
       <td>${esc(item.currency)}</td><td>${quoteMoney(item.unit_price)}</td><td>${quoteMoney(item.amount)}</td>
     </tr>`).join("") : '<tr><td colspan="8" class="muted">暂无历史记录</td></tr>';
     $("quoteHistoryModal").classList.remove("hidden");
@@ -2388,6 +2505,35 @@ $("btnQuoteNew").addEventListener("click", newQuotation);
 $("btnQuoteEmptyNew").addEventListener("click", newQuotation);
 $("btnQuoteSave").addEventListener("click", () => saveQuotation(false));
 $("btnQuoteExport").addEventListener("click", exportQuotation);
+$("btnQuoteDelete").addEventListener("click", async () => {
+  if (!state.currentQuotation?.quote_id) return toast("当前报价尚未保存，无需删除", "error");
+  if (!confirm(`确定删除报价 ${state.currentQuotation.quote_no}？删除会写入审计记录。`)) return;
+  try {
+    const result = await call("delete_quotation", state.currentQuotation.quote_id);
+    applyBackendState(result);
+    resetQuotationWorkspace();
+    await loadQuotations($("quoteSearch").value.trim());
+    setStatus(`报价已删除（数据库修订 ${result.revision}）`);
+    toast("报价已删除并写入审计记录", "ok");
+  } catch (error) { toast(String(error), "error"); }
+});
+$("btnQuoteTemplate").addEventListener("click", async () => {
+  if (!state.currentQuotation) return toast("请先打开一份已保存报价作为模板", "error");
+  if (state.quoteDirty && !confirm("当前报价有未保存更改，确定从当前内容复制模板吗？")) return;
+  try {
+    const clone = quoteCopy(state.currentQuotation);
+    clone.quote_id = "";
+    clone.source_job_no = "";
+    clone.quote_no = await call("suggest_quotation_number", quoteToday());
+    clone.quote_date = quoteToday();
+    clone.valid_until = "";
+    clone.delivery_terms = "";
+    applyQuotationToForm(clone, true);
+    toast("已复制模板；报价编号、日期、有效期和交货期已清空/重置", "ok");
+  } catch (error) {
+    toast(String(error), "error");
+  }
+});
 $("btnQuoteAddItem").addEventListener("click", () => {
   const draft = readQuoteForm();
   draft.items.push({ quantity: 1, unit: "台", unit_price: 0 });
@@ -2410,8 +2556,26 @@ $("quoteEditor").addEventListener("input", (event) => {
   if (event.target.id === "quoteNo") $("quoteEditorTitle").textContent = event.target.value || "新报价单";
 });
 $("quoteEditor").addEventListener("change", (event) => {
-  if (event.target.id === "quoteJob") {
-    loadQuoteJobDefaults(event.target.value);
+  if (event.target.id === "quoteIssuerKey") {
+    applyIssuerPreset(event.target.value);
+    setQuoteDirty(true);
+  } else if (event.target.id === "quotePaymentPreset") {
+    const option = state.quoteOptions?.payment_options?.[Number(event.target.value)];
+    if (option) {
+      state.quotePaymentItems = (option.items?.length ? option.items : [option]).map((item, index) => ({
+        ...item, payment_item_id: item.payment_item_id || newLocalId(), line_no: index + 1,
+      }));
+      $("quotePaymentTerms").value = $("quotePaymentLanguage").value === "en" ? option.description_en : option.description_zh;
+      setQuoteDirty(true);
+    }
+  } else if (event.target.id === "quotePaymentLanguage") {
+    renderQuotePaymentPresets(state.currentQuotation || {});
+    const item = state.quotePaymentItems?.[0];
+    if (item) $("quotePaymentTerms").value = event.target.value === "en" ? item.description_en : item.description_zh;
+    setQuoteDirty(true);
+  } else if (event.target.id === "quoteCustomer") {
+    loadQuoteOptions(event.target.value, $("quotePaymentLanguage").value);
+    setQuoteDirty(true);
   } else if (event.target.matches("[data-qf], [data-if]")) {
     setQuoteDirty(true);
     updateQuoteTotals();
@@ -3071,7 +3235,58 @@ function nocTermSummary() {
   sum.style.color = ok ? "var(--ok)" : "var(--danger)";
 }
 
-function openNewOrder() {
+async function loadNocQuoteTemplates(selected = "") {
+  const select = $("nocQuoteTemplate");
+  if (!select) return;
+  try {
+    const quotes = await call("list_quotations", "");
+    select.innerHTML = '<option value="">不从报价导入</option>' + quotes.map((quote) =>
+      `<option value="${esc(quote.quote_id)}">${esc(quote.quote_no)} · ${esc(quote.customer)} · ${esc(quote.models || quote.subject || "无型号")}</option>`
+    ).join("");
+    select.value = selected;
+  } catch (error) {
+    select.innerHTML = '<option value="">报价读取失败</option>';
+    toast(String(error), "error");
+  }
+}
+
+async function applyQuoteToNocForm(quoteId) {
+  if (!quoteId) return;
+  try {
+    const quote = await call("get_quotation", quoteId);
+    $("nocCustomer").value = s(quote.customer);
+    $("nocAssist").value = s(quote.salesperson);
+    $("nocContent").value = s(quote.description || quote.subject);
+    $("nocCurrency").value = s(quote.currency) || "RMB";
+    $("nocShipTo").value = s(quote.ship_to);
+    $("nocNote").value = [
+      s(quote.notes), quote.warranty ? `质保：${quote.warranty}` : "",
+      quote.incoterm ? `贸易条款：${quote.incoterm}` : "", quote.quote_no ? `报价单：${quote.quote_no}` : "",
+      quote.payment_terms ? `付款条件：${quote.payment_terms}` : "",
+    ].filter(Boolean).join("；");
+    $("nocDevRows").innerHTML = "";
+    for (const item of (quote.items || [])) {
+      addNocDeviceRow();
+      const row = $("nocDevRows").lastElementChild;
+      row.querySelector(".nd-model").value = s(item.model);
+      row.querySelector(".nd-qty").value = Number(item.quantity) || 1;
+      row.querySelector(".nd-price").value = Number(item.unit_price) || 0;
+    }
+    if (!quote.items?.length) addNocDeviceRow();
+    $("nocTermRows").innerHTML = "";
+    const terms = quote.payment_items || [];
+    if (terms.length) {
+      for (const term of terms) addNocTermRow(term.kind, term.ratio, term.days, term.trigger, term.description_zh || term.description_en);
+    } else {
+      addNocTermRow();
+    }
+    nocUpdateSummary();
+    nocTermSummary();
+    toast(`已从 ${quote.quote_no} 带入订单头、${quote.items?.length || 0} 个型号和付款条件`, "ok");
+  } catch (error) { toast(String(error), "error"); }
+}
+
+async function openNewOrder() {
   if (!state.data) return;
   buildNocDatalists();
   $("nocJobKind").value = "BS";
@@ -3096,6 +3311,7 @@ function openNewOrder() {
   $("nocErrors").innerHTML = "";
   state._nocSubmitting = false;
   $("newOrderModal").classList.remove("hidden");
+  await loadNocQuoteTemplates();
 }
 
 function closeNewOrder() { $("newOrderModal").classList.add("hidden"); }
@@ -3226,6 +3442,7 @@ $("nocDevRows").addEventListener("click", (e) => {
   }
 });
 $("nocJobKind").addEventListener("change", (e) => { $("nocJob").value = suggestJobNo(e.target.value); });
+$("nocQuoteTemplate").addEventListener("change", (e) => applyQuoteToNocForm(e.target.value));
 $("nocAddTerm").addEventListener("click", () => { addNocTermRow(); nocTermSummary(); });
 $("nocTermRows").addEventListener("input", nocTermSummary);
 $("nocTermRows").addEventListener("click", (e) => {

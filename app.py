@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 APP_DISPLAY_NAME = "上海康肯销售订单管理系统"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"
@@ -439,6 +439,9 @@ class Api:
             self.database_path, customer, model, exclude_quote_id
         )
 
+    def quotation_options(self, customer="", language="zh"):
+        return database.quotation_options(self.database_path, customer, language)
+
     def save_quotation(self, quotation):
         if not isinstance(quotation, dict):
             raise RuntimeError("报价单数据格式无效")
@@ -459,6 +462,29 @@ class Api:
                 ) from exc
             result = database.save_quotation(
                 self.database_path, quotation,
+                expected_revision=self.database_revision,
+                audit_context=context,
+            )
+        self.database_revision = result["revision"]
+        return result
+
+    def delete_quotation(self, quote_id):
+        context = self._audit_context({
+            "source": "quotation_delete", "actions": ["delete_quotation"],
+        }, "quotation_delete")
+        try:
+            result = database.delete_quotation(
+                self.database_path, quote_id,
+                expected_revision=self.database_revision,
+                audit_context=context,
+            )
+        except OSError as exc:
+            if not _is_write_permission_error(exc) or not self._relocate_windows_database():
+                raise RuntimeError(
+                    f"无法写入数据库：{self.database_path}。请在设置中选择可写的 .db 文件。"
+                ) from exc
+            result = database.delete_quotation(
+                self.database_path, quote_id,
                 expected_revision=self.database_revision,
                 audit_context=context,
             )

@@ -32,8 +32,8 @@
 
 <nav id="tabs">
   <button class="tab" data-tab="摘要">摘要</button>
-  <button class="tab" data-tab="合同订单">合同订单</button>
   <button class="tab" data-tab="报价单">报价单</button>
+  <button class="tab" data-tab="合同订单">合同订单</button>
   <button class="tab" data-tab="付款条件">付款条件</button>
   <button class="tab" data-tab="设备台账">设备台账</button>
   <button class="tab" data-tab="发货批次">发货批次</button>
@@ -68,6 +68,8 @@
       <button data-act="split" class="only-ship" title="把选中批次的部分设备移到另一个批次">⇲ 拆分批次</button>
       <button data-act="copy">复制选中 (TSV)</button>
       <button data-act="export" title="把当前筛选结果导出为 Excel（可选字段）">📥 导出 Excel</button>
+      <button id="btnGridAutofit" title="按表头与当前数据样本自适应列宽">↔ 自适应列宽</button>
+      <button id="btnGridResetWidths" title="恢复推荐列宽">重置列宽</button>
       <span class="hint">点表头排序（升→降→取消）· 点 ▾ 按列筛选 · Ctrl/Cmd+V 粘贴多行</span>
       <span class="spacer"></span>
       <input id="filterKeyword" placeholder="全表关键字…">
@@ -91,7 +93,7 @@
           </div>
           <button id="btnQuoteNew" class="primary">＋ 新建</button>
         </div>
-        <input id="quoteSearch" class="quote-search" placeholder="搜索编号 / 客户 / 型号 / JOB…">
+        <input id="quoteSearch" class="quote-search" placeholder="搜索编号 / 客户 / 型号…">
         <div id="quoteList" class="quote-list"><div class="quote-list-empty">正在读取…</div></div>
       </aside>
 
@@ -112,6 +114,8 @@
             </div>
             <div class="quote-actions">
               <button id="btnQuoteSave" class="primary">保存报价</button>
+              <button id="btnQuoteDelete" class="danger">删除报价</button>
+              <button id="btnQuoteTemplate">从模板创建</button>
               <button id="btnQuoteExport" class="accent">导出 XLSX</button>
             </div>
           </div>
@@ -124,7 +128,6 @@
                 <label>版本<input id="quoteRev" data-qf="revision_label" autocomplete="off"></label>
                 <label>报价日期<input id="quoteDate" data-qf="quote_date" type="date"></label>
                 <label>状态<select id="quoteStatus" data-qf="status"><option>草稿</option><option>已发送</option><option>已接受</option><option>已拒绝</option><option>已过期</option></select></label>
-                <label>来源 JOB<select id="quoteJob" data-qf="source_job_no"></select></label>
                 <label>客户<input id="quoteCustomer" data-qf="customer" list="dlCustomer" autocomplete="off"></label>
                 <label>客户联系人<input id="quoteContact" data-qf="contact" autocomplete="off"></label>
                 <label>担当者<input id="quoteSalesperson" data-qf="salesperson" list="dlAssist" autocomplete="off"></label>
@@ -134,14 +137,12 @@
                 <label>税率 %<input id="quoteTax" data-qf="tax_rate" type="number" min="0" max="100" step="any"></label>
                 <label>有效期至<input id="quoteValidUntil" data-qf="valid_until" autocomplete="off" placeholder="YYYY-MM-DD（可留空）"></label>
               </div>
-              <details class="quote-issuer">
-                <summary>报价方抬头与联系信息</summary>
-                <div class="quote-fields">
-                  <label>报价方名称<input id="quoteIssuerName" data-qf="issuer_name" autocomplete="off" placeholder="留空时使用标准抬头"></label>
-                  <label>报价方联系信息<input id="quoteIssuerContact" data-qf="issuer_contact" autocomplete="off"></label>
-                  <label class="quote-span-two">报价方地址<input id="quoteIssuerAddress" data-qf="issuer_address" autocomplete="off"></label>
-                </div>
-              </details>
+              <div class="quote-issuer quote-fields">
+                <label>报价主体<select id="quoteIssuerKey" data-qf="issuer_key"></select></label>
+                <label>报价方名称<input id="quoteIssuerName" data-qf="issuer_name" autocomplete="off" readonly></label>
+                <label>报价方联系方式<input id="quoteIssuerContact" data-qf="issuer_contact" autocomplete="off" readonly></label>
+                <label class="quote-span-two">报价方地址<input id="quoteIssuerAddress" data-qf="issuer_address" autocomplete="off" readonly></label>
+              </div>
             </section>
 
             <section class="quote-section">
@@ -162,12 +163,14 @@
             <section class="quote-section">
               <h3>商务条款</h3>
               <div class="quote-fields">
-                <label>质保条款<input id="quoteWarranty" data-qf="warranty" autocomplete="off"></label>
-                <label>贸易条款 / Incoterm<input id="quoteIncoterm" data-qf="incoterm" autocomplete="off"></label>
+                <label>质保条款<select id="quoteWarranty" data-qf="warranty"></select></label>
+                <label>贸易条款 / Incoterm<select id="quoteIncoterm" data-qf="incoterm"></select></label>
                 <label>送货地点<input id="quoteShipTo" data-qf="ship_to" list="dlShipTo" autocomplete="off"></label>
                 <label>交货期<input id="quoteDeliveryTerms" data-qf="delivery_terms" autocomplete="off"></label>
                 <label class="quote-span-two">项目说明<textarea id="quoteDescription" data-qf="description" rows="2"></textarea></label>
-                <label class="quote-span-two">付款条件<textarea id="quotePaymentTerms" data-qf="payment_terms" rows="2"></textarea></label>
+                <label>付款条件语言<select id="quotePaymentLanguage" data-qf="payment_language"><option value="zh">中文</option><option value="en">English</option></select></label>
+                <label>付款条件预设<select id="quotePaymentPreset"><option value="">手动输入 / 选择历史条款</option></select></label>
+                <label class="quote-span-two">付款条件<textarea id="quotePaymentTerms" data-qf="payment_terms" rows="3"></textarea></label>
                 <label class="quote-span-two">备注<textarea id="quoteNotes" data-qf="notes" rows="2"></textarea></label>
               </div>
             </section>
@@ -186,9 +189,9 @@
           <tr><td>新建订单</td><td>合同订单页「＋ 新建订单」</td>
               <td>一次填写订单头、设备、发货和付款条件，自动建立六表关联与稳定记录 ID；比逐表添加更可靠。</td></tr>
           <tr><td>制作报价单</td><td>报价单页「＋ 新建」</td>
-              <td>可选择来源 JOB 自动带入客户、担当者、全部型号、数量、未税单价、送货地点和付款条件；保存后才能从数据库导出标准报价 XLSX。</td></tr>
+              <td>报价单可独立建立，也可从模板复制；保存后才能从数据库导出标准报价 XLSX。</td></tr>
           <tr><td>查询历史价格</td><td>报价明细行「历史报价」</td>
-              <td>显示同一客户、同一型号过去已保存的报价日期、编号、来源 JOB、数量和单价；当前正在编辑的报价不会重复计入。</td></tr>
+              <td>填写客户时按“客户＋型号”查找；客户留空时也可只按型号查找历史价格；当前正在编辑的报价不会重复计入。</td></tr>
           <tr><td>修改订单</td><td>合同订单</td>
               <td>筛选 JOB 后直接改单元格；总台数/设备型号是自动列，不用改。</td></tr>
           <tr><td>录入付款方式</td><td>付款条件 →「录入付款条件」</td>
@@ -449,7 +452,7 @@
       <div id="quoteHistorySummary" class="quote-history-summary"></div>
       <div class="quote-history-wrap">
         <table class="quote-history-table">
-          <thead><tr><th>日期</th><th>报价编号</th><th>状态</th><th>来源 JOB</th><th>数量</th><th>币种</th><th>未税单价</th><th>金额</th></tr></thead>
+          <thead><tr><th>日期</th><th>报价编号</th><th>状态</th><th>客户</th><th>数量</th><th>币种</th><th>未税单价</th><th>金额</th></tr></thead>
           <tbody id="quoteHistoryBody"></tbody>
         </table>
       </div>
@@ -467,6 +470,9 @@
       <div class="noc-section">
         <h4>① 订单头 → 合同订单</h4>
         <div class="noc-grid">
+          <label class="noc-full">报价模板
+            <select id="nocQuoteTemplate"><option value="">不从报价导入</option></select>
+          </label>
           <label>JOB No
             <span class="noc-jobrow">
               <input id="nocJob" autocomplete="off">

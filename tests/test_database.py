@@ -460,6 +460,39 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(database.get_revision(self.db), initial["revision"])
 
+    def test_quotation_options_prioritize_customer_and_delete_is_audited(self):
+        initial = database.save_database(
+            self.db, sample_data(), self.rules, backup=False,
+            reason="database_created",
+        )
+        terms = [
+            {"记录ID": "term-a", "JOB No": "26BS001", "款类": "预付款", "比例%": 100,
+             "账期天数": 0, "触发条件": "合同生效后", "说明": "客户A预付款"},
+            {"记录ID": "term-b", "JOB No": "26BS002", "款类": "发货款", "比例%": 100,
+             "账期天数": 30, "触发条件": "货到签收后", "说明": "其他客户发货款"},
+        ]
+        data = sample_data()
+        data["合同订单"] = [
+            {"记录ID": "contract-a", "JOB No": "26BS001", "客户": "客户A"},
+            {"记录ID": "contract-b", "JOB No": "26BS002", "客户": "其他客户"},
+        ]
+        data["付款条件"] = terms
+        database.save_database(self.db, data, self.rules, expected_revision=initial["revision"], backup=False)
+        saved = database.save_quotation(self.db, {
+            "customer": "客户A", "issuer_key": "japan",
+            "items": [{"model": "KT1000", "quantity": 1, "unit_price": 10}],
+            "payment_items": [{"kind": "预付款", "ratio": 30, "trigger": "合同生效后"}],
+        }, expected_revision=2, backup=False, audit_context={"source": "quotation_save"})
+        options = database.quotation_options(self.db, "客户A")
+        self.assertEqual(options["default_warranty"], database.DEFAULT_WARRANTY)
+        self.assertEqual(options["issuer_presets"][1]["key"], "japan")
+        self.assertEqual(options["payment_options"][0]["customer"], "客户A")
+        self.assertEqual(database.quotation_history(self.db, "", "KT1000")[0]["customer"], "客户A")
+        deleted = database.delete_quotation(self.db, saved["quotation"]["quote_id"], expected_revision=saved["revision"], backup=False, audit_context={"source": "quotation_delete"})
+        self.assertEqual(deleted["revision"], saved["revision"] + 1)
+        self.assertEqual(deleted["audit_change_count"], 3)
+        self.assertTrue(database.verify_audit_chain(self.db)["ok"])
+
 
 class CoreReliabilityTests(unittest.TestCase):
     def test_validation_catches_duplicate_contract_blank_child_and_invalid_date(self):

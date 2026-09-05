@@ -23,7 +23,7 @@ build_win.bat
 GitHub Actions 是推荐构建路径：Windows 与 macOS 均会先运行可靠性测试，再打包产物。
 标签发布时 Windows 产物使用 `.zip`，可直接用 Win11 资源管理器解压。
 
-设置页的“检查更新”检查的是 GitHub Release，不是普通的 `main` 分支 push。发布新版本时需要先提交代码，再创建版本标签（本次为 `v1.7.1`），GitHub Actions 才会生成 Windows zip。Windows 端点击“下载并打开”会下载并解压到 `下载\BKTC_Ledger_update`，然后请退出正在运行的旧程序，用新目录替换旧程序目录；当前不会在运行中的 exe 上自动覆盖更新。
+设置页的“检查更新”检查的是 GitHub Release，不是普通的 `main` 分支 push。发布新版本时需要先提交代码，再创建版本标签（本次为 `v1.7.2`），GitHub Actions 才会生成 Windows zip。Windows 端点击“下载并打开”会下载并解压到 `下载\BKTC_Ledger_update`，程序会把当前正在使用的数据库和台账一并复制到更新目录；请退出正在运行的旧程序，再用新目录替换旧程序目录，数据不会被 starter 文件覆盖。
 
 ## 首次选择数据
 

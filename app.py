@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
-__version__ = "1.7.1"
+__version__ = "1.7.2"
 APP_DISPLAY_NAME = "上海康肯销售订单管理系统"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"
@@ -586,7 +586,7 @@ class Api:
         }
 
     def download_update(self, asset_url, asset_name):
-        """下载更新资产到 ~/Downloads/BKTC_Ledger_update/ 并解压；返回解压目录。"""
+        """下载并解压更新，同时把当前 DB/XLSX 带入更新目录，避免替换程序时丢数据。"""
         if not asset_url or not asset_name:
             raise RuntimeError("没有可下载的更新资产")
         dl_root = os.path.join(os.path.expanduser("~"), "Downloads")
@@ -610,6 +610,20 @@ class Api:
                 zf.extractall(dest_dir)
         else:
             raise RuntimeError(f"未知压缩格式：{asset_name}")
+        # GitHub Release 只放 starter 数据；本机业务数据永远以当前打开的
+        # database_path/xlsx_path 为准，随更新包复制一份供用户直接替换使用。
+        package_data_dir = (
+            os.path.join(dest_dir, "BKTC_Ledger", "data")
+            if asset_name.endswith(".zip")
+            else os.path.join(dest_dir, "data")
+        )
+        os.makedirs(package_data_dir, exist_ok=True)
+        for source, filename in (
+            (self.database_path, "BKTC_Ledger.db"),
+            (self.xlsx_path, "BKTC_Ledger.xlsx"),
+        ):
+            if os.path.isfile(source):
+                shutil.copy2(source, os.path.join(package_data_dir, filename))
         os.remove(archive)
         return dest_dir
 

@@ -200,6 +200,46 @@ class ApiMigrationTests(unittest.TestCase):
                 str(user_data / "BKTC_Ledger.xlsx"),
             )
 
+    def test_download_update_carries_current_database_and_workbook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            current_dir = root / "current"
+            current_dir.mkdir()
+            current_db = current_dir / "BKTC_Ledger.db"
+            current_xlsx = current_dir / "BKTC_Ledger.xlsx"
+            current_db.write_bytes(b"current-db")
+            current_xlsx.write_bytes(b"current-xlsx")
+            api = app.Api(str(current_db))
+            api.xlsx_path = str(current_xlsx)
+
+            archive = io.BytesIO()
+            import zipfile
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("BKTC_Ledger/BKTC_Ledger.exe", b"exe")
+                zf.writestr("BKTC_Ledger/data/BKTC_Ledger.db", b"starter-db")
+                zf.writestr("BKTC_Ledger/data/BKTC_Ledger.xlsx", b"starter-xlsx")
+            archive_bytes = archive.getvalue()
+
+            class Response(io.BytesIO):
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.close()
+
+            with mock.patch.object(app.os.path, "expanduser", return_value=str(root)), \
+                    mock.patch.object(app.urllib.request, "urlopen", return_value=Response(archive_bytes)):
+                update_dir = Path(api.download_update("https://example.test/update.zip", "BKTC_Ledger-Windows.zip"))
+
+            self.assertEqual(
+                (update_dir / "BKTC_Ledger" / "data" / "BKTC_Ledger.db").read_bytes(),
+                b"current-db",
+            )
+            self.assertEqual(
+                (update_dir / "BKTC_Ledger" / "data" / "BKTC_Ledger.xlsx").read_bytes(),
+                b"current-xlsx",
+            )
+
     def test_operator_name_is_persisted_and_used_for_audit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

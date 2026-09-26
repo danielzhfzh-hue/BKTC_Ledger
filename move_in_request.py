@@ -339,7 +339,12 @@ def build_workbook(form):
     ws.page_margins = PageMargins(left=0.25, right=0.25, top=0.25, bottom=0.25,
                                   header=0.1, footer=0.1)
     ws.sheet_properties.pageSetUpPr.autoPageBreaks = True
-    ws.print_title_rows = "1:12"
+    # Repeat the equipment header only when the equipment table itself spills
+    # past the first printed page.  If the complete list ends on page one,
+    # later pages contain only request details and should not show a duplicate
+    # device header.
+    if device_end_row > 35:
+        ws.print_title_rows = "1:12"
     ws.freeze_panes = "A13"
     ws.oddFooter.center.text = "搬入依頼書　第 &P 页"
     wb.calculation.fullCalcOnLoad = True

@@ -64,7 +64,7 @@ class MoveInRequestTests(unittest.TestCase):
             self.assertEqual(sheet.page_setup.fitToWidth, 1)
             self.assertEqual(sheet.page_setup.fitToHeight, 0)
             self.assertEqual(workbook.sheetnames, ["搬入依頼書"])
-            self.assertEqual(sheet.print_title_rows, "$1:$12")
+            self.assertIsNone(sheet.print_title_rows)
             self.assertEqual(sheet["C13"].value, "KT1000FI")
             self.assertEqual(sheet["F13"].value, "25800")
             self.assertEqual(sheet["J13"].value, "26BS006-01")
@@ -94,6 +94,7 @@ class MoveInRequestTests(unittest.TestCase):
             self.assertEqual(machine_numbers, [f"2580{i}" for i in range(50)])
             self.assertEqual(sheet["F13"].value, "25800")
             self.assertEqual(sheet["F62"].value, "258049")
+            self.assertEqual(sheet.print_title_rows, "$1:$12")
             self.assertIn("现场需要分两次进场", "\n".join(
                 str(cell.value or "")
                 for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row)

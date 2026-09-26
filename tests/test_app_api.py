@@ -177,6 +177,7 @@ class ApiMigrationTests(unittest.TestCase):
         self.assertIn('"quotation_history"', javascript)
         self.assertIn('get_move_in_request_defaults', javascript)
         self.assertIn('export_move_in_request', javascript)
+        self.assertIn('tr.classList.toggle("selected", e.target.checked);\n    updateMoveInButton();', javascript)
         self.assertIn('call("quotation_defaults"', javascript)
         self.assertNotIn('id="btnExportEditable"', html)
         self.assertNotIn('id="btnImport"', html)

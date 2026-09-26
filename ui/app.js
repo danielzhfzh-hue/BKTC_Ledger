@@ -997,6 +997,7 @@ $("gridBody").addEventListener("change", (e) => {
     if (e.target.checked) state.selection.add(ri);
     else state.selection.delete(ri);
     tr.classList.toggle("selected", e.target.checked);
+    updateMoveInButton();
     return;
   }
   const tr = e.target.closest("tr");

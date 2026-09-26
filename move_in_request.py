@@ -259,11 +259,15 @@ def build_workbook(form):
                border=GRID, alignment=center)
 
     devices = form.get("devices") or []
+    _field_label(ws, 11, 1, "設備明細")
+    _merge(ws, 11, 3, 11, 17, f"全{len(devices)}台", font=FONT,
+           border=GRID, alignment=left)
+    device_header_row = 12
+    device_end_row = _write_device_table(ws, device_header_row, devices)
 
-    # Keep the request details at the top of the form.  The equipment list is
-    # item 9 at the bottom, so a large batch cannot push the information needed
-    # to arrange the delivery onto a later page.
-    row = 11
+    # Keep the request details directly below the one authoritative equipment
+    # list.  There is no summary table or appendix.
+    row = device_end_row + 1
     _field_label(ws, row, 2, "客先装置ID No.")
     _merge(ws, row, 3, row, 4, ("☑ 有り" if form.get("has_customer_id") else "☐ 有り"),
            font=FONT, border=GRID, alignment=center)
@@ -295,17 +299,20 @@ def build_workbook(form):
     vehicles = ["平ボディー", "ユニック車", "パワーゲート車", "その他"]
     chosen = str(form.get("vehicle_type") or "")
     for vehicle_row, label in enumerate(vehicles, row):
-        _merge(ws, vehicle_row, 4, vehicle_row, 7, ("☑ " if chosen == label else "☐ ") + label,
+        ws.row_dimensions[vehicle_row].height = 17.6
+        _row_style(ws, vehicle_row, start=3, end=17, height=17.6, border=GRID)
+        _merge(ws, vehicle_row, 3, vehicle_row, 9,
+               ("☑ " if chosen == label else "☐ ") + label,
                font=FONT, border=GRID, alignment=left)
         if vehicle_row < row + 3:
-            _merge(ws, vehicle_row, 8, vehicle_row, 9, form.get("vehicle_tonnage", ""),
-                   font=FONT, border=GRID, alignment=center)
-            _set(ws, f"J{vehicle_row}", "t", font=FONT, border=GRID, alignment=center)
+            tonnage = str(form.get("vehicle_tonnage") or "").strip()
+            _set(ws, f"J{vehicle_row}", f"{tonnage} t" if tonnage else "t",
+                 font=FONT, border=GRID, alignment=center)
         else:
-            _merge(ws, vehicle_row, 8, vehicle_row, 9, "", font=FONT,
-                   border=GRID, alignment=center)
-            _merge(ws, vehicle_row, 11, vehicle_row, 17, form.get("vehicle_note", ""),
-                   font=SMALL_FONT, border=GRID, alignment=left)
+            _set(ws, f"J{vehicle_row}", "", font=FONT, border=GRID, alignment=center)
+        _merge(ws, vehicle_row, 11, vehicle_row, 17,
+               form.get("vehicle_note", "") if vehicle_row == row + 3 else "",
+               font=SMALL_FONT, border=GRID, alignment=left)
     row += 4
 
     system_notes = str(form.get("system_notes") or "").splitlines()
@@ -326,14 +333,7 @@ def build_workbook(form):
                notes[note_row - note_start] if note_row - note_start < len(notes) else "",
                font=FONT, border=GRID, alignment=wrap)
 
-    row = note_end + 1
-    device_title_row = row
-    _field_label(ws, device_title_row, 9, "設備明細")
-    _merge(ws, device_title_row, 3, device_title_row, 17, f"全{len(devices)}台", font=FONT,
-           border=GRID, alignment=left)
-    device_header_row = device_title_row + 1
-    device_end_row = _write_device_table(ws, device_header_row, devices)
-    last_row = device_end_row
+    last_row = note_end
     ws.print_area = f"A1:Q{last_row}"
     ws.page_setup.orientation = ws.ORIENTATION_PORTRAIT
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
@@ -343,12 +343,11 @@ def build_workbook(form):
     ws.page_margins = PageMargins(left=0.25, right=0.25, top=0.25, bottom=0.25,
                                   header=0.1, footer=0.1)
     ws.sheet_properties.pageSetUpPr.autoPageBreaks = True
-    # Repeat only the equipment title/header when the list is likely to span
-    # pages.  The request details above must not be repeated as a fake table
-    # header, and a short list that fits on page one stays uncluttered.
-    if len(devices) > 8 or note_rows > 8:
-        ws.print_title_rows = f"{device_title_row}:{device_header_row}"
-    ws.freeze_panes = "A11"
+    # Repeat the equipment title/header only when the equipment table itself
+    # spills past the first printed page.  Later notes pages stay uncluttered.
+    if device_end_row > 35:
+        ws.print_title_rows = "1:12"
+    ws.freeze_panes = "A13"
     ws.oddFooter.center.text = "搬入依頼書　第 &P 页"
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True

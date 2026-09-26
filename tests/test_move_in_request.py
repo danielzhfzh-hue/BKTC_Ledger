@@ -66,7 +66,7 @@ class MoveInRequestTests(unittest.TestCase):
             self.assertEqual(sheet["B13"].value, "KT1000FI")
             self.assertEqual(sheet["C13"].value, "25800")
 
-    def test_api_export_reads_current_database_and_writes_download_folder(self):
+    def test_api_export_reads_current_database_and_writes_installation_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             api = app.Api(str(root / "ledger.db"), operator_name="测试员")
@@ -76,12 +76,15 @@ class MoveInRequestTests(unittest.TestCase):
             defaults = api.get_move_in_request_defaults("ship-1")
             defaults.update({"move_in_date": "2026-08-31", "contact": "测试联系人"})
 
-            with mock.patch.object(app.os.path, "expanduser", return_value=str(root)):
+            output_dir = root / "搬入依頼書"
+            with mock.patch.object(
+                app, "_move_in_request_output_dir", return_value=(str(output_dir), "")
+            ):
                 result = api.export_move_in_request(defaults)
 
             output = Path(result["path"])
             self.assertTrue(output.is_file())
-            self.assertEqual(output.parent, root / "Downloads" / "搬入依頼書")
+            self.assertEqual(output.parent, output_dir)
             self.assertEqual(result["device_count"], 2)
             self.assertEqual(load_workbook(output).active["B13"].value, "KT1000FI")
 

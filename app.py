@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
-__version__ = "1.8.1"
+__version__ = "1.8.2"
 APP_DISPLAY_NAME = "上海康肯销售订单管理系统"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"
@@ -220,6 +220,56 @@ def _fallback_xlsx_path(path):
     stem, ext = os.path.splitext(os.path.abspath(os.path.expanduser(path)))
     ext = ext or ".xlsx"
     return f"{stem}.generated_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}{ext}"
+
+
+def _application_install_dir(executable=None, platform_name=None, frozen=None):
+    """Return the writable directory containing the installed application.
+
+    PyInstaller's ``sys._MEIPASS`` is an internal resource directory and may be
+    temporary.  Use the real executable location instead, and for macOS place
+    output beside the ``.app`` bundle rather than inside its read-only bundle.
+    """
+    platform_name = sys.platform if platform_name is None else platform_name
+    frozen = IS_FROZEN if frozen is None else bool(frozen)
+    if not frozen:
+        return os.path.dirname(os.path.abspath(__file__))
+
+    executable_path = os.path.abspath(executable or sys.executable)
+    if platform_name == "darwin":
+        current = executable_path
+        while True:
+            if current.lower().endswith(".app"):
+                return os.path.dirname(current)
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    return os.path.dirname(executable_path)
+
+
+def _move_in_request_output_dir():
+    """Choose the installation-local move-in request directory.
+
+    A protected install location (for example ``Program Files``) cannot be
+    written by a normal user.  In that case retain the same stable directory
+    name under the user's application-data directory instead of failing after
+    the form has already been filled in.
+    """
+    preferred = os.path.join(_application_install_dir(), "搬入依頼書")
+    try:
+        os.makedirs(preferred, exist_ok=True)
+        if _path_is_writable(os.path.join(preferred, ".write-test")):
+            return preferred, ""
+    except OSError:
+        pass
+
+    fallback = os.path.join(os.path.dirname(_default_config_path()), "搬入依頼書")
+    os.makedirs(fallback, exist_ok=True)
+    if not _path_is_writable(os.path.join(fallback, ".write-test")):
+        raise RuntimeError(
+            f"搬入依頼書保存目录不可写：{preferred}；备用目录也不可写：{fallback}"
+        )
+    return fallback, f"安装目录不可写，已改用用户数据目录：{fallback}"
 
 
 def _generate_xlsx_with_fallback(data, path, rules=None):
@@ -575,13 +625,11 @@ class Api:
         errors = move_in_request.validate_form(merged)
         if errors:
             raise RuntimeError("；".join(errors))
-        download_dir = os.path.join(os.path.expanduser("~"), "Downloads", "搬入依頼書")
-        os.makedirs(download_dir, exist_ok=True)
+        download_dir, notice = _move_in_request_output_dir()
         raw_name = f"搬入依頼書_{merged['job_no']}_{merged['batch']}_{merged.get('move_in_date') or '未定'}"
         safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .")
         safe_name = safe_name[:150] or "搬入依頼書"
         path = os.path.join(download_dir, safe_name + ".xlsx")
-        notice = ""
         try:
             move_in_request.export_xlsx(merged, path)
         except OSError as exc:

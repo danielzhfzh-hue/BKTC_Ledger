@@ -72,6 +72,25 @@ class ApiMigrationTests(unittest.TestCase):
                 str(data_file),
             )
 
+    def test_installation_dir_is_next_to_windows_exe_or_macos_app(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            windows_exe = root / "BKTC_Ledger" / "BKTC_Ledger.exe"
+            mac_exe = root / "BKTC_Ledger.app" / "Contents" / "MacOS" / "BKTC_Ledger"
+
+            self.assertEqual(
+                app._application_install_dir(
+                    str(windows_exe), platform_name="win32", frozen=True
+                ),
+                str(windows_exe.parent),
+            )
+            self.assertEqual(
+                app._application_install_dir(
+                    str(mac_exe), platform_name="darwin", frozen=True
+                ),
+                str(root),
+            )
+
     def test_ephemeral_path_is_rejected(self):
         self.assertTrue(app._is_ephemeral_path("/private/tmp/bktc-ledger-audit/ledger.db"))
         self.assertFalse(app._is_ephemeral_path("/Users/danielzhu/projects/订单整理/BKTC_Ledger/data/BKTC_Ledger.db"))

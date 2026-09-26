@@ -39,7 +39,9 @@ class MoveInRequestTests(unittest.TestCase):
         self.assertEqual(defaults["ship_date"], "2026-08-28")
         self.assertEqual(defaults["move_in_date"], "")
         self.assertEqual(len(defaults["devices"]), 2)
-        self.assertIn("PO-1", defaults["notes"])
+        self.assertIn("出荷元", defaults["system_notes"])
+        self.assertEqual(defaults["notes"], "")
+        self.assertEqual(defaults["devices"][0]["po_no"], "PO-1")
 
     def test_missing_devices_is_rejected(self):
         data = sample_data()
@@ -47,7 +49,7 @@ class MoveInRequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "没有关联设备"):
             move_in_request.shipment_defaults(data, shipment_id="ship-1")
 
-    def test_workbook_is_a4_and_keeps_all_devices_in_appendix(self):
+    def test_workbook_is_a4_and_keeps_all_devices_in_first_sheet_and_appendix(self):
         data = sample_data(device_count=6)
         form = move_in_request.shipment_defaults(data, shipment_id="ship-1")
         form.update({"move_in_date": "2026-08-31", "contact": "测试联系人 13800000000"})
@@ -57,14 +59,67 @@ class MoveInRequestTests(unittest.TestCase):
             move_in_request.export_xlsx(form, path)
             workbook = load_workbook(path, data_only=False)
             sheet = workbook["搬入依頼書"]
-            self.assertEqual(sheet.print_area, "'搬入依頼書'!$A$1:$Q$35")
+            self.assertEqual(sheet.print_area, "'搬入依頼書'!$A$1:$Q$39")
             self.assertEqual(sheet.page_setup.orientation, "portrait")
             self.assertEqual(sheet.page_setup.fitToWidth, 1)
-            self.assertEqual(sheet.page_setup.fitToHeight, 1)
+            self.assertEqual(sheet.page_setup.fitToHeight, 0)
             self.assertEqual(workbook.sheetnames, ["搬入依頼書", "設備明細"])
             self.assertEqual(workbook["設備明細"].max_row, 7)
             self.assertEqual(sheet["B13"].value, "KT1000FI")
             self.assertEqual(sheet["C13"].value, "25800")
+            self.assertEqual(sheet["F38"].value, "25804")
+            self.assertEqual(sheet["J38"].value, "26BS006-05")
+            self.assertEqual(sheet["N38"].value, "PO-2")
+            self.assertIn("C38:E39", {str(r) for r in sheet.merged_cells.ranges})
+            self.assertIn("N38:Q39", {str(r) for r in sheet.merged_cells.ranges})
+            self.assertEqual(sheet.row_breaks.brk[0].id, 35)
+
+    def test_workbook_supports_fifty_devices_without_truncation(self):
+        data = sample_data(device_count=50)
+        form = move_in_request.shipment_defaults(data, shipment_id="ship-1")
+        form.update({"move_in_date": "2026-08-31", "notes": "现场需要分两次进场"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "搬入依頼書-50台.xlsx"
+            move_in_request.export_xlsx(form, path)
+            workbook = load_workbook(path, data_only=False)
+            sheet = workbook["搬入依頼書"]
+            machine_numbers = [
+                sheet.cell(row=row, column=6).value
+                for row in range(1, sheet.max_row + 1)
+                if str(sheet.cell(row=row, column=6).value or "").startswith("2580")
+            ]
+            self.assertEqual(machine_numbers, [f"2580{i}" for i in range(4, 50)])
+            self.assertEqual([sheet.cell(row=row, column=3).value
+                              for row in range(13, 17)],
+                             [f"2580{i}" for i in range(4)])
+            self.assertIn("现场需要分两次进场", "\n".join(
+                str(cell.value or "")
+                for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row)
+                for cell in row
+            ))
+            self.assertGreaterEqual(len(sheet.row_breaks.brk), 3)
+
+    def test_long_special_notes_continue_without_truncation(self):
+        data = sample_data(device_count=6)
+        form = move_in_request.shipment_defaults(data, shipment_id="ship-1")
+        marker = "最后一行特記事項"
+        form.update({"move_in_date": "2026-08-31", "notes": "现场要求：" + ("安全确认；" * 45) + marker})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "搬入依頼書-长特記事項.xlsx"
+            move_in_request.export_xlsx(form, path)
+            workbook = load_workbook(path, data_only=False)
+            sheet = workbook["搬入依頼書"]
+            values = "\n".join(
+                str(cell.value or "")
+                for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row)
+                for cell in row
+            )
+            self.assertIn(marker, values)
+            self.assertTrue(any("特記事項（続き）" in str(cell.value or "")
+                                for row in sheet.iter_rows()
+                                for cell in row))
 
     def test_api_export_reads_current_database_and_writes_installation_folder(self):
         with tempfile.TemporaryDirectory() as tmp:

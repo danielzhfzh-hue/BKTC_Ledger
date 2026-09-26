@@ -3,9 +3,10 @@
 """Generate the Japanese 装置搬入依頼書 used by the shipment workflow.
 
 The supplied workbook is an old BIFF ``.xls`` file with embedded stamp objects
-and unreliable pagination.  This module deliberately rebuilds the printable
-form as a clean, one-page A4 ``.xlsx`` and keeps the business data mapping in a
-small, testable function.
+and unreliable pagination.  This module rebuilds the printable form as a clean
+A4 ``.xlsx``.  The first page keeps the KE-403 form layout and continuation
+pages in the same worksheet carry the complete equipment list and any long
+special notes.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from datetime import date, datetime
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.page import PageMargins
+from openpyxl.worksheet.pagebreak import Break
 
 
 THIN = Side(style="thin", color="000000")
@@ -26,6 +28,11 @@ LABEL_FILL = PatternFill("solid", fgColor="E0E0E0")
 FONT = Font(name="ＭＳ Ｐ明朝", size=12, color="000000")
 SMALL_FONT = Font(name="ＭＳ Ｐ明朝", size=10, color="000000")
 TITLE_FONT = Font(name="ＭＳ Ｐ明朝", size=18, color="000000")
+DETAIL_FONT = Font(name="ＭＳ Ｐ明朝", size=10, color="000000")
+
+DETAIL_PAGE_SIZE = 20
+NOTE_PAGE_SIZE = 26
+NOTE_LINE_WIDTH = 40
 
 
 def _text(value):
@@ -129,20 +136,11 @@ def shipment_defaults(data, shipment_id=None, job_no=None, batch=None,
     models = sorted({str(r.get("设备型号") or "") for r in devices if r.get("设备型号")})
     machine_numbers = [str(r.get("機番") or "") for r in devices]
     serials = [str(r.get("製造番号") or "") for r in devices]
-    po_groups = {}
-    for row in devices:
-        po = str(row.get("PO No") or "")
-        machine = str(row.get("機番") or "")
-        if po:
-            po_groups.setdefault(po, []).append(machine or str(row.get("製造番号") or ""))
     note_lines = []
     if ship_from:
         note_lines.append(f"※出荷元：{ship_from}")
     if shipment.get("出荷日"):
         note_lines.append(f"※出荷日：{shipment.get('出荷日')}")
-    for po, machines in po_groups.items():
-        values = "，".join(x for x in machines if x)
-        note_lines.append(f"機番{values}はPO:{po}表記お願いいたします")
     return {
         "shipment_id": str(shipment.get("记录ID") or ""),
         "job_no": job,
@@ -169,7 +167,8 @@ def shipment_defaults(data, shipment_id=None, job_no=None, batch=None,
         "vehicle_note": "",
         "department": "本社工場　/　物流購買部　/　技術設計部　/　技術サービス部",
         "other_department": "平湖康肯",
-        "notes": "\n".join(note_lines),
+        "system_notes": "\n".join(note_lines),
+        "notes": "",
         "manager": "",
         "issuer": "",
     }
@@ -180,6 +179,81 @@ def _device_rows(devices, limit=4):
     for d in devices[:limit]:
         rows.append((d.get("model", ""), d.get("machine_no", ""), d.get("serial_no", "")))
     return rows
+
+
+def _wrap_note_lines(values, width=NOTE_LINE_WIDTH):
+    """Wrap note lines to a conservative width for the merged A4 note cells."""
+    lines = []
+    for value in values:
+        text = "" if value is None else str(value)
+        if not text:
+            lines.append("")
+            continue
+        while len(text) > width:
+            lines.append(text[:width])
+            text = text[width:]
+        lines.append(text)
+    return lines
+
+
+def _write_device_detail_page(ws, start_row, devices, form, start_index,
+                              page_number, page_count):
+    """Write one continuation page of the full equipment list."""
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    _row_style(ws, start_row, height=25, border=GRID)
+    _merge(ws, start_row, 1, start_row, 17,
+           f"設備一覧　{form.get('job_no', '')} / {form.get('batch', '')}　"
+           f"第{page_number}頁 / 全{page_count}頁",
+           font=FONT, border=GRID, alignment=left)
+    headers = ((1, 2, "No."), (3, 5, "機種"), (6, 9, "機番"),
+               (10, 13, "制番"), (14, 17, "PO No"))
+    _row_style(ws, start_row + 1, height=24, border=GRID, fill=LABEL_FILL,
+               font=DETAIL_FONT)
+    for start_col, end_col, label in headers:
+        _merge(ws, start_row + 1, start_col, start_row + 1, end_col, label,
+               font=DETAIL_FONT, fill=LABEL_FILL, border=GRID, alignment=center)
+
+    for offset, device in enumerate(devices):
+        row = start_row + 2 + offset
+        _row_style(ws, row, height=24, border=GRID, font=DETAIL_FONT)
+        _merge(ws, row, 1, row, 2, start_index + offset + 1,
+               font=DETAIL_FONT, border=GRID, alignment=center)
+        _merge(ws, row, 6, row, 9, device.get("machine_no", ""),
+               font=DETAIL_FONT, border=GRID, alignment=center)
+        _merge(ws, row, 10, row, 13, device.get("serial_no", ""),
+               font=DETAIL_FONT, border=GRID, alignment=center)
+
+    for start_col, end_col, key in ((3, 5, "model"), (14, 17, "po_no")):
+        group_start = 0
+        for group_end in range(1, len(devices) + 1):
+            at_end = group_end == len(devices)
+            same_as_next = (not at_end
+                            and devices[group_end].get(key, "") == devices[group_start].get(key, ""))
+            if at_end or not same_as_next:
+                first_row = start_row + 2 + group_start
+                last_row = start_row + 1 + group_end
+                _merge(ws, first_row, start_col, last_row, end_col,
+                       devices[group_start].get(key, ""),
+                       font=DETAIL_FONT, border=GRID, alignment=center)
+                group_start = group_end
+    return start_row + 1 + len(devices)
+
+
+def _write_notes_detail_page(ws, start_row, lines, form, page_number, page_count):
+    """Write a continuation page for special notes without truncating text."""
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    _row_style(ws, start_row, height=25, border=GRID)
+    _merge(ws, start_row, 1, start_row, 17,
+           f"特記事項（続き）　{form.get('job_no', '')} / {form.get('batch', '')}　"
+           f"第{page_number}頁 / 全{page_count}頁",
+           font=FONT, border=GRID, alignment=left)
+    row = start_row + 1
+    for line in lines:
+        _row_style(ws, row, height=21, start=1, end=17, border=GRID)
+        _merge(ws, row, 1, row, 17, line, font=FONT, border=GRID, alignment=left)
+        row += 1
+    return row - 1
 
 
 def build_workbook(form):
@@ -276,28 +350,75 @@ def build_workbook(form):
             _merge(ws, vehicle_row, 11, vehicle_row, 17, form.get("vehicle_note", ""),
                    font=SMALL_FONT, border=GRID, alignment=left)
     _field_label(ws, 28, 9, "特記事項", 35)
-    notes = str(form.get("notes") or "").splitlines()
+    system_notes = str(form.get("system_notes") or "").splitlines()
+    if not system_notes:
+        # Keep direct callers using the pre-v1.9 form shape readable.
+        if form.get("ship_from"):
+            system_notes.append(f"※出荷元：{form.get('ship_from')}")
+        if form.get("ship_date"):
+            system_notes.append(f"※出荷日：{form.get('ship_date')}")
+    notes = system_notes + str(form.get("notes") or "").splitlines()
     if len(devices) > 4:
-        notes.insert(0, f"※設備明細：全{len(devices)}台。4台を超える設備は別紙「設備明細」を参照")
+        notes.insert(0, f"※設備一覧：全{len(devices)}台。第2頁以降に本工作表の全台明細を掲載")
+    notes = _wrap_note_lines(notes)
     notes_overflow = len(notes) > 8
-    if notes_overflow:
-        notes = notes[:7] + ["\n".join(notes[7:])]
     for note_row in range(28, 36):
         _row_style(ws, note_row, start=3, end=17,
-                   height=(54 if note_row == 35 and notes_overflow else 21), border=GRID)
+                   height=21, border=GRID)
         _merge(ws, note_row, 3, note_row, 17,
                notes[note_row - 28] if note_row - 28 < len(notes) else "",
                font=FONT, border=GRID, alignment=wrap)
 
-    ws.print_area = "A1:Q35"
+    continuation_pages = []
+    next_row = 36
+    detail_chunks = []
+    if len(devices) > 4:
+        detail_devices = devices[4:]
+        detail_chunks = [detail_devices[i:i + DETAIL_PAGE_SIZE]
+                         for i in range(0, len(detail_devices), DETAIL_PAGE_SIZE)]
+
+    remaining_notes = notes[8:] if notes_overflow else []
+    note_page_count = ((len(remaining_notes) + NOTE_PAGE_SIZE - 1) // NOTE_PAGE_SIZE
+                       if remaining_notes else 0)
+    total_continuation_pages = len(detail_chunks) + note_page_count
+    total_page_count = 1 + total_continuation_pages
+
+    if detail_chunks:
+        for page_index, chunk in enumerate(detail_chunks, start=1):
+            end_row = _write_device_detail_page(
+                ws, next_row, chunk, form, 4 + (page_index - 1) * DETAIL_PAGE_SIZE,
+                page_index + 1, total_page_count,
+            )
+            continuation_pages.append(end_row)
+            next_row = end_row + 1
+
+    if remaining_notes:
+        for note_index in range(0, len(remaining_notes), NOTE_PAGE_SIZE):
+            chunk = remaining_notes[note_index:note_index + NOTE_PAGE_SIZE]
+            end_row = _write_notes_detail_page(
+                ws, next_row, chunk, form,
+                len(detail_chunks) + (note_index // NOTE_PAGE_SIZE) + 2,
+                total_page_count,
+            )
+            continuation_pages.append(end_row)
+            next_row = end_row + 1
+
+    if continuation_pages:
+        ws.row_breaks.append(Break(id=35))
+        for end_row in continuation_pages[:-1]:
+            ws.row_breaks.append(Break(id=end_row))
+
+    last_row = max(35, next_row - 1)
+    ws.print_area = f"A1:Q{last_row}"
     ws.page_setup.orientation = ws.ORIENTATION_PORTRAIT
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
     ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 1
+    ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.page_margins = PageMargins(left=0.25, right=0.25, top=0.25, bottom=0.25,
                                   header=0.1, footer=0.1)
-    ws.sheet_properties.pageSetUpPr.autoPageBreaks = False
+    ws.sheet_properties.pageSetUpPr.autoPageBreaks = True
+    ws.oddFooter.center.text = "搬入依頼書　第 &P 页"
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True
     wb.calculation.calcMode = "auto"

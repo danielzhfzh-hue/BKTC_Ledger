@@ -829,6 +829,9 @@ function renderMoveInDefaults(form) {
   $("moveInVehicleTonnage").value = s(form.vehicle_tonnage);
   $("moveInVehicleNote").value = s(form.vehicle_note);
   $("moveInNotes").value = s(form.notes);
+  $("moveInSystemNotes").textContent = form.system_notes
+    ? `系统自动带入：${String(form.system_notes).replace(/\n/g, "；")}`
+    : "设备与 PO 对应关系将写入搬入依頼書的全量设备明细，不再挤在特記事項中。";
   $("moveInManager").value = s(form.manager);
   $("moveInIssuer").value = s(form.issuer);
 }

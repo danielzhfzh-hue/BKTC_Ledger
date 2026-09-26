@@ -259,21 +259,19 @@ def build_workbook(form):
                border=GRID, alignment=center)
 
     devices = form.get("devices") or []
-    _field_label(ws, 11, 1, "設備明細")
-    _merge(ws, 11, 3, 11, 17, f"全{len(devices)}台", font=FONT,
-           border=GRID, alignment=left)
-    device_header_row = 12
-    device_end_row = _write_device_table(ws, device_header_row, devices)
 
-    # Keep the administrative part of the request directly below the one
-    # authoritative equipment list.  There is no summary table or appendix.
-    row = device_end_row + 1
+    # Keep the request details at the top of the form.  The equipment list is
+    # item 9 at the bottom, so a large batch cannot push the information needed
+    # to arrange the delivery onto a later page.
+    row = 11
     _field_label(ws, row, 2, "客先装置ID No.")
     _merge(ws, row, 3, row, 4, ("☑ 有り" if form.get("has_customer_id") else "☐ 有り"),
            font=FONT, border=GRID, alignment=center)
-    _merge(ws, row, 5, row, 15, ("☐ 無し" if form.get("has_customer_id") else "☑ 無し"),
+    _merge(ws, row, 5, row, 6, "ID No.",
+           font=SMALL_FONT, border=GRID, alignment=center)
+    _merge(ws, row, 7, row, 13, "", font=FONT, border=GRID, alignment=left)
+    _merge(ws, row, 14, row, 17, ("☐ 無し" if form.get("has_customer_id") else "☑ 無し"),
            font=FONT, border=GRID, alignment=center)
-    _merge(ws, row, 16, row, 17, "", font=FONT, border=GRID, alignment=center)
 
     row += 1
     _field_label(ws, row, 3, "搬入先名")
@@ -285,15 +283,14 @@ def build_workbook(form):
     _field_label(ws, row, 5, "搬入連絡先")
     _merge(ws, row, 3, row, 17, form.get("contact", ""), font=FONT, border=GRID, alignment=left)
     row += 1
-    _field_label(ws, row, 6, "搬入日時", row + 1)
-    _merge(ws, row, 3, row, 8, form.get("move_in_date", ""), font=FONT, border=GRID,
+    ws.row_dimensions[row].height = 24
+    _field_label(ws, row, 6, "搬入日時")
+    _merge(ws, row, 3, row, 4, "搬入日", font=SMALL_FONT, border=GRID, alignment=center)
+    _merge(ws, row, 5, row, 9, form.get("move_in_date", ""), font=FONT, border=GRID,
            alignment=center, number_format="date")
-    _merge(ws, row, 9, row, 10, "", font=FONT, border=GRID, alignment=center)
-    _merge(ws, row, 11, row, 14, form.get("move_in_time", ""), font=FONT, border=GRID, alignment=center)
-    _merge(ws, row + 1, 3, row + 1, 6, "AM　・　PM", font=FONT, border=GRID, alignment=center)
-    _merge(ws, row + 1, 7, row + 1, 10, "", font=FONT, border=GRID, alignment=center)
-    _merge(ws, row + 1, 11, row + 1, 17, "", font=FONT, border=GRID, alignment=center)
-    row += 2
+    _merge(ws, row, 10, row, 11, "時刻", font=SMALL_FONT, border=GRID, alignment=center)
+    _merge(ws, row, 12, row, 17, form.get("move_in_time", ""), font=FONT, border=GRID, alignment=center)
+    row += 1
     _field_label(ws, row, 7, "搬入車両", row + 3)
     vehicles = ["平ボディー", "ユニック車", "パワーゲート車", "その他"]
     chosen = str(form.get("vehicle_type") or "")
@@ -305,7 +302,7 @@ def build_workbook(form):
                    font=FONT, border=GRID, alignment=center)
             _set(ws, f"J{vehicle_row}", "t", font=FONT, border=GRID, alignment=center)
         else:
-            _merge(ws, vehicle_row, 8, vehicle_row, 9, "※１", font=SMALL_FONT,
+            _merge(ws, vehicle_row, 8, vehicle_row, 9, "", font=FONT,
                    border=GRID, alignment=center)
             _merge(ws, vehicle_row, 11, vehicle_row, 17, form.get("vehicle_note", ""),
                    font=SMALL_FONT, border=GRID, alignment=left)
@@ -329,7 +326,14 @@ def build_workbook(form):
                notes[note_row - note_start] if note_row - note_start < len(notes) else "",
                font=FONT, border=GRID, alignment=wrap)
 
-    last_row = note_end
+    row = note_end + 1
+    device_title_row = row
+    _field_label(ws, device_title_row, 9, "設備明細")
+    _merge(ws, device_title_row, 3, device_title_row, 17, f"全{len(devices)}台", font=FONT,
+           border=GRID, alignment=left)
+    device_header_row = device_title_row + 1
+    device_end_row = _write_device_table(ws, device_header_row, devices)
+    last_row = device_end_row
     ws.print_area = f"A1:Q{last_row}"
     ws.page_setup.orientation = ws.ORIENTATION_PORTRAIT
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
@@ -339,13 +343,12 @@ def build_workbook(form):
     ws.page_margins = PageMargins(left=0.25, right=0.25, top=0.25, bottom=0.25,
                                   header=0.1, footer=0.1)
     ws.sheet_properties.pageSetUpPr.autoPageBreaks = True
-    # Repeat the equipment header only when the equipment table itself spills
-    # past the first printed page.  If the complete list ends on page one,
-    # later pages contain only request details and should not show a duplicate
-    # device header.
-    if device_end_row > 35:
-        ws.print_title_rows = "1:12"
-    ws.freeze_panes = "A13"
+    # Repeat only the equipment title/header when the list is likely to span
+    # pages.  The request details above must not be repeated as a fake table
+    # header, and a short list that fits on page one stays uncluttered.
+    if len(devices) > 8 or note_rows > 8:
+        ws.print_title_rows = f"{device_title_row}:{device_header_row}"
+    ws.freeze_panes = "A11"
     ws.oddFooter.center.text = "搬入依頼書　第 &P 页"
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True

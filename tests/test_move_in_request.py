@@ -59,21 +59,35 @@ class MoveInRequestTests(unittest.TestCase):
             move_in_request.export_xlsx(form, path)
             workbook = load_workbook(path, data_only=False)
             sheet = workbook["搬入依頼書"]
-            self.assertEqual(sheet.print_area, "'搬入依頼書'!$A$1:$Q$37")
+            self.assertEqual(sheet.print_area, "'搬入依頼書'!$A$1:$Q$36")
             self.assertEqual(sheet.page_setup.orientation, "portrait")
             self.assertEqual(sheet.page_setup.fitToWidth, 1)
             self.assertEqual(sheet.page_setup.fitToHeight, 0)
             self.assertEqual(workbook.sheetnames, ["搬入依頼書"])
             self.assertIsNone(sheet.print_title_rows)
-            self.assertEqual(sheet["C13"].value, "KT1000FI")
-            self.assertEqual(sheet["F13"].value, "25800")
-            self.assertEqual(sheet["J13"].value, "26BS006-01")
-            self.assertEqual(sheet["N13"].value, "PO-1")
-            self.assertEqual(sheet["F18"].value, "25805")
-            self.assertEqual(sheet["J18"].value, "26BS006-06")
-            self.assertEqual(sheet["N14"].value, "PO-2")
-            self.assertIn("C14:E18", {str(r) for r in sheet.merged_cells.ranges})
-            self.assertIn("N14:Q18", {str(r) for r in sheet.merged_cells.ranges})
+            self.assertEqual(sheet["C31"].value, "KT1000FI")
+            self.assertEqual(sheet["F31"].value, "25800")
+            self.assertEqual(sheet["J31"].value, "26BS006-01")
+            self.assertEqual(sheet["N31"].value, "PO-1")
+            self.assertEqual(sheet["F36"].value, "25805")
+            self.assertEqual(sheet["J36"].value, "26BS006-06")
+            self.assertEqual(sheet["N32"].value, "PO-2")
+            self.assertIn("C32:E36", {str(r) for r in sheet.merged_cells.ranges})
+            self.assertIn("N32:Q36", {str(r) for r in sheet.merged_cells.ranges})
+            self.assertEqual(sheet["C11"].value, "☑ 有り")
+            self.assertEqual(sheet["E11"].value, "ID No.")
+            self.assertIn(sheet["G11"].value, (None, ""))
+            self.assertEqual(sheet["N11"].value, "☐ 無し")
+            self.assertEqual(sheet["C16"].value, "搬入日")
+            self.assertEqual(sheet["E16"].value.isoformat(), "2026-08-31T00:00:00")
+            self.assertEqual(sheet["J16"].value, "時刻")
+            self.assertIn(sheet["L16"].value, (None, ""))
+            self.assertIn(sheet["H20"].value, (None, ""))
+            self.assertNotIn("※１", "\n".join(
+                str(cell.value or "")
+                for row in sheet.iter_rows()
+                for cell in row
+            ))
             self.assertEqual(len(sheet.row_breaks.brk), 0)
 
     def test_workbook_supports_fifty_devices_without_truncation(self):
@@ -88,13 +102,13 @@ class MoveInRequestTests(unittest.TestCase):
             sheet = workbook["搬入依頼書"]
             machine_numbers = [
                 sheet.cell(row=row, column=6).value
-                for row in range(13, 63)
+                for row in range(31, 81)
                 if str(sheet.cell(row=row, column=6).value or "").startswith("2580")
             ]
             self.assertEqual(machine_numbers, [f"2580{i}" for i in range(50)])
-            self.assertEqual(sheet["F13"].value, "25800")
-            self.assertEqual(sheet["F62"].value, "258049")
-            self.assertEqual(sheet.print_title_rows, "$1:$12")
+            self.assertEqual(sheet["F31"].value, "25800")
+            self.assertEqual(sheet["F80"].value, "258049")
+            self.assertEqual(sheet.print_title_rows, "$29:$30")
             self.assertIn("现场需要分两次进场", "\n".join(
                 str(cell.value or "")
                 for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row)
@@ -143,7 +157,7 @@ class MoveInRequestTests(unittest.TestCase):
             self.assertTrue(output.is_file())
             self.assertEqual(output.parent, output_dir)
             self.assertEqual(result["device_count"], 2)
-            self.assertEqual(load_workbook(output).active["C13"].value, "KT1000FI")
+            self.assertEqual(load_workbook(output).active["C31"].value, "KT1000FI")
 
     def test_api_export_rejects_stale_database_revision(self):
         with tempfile.TemporaryDirectory() as tmp:

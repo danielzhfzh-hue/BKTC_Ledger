@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
-__version__ = "1.7.2"
+__version__ = "1.8.0"
 APP_DISPLAY_NAME = "上海康肯销售订单管理系统"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"
@@ -29,6 +29,7 @@ sys.path.insert(0, APP_DIR)
 
 import core  # noqa: E402
 import database  # noqa: E402
+import move_in_request  # noqa: E402
 import quotation as quotation_export  # noqa: E402
 import webview  # noqa: E402
 
@@ -528,6 +529,75 @@ class Api:
         path = os.path.join(dl, f"{safe}_导出_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         core.export_filtered(path, table, rows, fields)
         return {"ok": True, "path": path, "rows": len(rows), "fields": len(fields)}
+
+    def get_move_in_request_defaults(self, shipment_id):
+        """Read a shipment and its linked order/devices from the current SQLite DB."""
+        if not os.path.exists(self.database_path):
+            self.load_state()
+        current_revision = database.get_revision(self.database_path)
+        if (self.database_revision is not None
+                and current_revision != self.database_revision):
+            raise database.StaleImportError(
+                f"数据库已由其他窗口更新（当前修订 {current_revision}，本窗口为 {self.database_revision}），"
+                "请重新加载后再生成搬入依頼書。"
+            )
+        data = database.load_database(self.database_path)
+        defaults = move_in_request.shipment_defaults(data, shipment_id=shipment_id)
+        defaults["database_revision"] = current_revision
+        return defaults
+
+    def export_move_in_request(self, form):
+        """Validate the selected batch against SQLite, then export a move-in request."""
+        if not isinstance(form, dict):
+            raise RuntimeError("搬入依頼書数据格式无效")
+        if not os.path.exists(self.database_path):
+            self.load_state()
+        current_revision = database.get_revision(self.database_path)
+        expected = form.get("database_revision")
+        if expected not in (None, "") and int(expected) != current_revision:
+            raise database.StaleImportError(
+                f"数据库已变化（当前修订 {current_revision}，窗口读取为 {expected}），请重新打开搬入依頼書窗口。"
+            )
+        data = database.load_database(self.database_path)
+        defaults = move_in_request.shipment_defaults(
+            data, shipment_id=form.get("shipment_id"),
+            job_no=form.get("job_no"), batch=form.get("batch"),
+        )
+        # Keep the authoritative device/order fields from SQLite.  Only the
+        # explicitly supplemental form fields are accepted from the dialog.
+        merged = dict(defaults)
+        for key in ("issue_date", "move_in_date", "move_in_time", "contact",
+                    "vehicle_type", "vehicle_tonnage", "vehicle_note", "department",
+                    "other_department", "notes", "manager", "issuer", "customer",
+                    "address", "has_customer_id"):
+            if key in form:
+                merged[key] = form[key]
+        errors = move_in_request.validate_form(merged)
+        if errors:
+            raise RuntimeError("；".join(errors))
+        download_dir = os.path.join(os.path.expanduser("~"), "Downloads", "搬入依頼書")
+        os.makedirs(download_dir, exist_ok=True)
+        raw_name = f"搬入依頼書_{merged['job_no']}_{merged['batch']}_{merged.get('move_in_date') or '未定'}"
+        safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .")
+        safe_name = safe_name[:150] or "搬入依頼書"
+        path = os.path.join(download_dir, safe_name + ".xlsx")
+        notice = ""
+        try:
+            move_in_request.export_xlsx(merged, path)
+        except OSError as exc:
+            if not _is_write_permission_error(exc):
+                raise
+            path = os.path.join(
+                download_dir, f"{safe_name}_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+            )
+            move_in_request.export_xlsx(merged, path)
+            notice = "目标文件可能正被 Excel 占用，已改用带时间戳文件"
+        return {
+            "ok": True, "path": path, "notice": notice,
+            "job_no": merged["job_no"], "batch": merged["batch"],
+            "device_count": len(merged["devices"]),
+            "database_revision": current_revision,
+        }
 
     def set_operator_name(self, name):
         name = str(name or "").strip()

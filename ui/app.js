@@ -382,6 +382,7 @@ function switchTab(tab) {
   if (tab === "审计记录") loadAuditEvents();
   if (tab === "报价单") loadQuotations($("quoteSearch").value.trim());
   if (state.schema?.[tab]) renderGrid();
+  updateMoveInButton();
 }
 
 $("summaryCards").addEventListener("click", (e) => {
@@ -774,7 +775,149 @@ function applySelectionClasses() {
     const cb = tr.querySelector("td.cb input");
     if (cb) cb.checked = sel;
   });
+  updateMoveInButton();
 }
+
+let _moveInDefaults = null;
+
+function updateMoveInButton() {
+  const button = $("btnMoveInRequest");
+  if (!button) return;
+  const indexes = [...state.selection];
+  const valid = state.tab === "发货批次" && indexes.length === 1
+    && !!state.data?.["发货批次"]?.[indexes[0]];
+  button.disabled = !valid;
+  button.title = valid
+    ? "根据选中的发货批次生成搬入依頼書"
+    : "请在发货批次页恰好选择一个批次";
+}
+
+function setMoveInErrors(messages) {
+  const box = $("moveInErrors");
+  const values = Array.isArray(messages) ? messages.filter(Boolean) : [String(messages || "")];
+  if (!values.length) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  box.classList.remove("hidden");
+  box.innerHTML = values.map((message) => `<div>${esc(message)}</div>`).join("");
+}
+
+function renderMoveInDefaults(form) {
+  $("moveInSource").textContent =
+    `${form.job_no} · 发货批次 ${form.batch} · 出荷日 ${form.ship_date || "未填写"} · 共 ${form.devices.length} 台设备`;
+  const rows = form.devices.map((device) => `
+    <div class="move-in-device-row">
+      <span>${esc(device.model || "—")}</span>
+      <span>${esc(device.machine_no || "—")}</span>
+      <span>${esc(device.serial_no || "—")}</span>
+      <span>${esc(device.po_no || "—")}</span>
+    </div>`).join("");
+  $("moveInDevices").innerHTML = `
+    <div class="move-in-device-row head"><span>機種</span><span>機番</span><span>制番</span><span>PO No</span></div>${rows}`;
+  $("moveInIssueDate").value = s(form.issue_date);
+  $("moveInDate").value = s(form.move_in_date);
+  $("moveInTime").value = s(form.move_in_time);
+  $("moveInContact").value = s(form.contact);
+  $("moveInCustomer").value = s(form.customer);
+  $("moveInAddress").value = s(form.address);
+  $("moveInDepartment").value = s(form.department);
+  $("moveInOtherDepartment").value = s(form.other_department);
+  $("moveInCustomerId").value = form.has_customer_id ? "yes" : "no";
+  $("moveInVehicleType").value = s(form.vehicle_type);
+  $("moveInVehicleTonnage").value = s(form.vehicle_tonnage);
+  $("moveInVehicleNote").value = s(form.vehicle_note);
+  $("moveInNotes").value = s(form.notes);
+  $("moveInManager").value = s(form.manager);
+  $("moveInIssuer").value = s(form.issuer);
+}
+
+function closeMoveInModal() {
+  $("moveInModal").classList.add("hidden");
+  _moveInDefaults = null;
+  setMoveInErrors([]);
+}
+
+async function openMoveInRequest() {
+  if (state.tab !== "发货批次" || state.selection.size !== 1) {
+    toast("请在发货批次页恰好选择一个批次", "error");
+    return;
+  }
+  if (state.dirty) {
+    if (!confirm("当前有未保存更改。生成搬入依頼書前需要先保存数据库，是否保存并继续？")) return;
+    if (!(await saveCurrent(false))) return;
+  }
+  const index = [...state.selection][0];
+  const shipment = state.data["发货批次"][index];
+  if (!shipment || !s(shipment["记录ID"])) {
+    toast("所选批次缺少记录ID，请先保存数据库", "error");
+    return;
+  }
+  try {
+    setStatus("正在读取所选批次及关联设备…");
+    _moveInDefaults = await call("get_move_in_request_defaults", s(shipment["记录ID"]));
+    renderMoveInDefaults(_moveInDefaults);
+    $("moveInModal").classList.remove("hidden");
+    setStatus("已读取搬入依頼书基础信息，请补充搬入信息");
+  } catch (err) {
+    setStatus(String(err), "error");
+    toast(String(err), "error");
+  }
+}
+
+function readMoveInForm() {
+  return {
+    ..._moveInDefaults,
+    issue_date: $("moveInIssueDate").value,
+    move_in_date: $("moveInDate").value,
+    move_in_time: $("moveInTime").value.trim(),
+    contact: $("moveInContact").value.trim(),
+    customer: $("moveInCustomer").value.trim(),
+    address: $("moveInAddress").value.trim(),
+    department: $("moveInDepartment").value.trim(),
+    other_department: $("moveInOtherDepartment").value.trim(),
+    has_customer_id: $("moveInCustomerId").value === "yes",
+    vehicle_type: $("moveInVehicleType").value,
+    vehicle_tonnage: $("moveInVehicleTonnage").value.trim(),
+    vehicle_note: $("moveInVehicleNote").value.trim(),
+    notes: $("moveInNotes").value,
+    manager: $("moveInManager").value.trim(),
+    issuer: $("moveInIssuer").value.trim(),
+  };
+}
+
+$("btnMoveInRequest").addEventListener("click", openMoveInRequest);
+$("moveInClose").addEventListener("click", closeMoveInModal);
+$("moveInCancel").addEventListener("click", closeMoveInModal);
+$("moveInModal").addEventListener("mousedown", (event) => {
+  if (event.target === $("moveInModal")) closeMoveInModal();
+});
+$("moveInExport").addEventListener("click", async () => {
+  if (!_moveInDefaults) return;
+  const form = readMoveInForm();
+  const errors = [];
+  if (!form.customer) errors.push("搬入先名不能为空");
+  if (!form.address) errors.push("搬入先地址不能为空");
+  if (!form.move_in_date) errors.push("搬入日期不能为空");
+  if (errors.length) { setMoveInErrors(errors); return; }
+  setMoveInErrors([]);
+  try {
+    $("moveInExport").disabled = true;
+    setStatus("正在生成搬入依頼書 XLSX…");
+    const result = await call("export_move_in_request", form);
+    closeMoveInModal();
+    setStatus(`搬入依頼書已生成：${result.path}${result.notice ? `；${result.notice}` : ""}`);
+    toast(result.notice || "搬入依頼書已生成", "ok");
+    await call("open_path", result.path);
+  } catch (err) {
+    setMoveInErrors([String(err)]);
+    setStatus(String(err), "error");
+    toast(String(err), "error");
+  } finally {
+    $("moveInExport").disabled = false;
+  }
+});
 
 function updateRec(table, ri, field, raw, deferRecompute = false) {
   const f = fieldsOf(table).find((x) => x.name === field);

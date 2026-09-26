@@ -66,6 +66,7 @@
       <button data-act="dup">⧉ 重复选中行</button>
       <button data-act="rename" class="only-ship" title="把选中批次的名称同步到设备/开票/回款">✎ 重命名批次</button>
       <button data-act="split" class="only-ship" title="把选中批次的部分设备移到另一个批次">⇲ 拆分批次</button>
+      <button id="btnMoveInRequest" class="only-ship primary" title="选中一个发货批次生成搬入依頼書">生成搬入依頼書</button>
       <button data-act="copy">复制选中 (TSV)</button>
       <button data-act="export" title="把当前筛选结果导出为 Excel（可选字段）">📥 导出 Excel</button>
       <button id="btnGridAutofit" title="按表头与当前数据样本自适应列宽">↔ 自适应列宽</button>
@@ -392,6 +393,61 @@
       <div id="exportCount" class="export-count muted"></div>
     </div>
     <div class="modal-foot"><button id="exportCancel">取消</button><button id="exportOk" class="primary">导出到 Excel</button></div>
+  </div>
+</div>
+
+<div id="moveInModal" class="modal hidden">
+  <div class="modal-card move-in-card">
+    <div class="modal-head">
+      <div><span class="modal-kicker">KE-403 · SHIPMENT REQUEST</span><strong>生成装置搬入依頼書</strong></div>
+      <button id="moveInClose" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="moveInErrors" class="noc-errors hidden"></div>
+      <div id="moveInSource" class="move-in-source"></div>
+      <div class="move-in-section">
+        <h4>① 系统读取内容（只读）</h4>
+        <div id="moveInDevices" class="move-in-devices"></div>
+        <p class="entry-help">设备、機番、制番和 PO 只从当前批次重新读取；如有错误，请先修正台账并保存数据库。</p>
+      </div>
+      <div class="move-in-section">
+        <h4>② 搬入信息</h4>
+        <div class="entry-grid">
+          <label>発行日<input id="moveInIssueDate" type="date"></label>
+          <label>搬入日期<input id="moveInDate" type="date"></label>
+          <label>搬入时间段<input id="moveInTime" placeholder="如 13:00～14:00"></label>
+          <label>搬入联系人<input id="moveInContact" placeholder="姓名 / 电话"></label>
+          <label>搬入先名<input id="moveInCustomer"></label>
+          <label>搬入先住所<input id="moveInAddress"></label>
+          <label class="full">发货/搬入所属<input id="moveInDepartment"></label>
+          <label>其他所属<input id="moveInOtherDepartment"></label>
+          <label>客先装置ID No.
+            <select id="moveInCustomerId"><option value="yes">有り</option><option value="no">無し</option></select>
+          </label>
+        </div>
+      </div>
+      <div class="move-in-section">
+        <h4>③ 搬入车辆</h4>
+        <div class="entry-grid">
+          <label>车辆类型<select id="moveInVehicleType"><option value="">未定</option><option>平ボディー</option><option>ユニック車</option><option>パワーゲート車</option><option>その他</option></select></label>
+          <label>吨位<input id="moveInVehicleTonnage" placeholder="如 4"></label>
+          <label class="full">车辆/现场说明<input id="moveInVehicleNote"></label>
+        </div>
+      </div>
+      <div class="move-in-section">
+        <h4>④ 特記事項及审批</h4>
+        <div class="entry-grid">
+          <label class="full">特記事項<textarea id="moveInNotes" rows="5"></textarea></label>
+          <label>所属長<input id="moveInManager"></label>
+          <label>発行者<input id="moveInIssuer"></label>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span id="moveInSafety" class="modal-safety">生成不会修改订单数据；文件将保存到 Downloads/搬入依頼書。</span>
+      <button id="moveInCancel">取消</button>
+      <button id="moveInExport" class="primary">生成并打开 XLSX</button>
+    </div>
   </div>
 </div>
 

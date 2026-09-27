@@ -237,31 +237,6 @@ def _write_device_side(ws, row, device, number, columns):
            font=DETAIL_FONT, border=GRID, alignment=center)
 
 
-def _merge_device_groups(ws, first_row, devices, columns):
-    """Merge adjacent PO/model values within one side of a 30-slot block."""
-    po_col, model_start, model_end = columns
-    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    po_center = Alignment(horizontal="center", vertical="center",
-                          shrink_to_fit=True)
-    for key, start_col, end_col in (
-        ("po_no", po_col, po_col),
-        ("model", model_start, model_end),
-    ):
-        group_start = 0
-        for group_end in range(1, len(devices) + 1):
-            at_end = group_end == len(devices)
-            same_as_next = (not at_end
-                            and devices[group_end].get(key, "")
-                            == devices[group_start].get(key, ""))
-            if at_end or not same_as_next:
-                _merge(ws, first_row + group_start, start_col,
-                       first_row + group_end - 1, end_col,
-                       devices[group_start].get(key, ""),
-                       font=DETAIL_FONT, border=GRID,
-                       alignment=po_center if key == "po_no" else center)
-                group_start = group_end
-
-
 def _write_device_table(ws, header_row, devices):
     """Write paired 1--30 blocks and return the last row plus page breaks."""
     left_columns = (1, 2, 3, 4, 5, 6, 7, 8)
@@ -290,13 +265,6 @@ def _write_device_table(ws, header_row, devices):
                                left_columns)
             _write_device_side(ws, row, right_device, block_start + right_index + 1,
                                right_columns)
-        _merge_device_groups(ws, first_data_row,
-                             [block[i] for i in range(0, len(block), 2)],
-                             (2, 3, 4))
-        right_devices = [block[i] for i in range(1, len(block), 2)]
-        if right_devices:
-            _merge_device_groups(ws, first_data_row, right_devices,
-                                 (10, 11, 12))
         end_row = first_data_row + row_count - 1
     return end_row, page_breaks
 

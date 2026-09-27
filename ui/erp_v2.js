@@ -104,7 +104,7 @@
     const pendingAccept = orders.reduce(function (a, x) { return a + Math.max(0, x.shipped - x.accepted); }, 0);
     const pendingSerial = orders.reduce(function (a, x) { return a + x.pendingSerial; }, 0);
     const issues = validateAll();
-    $("erpToday").textContent = new Date().toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" });
+    $("erpToday").textContent = new Date().toLocaleDateString(window.I18N?.locale?.() || "zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" });
     const kpis = [
       ["订单", orders.length, "当前业务订单", ""],
       ["待发货", pendingShip.length, "尚未完成出货", "warn"],

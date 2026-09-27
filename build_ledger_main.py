@@ -488,9 +488,10 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
     # 第4行分组
     n_ship = 9
     n_pay = len(cols) - n_ship - 6
-    groups = [('出荷状況', 1, n_ship, 'DDEBF7'),
-              ('回収状況', n_ship + 1, n_ship + n_pay, 'FCE4D6'),
-              ('其他情報', n_ship + n_pay + 1, ncol, 'EDEDED')]
+    groups = [('出荷状況', 1, n_ship, 'DDEBF7')]
+    if n_pay:
+        groups.append(('回収状況', n_ship + 1, n_ship + n_pay, 'FCE4D6'))
+    groups.append(('其他情報', n_ship + n_pay + 1, ncol, 'EDEDED'))
     for gname, c1, c2, color in groups:
         ws.merge_cells(start_row=4, start_column=c1, end_row=4, end_column=c2)
         set_cell(ws, 4, c1, gname, font=F_BOLD,

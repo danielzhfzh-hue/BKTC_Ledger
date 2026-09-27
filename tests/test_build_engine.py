@@ -48,6 +48,25 @@ class BuildEngineReliabilityTests(unittest.TestCase):
         self.assertEqual(ws.cell(6, headers["预付款·开票日"]).value, "2026/08/03")
         self.assertEqual(ws.cell(6, headers["预付款·回款日"]).value, "2026/08/06")
 
+    def test_job_without_payment_columns_keeps_other_info_group_valid(self):
+        ws = Workbook().active
+        contract = {
+            "担当者": "担当", "客户": "客户", "JOB No": "26BS005",
+            "订单内容": "设备", "付款条件": "", "发货方式": "国内运输",
+            "发货地点": "PKTC", "送货地点": "客户工厂",
+        }
+        devices = [{
+            "製造番号": "26BS005-01", "機番": "2580214", "设备型号": "KT1000FI",
+            "PO No": "5000001546", "未税单价": 266000, "是否无偿": "否",
+            "发货批次": "1", "送货单回收": "", "验收状态": "未验收",
+            "质保开始日": "", "质保结束日": "", "质保期": "", "备注": "",
+        }]
+
+        ledger.write_job_sheet(ws, "26BS005", contract, devices, [], [], {}, [], [])
+
+        self.assertEqual(ws.cell(4, 10).value, "其他情報")
+        self.assertEqual(ws.cell(5, 10).value, "是否无偿")
+
     def test_no_device_job_without_payment_ratio_is_visible_for_confirmation(self):
         contracts = [{"JOB No": "26BS001", "客户": "客户"}]
         invoices = [{

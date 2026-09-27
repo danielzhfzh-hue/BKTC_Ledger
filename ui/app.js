@@ -2277,7 +2277,7 @@ async function refresh(store) {
   clearPendingAuditActions();
   renderAll();
   renderRules();
-  switchTab("摘要");
+  switchTab("工作台");
   setStatus(r.config_warning || (r.migration
     ? `已从旧 JSON 迁移到本地数据库：${r.store_path}` : "就绪"),
     r.config_warning ? "error" : "");
@@ -2292,7 +2292,7 @@ window.addEventListener("pywebviewready", async () => {
     state.dirty = false;
     renderAll();
     renderRules();
-    switchTab("摘要");
+    switchTab("工作台");
     setStatus(r.config_warning || (r.migration
       ? `已从旧 JSON 迁移到本地数据库：${r.store_path}` : "就绪"),
       r.config_warning ? "error" : "");
@@ -3310,6 +3310,54 @@ function buildNocDatalists() {
   fill("dlKind", "付款条件", "款类");
 }
 
+async function loadNocMasterData() {
+  try {
+    const master = await call("list_master_data");
+    state._nocMasterData = master;
+    const appendUnique = (id, values) => {
+      const list = $(id);
+      const existing = new Set([...list.querySelectorAll("option")].map((o) => o.value));
+      for (const value of values.filter(Boolean)) {
+        if (existing.has(value)) continue;
+        list.insertAdjacentHTML("beforeend", `<option value="${esc(value)}">`);
+        existing.add(value);
+      }
+    };
+    appendUnique("dlCustomer", (master.customers || []).map((x) => x.name));
+    appendUnique("dlModel", (master.models || []).map((x) => x.model));
+    appendUnique("dlAssist", (master.customers || []).map((x) => x.salesperson));
+    appendUnique("dlShipTo", (master.customers || []).map((x) => x.ship_to));
+    const select = $("nocMasterTermTemplate");
+    select.innerHTML = '<option value="">主数据模板</option>' +
+      (master.payment_templates || []).filter((x) => x.active !== 0).map((x) =>
+        `<option value="${esc(x.template_id)}">${esc(x.name)}${x.currency ? " · " + esc(x.currency) : ""}</option>`
+      ).join("");
+  } catch (error) {
+    console.warn("master data unavailable", error);
+  }
+}
+
+function fillNocMasterTemplate(templateId) {
+  if (!templateId || !state._nocMasterData) return;
+  const template = (state._nocMasterData.payment_templates || []).find((x) => x.template_id === templateId);
+  if (!template) return;
+  $("nocTermRows").innerHTML = "";
+  for (const item of (template.items || [])) {
+    addNocTermRow(item.kind, item.ratio, item.days, item.trigger, item.description_zh || item.description || "");
+  }
+  if (!(template.items || []).length) addNocTermRow();
+  nocTermSummary();
+}
+
+function applyNocCustomerMasterDefaults() {
+  const name = $("nocCustomer").value.trim();
+  const customer = (state._nocMasterData?.customers || []).find((x) => x.name === name && !x.inferred);
+  if (!customer) return;
+  if (customer.currency) $("nocCurrency").value = customer.currency;
+  if (customer.salesperson && !$("nocAssist").value.trim()) $("nocAssist").value = customer.salesperson;
+  if (customer.ship_to && !$("nocShipTo").value.trim()) $("nocShipTo").value = customer.ship_to;
+}
+
 function nocDevRowHtml() {
   return `<tr>
     <td><input class="nd-model" list="dlModel" autocomplete="off" placeholder="型号"></td>
@@ -3398,9 +3446,10 @@ async function loadNocQuoteTemplates(selected = "") {
 }
 
 async function applyQuoteToNocForm(quoteId) {
-  if (!quoteId) return;
+  if (!quoteId) { state._nocQuote = null; return; }
   try {
     const quote = await call("get_quotation", quoteId);
+    state._nocQuote = quote;
     $("nocCustomer").value = s(quote.customer);
     $("nocAssist").value = s(quote.salesperson);
     $("nocContent").value = s(quote.description || quote.subject);
@@ -3457,8 +3506,9 @@ async function openNewOrder() {
   $("nocErrors").classList.add("hidden");
   $("nocErrors").innerHTML = "";
   state._nocSubmitting = false;
+  state._nocQuote = null;
   $("newOrderModal").classList.remove("hidden");
-  await loadNocQuoteTemplates();
+  await Promise.all([loadNocQuoteTemplates(), loadNocMasterData()]);
 }
 
 function closeNewOrder() { $("newOrderModal").classList.add("hidden"); }
@@ -3486,6 +3536,9 @@ function readNocForm() {
     note: $("nocNote").value.trim(),
     batchName: $("nocBatch").value.trim() || "1",
     shipDate: $("nocShipDate").value,
+    sourceQuoteId: $("nocQuoteTemplate").value || "",
+    sourceQuoteNo: state._nocQuote && state._nocQuote.quote_id === $("nocQuoteTemplate").value
+      ? s(state._nocQuote.quote_no) : "",
     devices,
     terms: [...document.querySelectorAll("#nocTermRows tr")].map((tr) => ({
       kind: tr.querySelector(".nt-kind").value.trim(),
@@ -3537,7 +3590,8 @@ function commitNewOrder(f) {
   state.data["合同订单"].push({
     "记录ID": newId(), "JOB No": job, "客户": f.customer, "担当者": f.assist,
     "订单内容": f.content, "发货方式": f.shipMethod, "发货地点": f.shipFrom,
-    "送货地点": f.shipTo, "币种": f.currency || "RMB", "备注": f.note,
+    "送货地点": f.shipTo, "币种": f.currency || "RMB",
+    "来源报价ID": f.sourceQuoteId || "", "来源报价单号": f.sourceQuoteNo || "", "备注": f.note,
   });
   for (const d of f.devices) {
     if (!d.model || !(d.qty > 0)) continue;
@@ -3590,6 +3644,8 @@ $("nocDevRows").addEventListener("click", (e) => {
 });
 $("nocJobKind").addEventListener("change", (e) => { $("nocJob").value = suggestJobNo(e.target.value); });
 $("nocQuoteTemplate").addEventListener("change", (e) => applyQuoteToNocForm(e.target.value));
+$("nocMasterTermTemplate").addEventListener("change", (e) => fillNocMasterTemplate(e.target.value));
+$("nocCustomer").addEventListener("change", applyNocCustomerMasterDefaults);
 $("nocAddTerm").addEventListener("click", () => { addNocTermRow(); nocTermSummary(); });
 $("nocTermRows").addEventListener("input", nocTermSummary);
 $("nocTermRows").addEventListener("click", (e) => {

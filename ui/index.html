@@ -36,9 +36,11 @@
   <div class="erp-nav-section">财务</div>
   <button class="erp-nav-item" data-view="开票记录"><span>票</span><b>开票</b></button>
   <button class="erp-nav-item" data-view="回款记录"><span>¥</span><b>回款</b></button>
+  <button class="erp-nav-item" data-view="财务驾驶舱"><span>▥</span><b>财务驾驶舱</b></button>
   <div class="erp-nav-section">分析与管理</div>
   <button class="erp-nav-item" data-view="跨表查询"><span>⌗</span><b>分析查询</b></button>
   <button class="erp-nav-item" data-view="审计记录"><span>✓</span><b>审计记录</b></button>
+  <button class="erp-nav-item" data-view="主数据"><span>◇</span><b>主数据</b></button>
   <details class="erp-advanced"><summary>高级数据表</summary><button data-view="合同订单">合同订单</button><button data-view="付款条件">付款条件</button><button data-view="预警规则">预警规则</button><button data-view="使用指南">使用指南</button></details>
   <button class="erp-nav-item erp-nav-bottom" data-view="设置"><span>⚙</span><b>设置</b></button>
 </aside>
@@ -74,12 +76,36 @@
       <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">ATTENTION</span><h3>待处理与风险</h3></div><button id="erpOpenOrderCenter">查看全部订单</button></div><div id="erpAttentionList" class="erp-attention-list"></div></section>
       <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">PIPELINE</span><h3>订单阶段</h3></div></div><div id="erpStageBoard" class="erp-stage-board"></div></section>
     </div>
-    <section class="erp-card erp-recent"><div class="erp-card-head"><div><span class="eyebrow">RECENT ORDERS</span><h3>订单运营视图</h3></div><input id="erpDashboardFilter" placeholder="筛选 JOB / 客户 / 型号"></div><div class="erp-table-wrap"><table class="erp-order-table"><thead><tr><th>JOB</th><th>客户</th><th>订单内容</th><th>金额</th><th>阶段</th><th>发货</th><th>验收</th><th>开票</th><th>回款</th><th>风险</th></tr></thead><tbody id="erpRecentOrders"></tbody></table></div></section>
+    <section class="erp-card erp-recent">
+    <section class="erp-card erp-work-card"><div class="erp-card-head"><div><span class="eyebrow">MY WORK</span><h3>我的待办</h3></div><button id="erpAddWorkItem" class="primary">＋ 新建待办</button></div><div id="erpWorkList" class="erp-work-list"></div></section><div class="erp-card-head"><div><span class="eyebrow">RECENT ORDERS</span><h3>订单运营视图</h3></div><input id="erpDashboardFilter" placeholder="筛选 JOB / 客户 / 型号"></div><div class="erp-table-wrap"><table class="erp-order-table"><thead><tr><th>JOB</th><th>客户</th><th>订单内容</th><th>金额</th><th>阶段</th><th>发货</th><th>验收</th><th>开票</th><th>回款</th><th>风险</th></tr></thead><tbody id="erpRecentOrders"></tbody></table></div></section>
   </section>
 
   <section id="panel-订单中心" class="panel hidden erp-orders">
     <div class="erp-page-head compact"><div><div class="eyebrow">ORDER CONTROL TOWER</div><h1>订单中心</h1><p>以一张订单为主线查看设备、发货、开票、回款与完整业务关系。</p></div><div><button id="erpOrderNew" class="primary">＋ 新建订单</button></div></div>
     <div class="erp-order-layout"><aside class="erp-order-list-pane"><div class="erp-order-list-toolbar"><input id="erpOrderSearch" placeholder="搜索 JOB / 客户 / 型号"><select id="erpOrderStageFilter"><option value="">全部阶段</option></select></div><div id="erpOrderList" class="erp-order-list"></div></aside><article id="erpOrderDetail" class="erp-order-detail"><div class="erp-empty-state"><b>选择一张订单</b><span>查看它从受注到回款的完整生命周期。</span></div></article></div>
+  </section>
+
+  <section id="panel-摘要" class="panel">  </section>
+
+  <section id="panel-财务驾驶舱" class="panel hidden erp-finance-page">
+    <div class="erp-page-head compact"><div><div class="eyebrow">FINANCE COCKPIT</div><h1>应收与现金流</h1><p>按账龄和未来回款窗口查看应收，并可下钻到 JOB / 款类。</p></div></div>
+    <div id="erpFinanceKpis" class="erp-kpis erp-finance-kpis"></div>
+    <div class="erp-finance-grid">
+      <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">AGING</span><h3>应收账龄</h3></div></div><div id="erpAging" class="erp-bucket-list"></div></section>
+      <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">CASH FORECAST</span><h3>预计现金流</h3></div></div><div id="erpForecast" class="erp-bucket-list"></div></section>
+    </div>
+    <section class="erp-card erp-finance-detail"><div class="erp-card-head"><div><span class="eyebrow">AR DETAIL</span><h3>应收明细</h3></div><input id="erpFinanceFilter" placeholder="筛选 JOB / 客户 / 款类"></div><div id="erpFinanceRows" class="erp-finance-rows"></div></section>
+  </section>
+
+  <section id="panel-主数据" class="panel hidden erp-master-page">
+    <div class="erp-page-head compact"><div><div class="eyebrow">MASTER DATA</div><h1>主数据</h1><p>标准化客户、联系人、设备型号与付款条件模板；历史订单仍保持兼容。</p></div></div>
+    <div id="erpMasterStats" class="erp-kpis erp-master-kpis"></div>
+    <div class="erp-master-grid">
+      <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">CUSTOMERS</span><h3>客户主数据</h3></div><button id="erpAddCustomer">＋ 客户</button></div><div id="erpCustomerMaster" class="erp-master-list"></div></section>
+      <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">CONTACTS</span><h3>客户联系人</h3></div><button id="erpAddContact">＋ 联系人</button></div><div id="erpContactMaster" class="erp-master-list"></div></section>
+      <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">PRODUCTS</span><h3>设备型号</h3></div><button id="erpAddModel">＋ 型号</button></div><div id="erpModelMaster" class="erp-master-list"></div></section>
+      <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">PAYMENT TERMS</span><h3>付款条件模板</h3></div><button id="erpAddPaymentTemplate">＋ 模板</button></div><div id="erpPaymentMaster" class="erp-master-list"></div></section>
+    </div>
   </section>
 
   <section id="panel-摘要" class="panel">
@@ -606,6 +632,7 @@
       <div class="noc-section">
         <h4>④ 付款条件（款类可选现有或新建 + 比例%；合计须 100%；全留空则建一条空占位）
           <span class="noc-term-actions">
+            <select id="nocMasterTermTemplate" class="noc-mini"><option value="">主数据模板</option></select>
             <button id="nocAddTerm" type="button" class="noc-mini">＋ 添加条款</button>
             <button type="button" class="noc-mini noc-tmpl" data-tmpl="A">填A模板</button>
             <button type="button" class="noc-mini noc-tmpl" data-tmpl="B">填B模板</button>
@@ -620,6 +647,23 @@
       </div>
     </div>
     <div class="modal-foot"><button id="nocCancel">取消</button><button id="nocOk" class="primary">创建订单</button></div>
+  </div>
+</div>
+
+<div id="workItemModal" class="modal-backdrop hidden">
+  <div class="modal-card entry-card">
+    <div class="modal-head"><h3>新建待办</h3><button id="workItemClose">×</button></div>
+    <div class="modal-body">
+      <div class="entry-grid">
+        <label>JOB No<select id="workItemJob"></select></label>
+        <label>优先级<select id="workItemPriority"><option value="high">高</option><option value="medium" selected>中</option><option value="low">低</option></select></label>
+        <label class="full">标题<input id="workItemTitle" autocomplete="off"></label>
+        <label>截止日<input id="workItemDue" type="date"></label>
+        <label>类型<select id="workItemType"><option value="follow_up">跟进</option><option value="customer">客户</option><option value="delivery">发货</option><option value="finance">财务</option><option value="internal">内部</option></select></label>
+        <label class="full">备注<textarea id="workItemNote" rows="3"></textarea></label>
+      </div>
+    </div>
+    <div class="modal-foot"><button id="workItemCancel">取消</button><button id="workItemSave" class="primary">保存待办</button></div>
   </div>
 </div>
 

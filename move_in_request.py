@@ -4,9 +4,9 @@
 
 The supplied workbook is an old BIFF ``.xls`` file with embedded stamp objects
 and unreliable pagination.  This module rebuilds the printable form as a clean
-A4 ``.xlsx``.  The first worksheet contains one complete equipment list, with
-the request details placed below it so readers do not have to reconcile a
-summary table with a second list.
+A4 ``.xlsx``.  The first worksheet uses the supplied two-column equipment
+layout: slots 1--30 are shown as fifteen paired rows, and later blocks repeat
+that layout on a new printed page before the request details continue.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from datetime import date, datetime
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.page import PageMargins
+from openpyxl.worksheet.pagebreak import Break
 
 
 THIN = Side(style="thin", color="000000")
@@ -29,6 +30,9 @@ TITLE_FONT = Font(name="ＭＳ Ｐ明朝", size=18, color="000000")
 DETAIL_FONT = Font(name="ＭＳ Ｐ明朝", size=10, color="000000")
 
 NOTE_LINE_WIDTH = 40
+FORM_LAST_COL = 16
+DEVICE_ROWS_PER_BLOCK = 15
+DEVICE_SLOTS_PER_BLOCK = DEVICE_ROWS_PER_BLOCK * 2
 
 
 def _text(value):
@@ -43,6 +47,13 @@ def _date_value(value):
         return date.fromisoformat(str(value))
     except (TypeError, ValueError):
         return _text(value)
+
+
+def _date_label(value):
+    parsed = _date_value(value)
+    if isinstance(parsed, date):
+        return f"{parsed.year}/{parsed.month}/{parsed.day}"
+    return parsed
 
 
 def _set(ws, cell, value="", *, font=None, alignment=None, border=None,
@@ -185,41 +196,109 @@ def _wrap_note_lines(values, width=NOTE_LINE_WIDTH):
     return lines
 
 
-def _write_device_table(ws, header_row, devices):
-    """Write the single complete equipment table on the first worksheet."""
+def _write_device_headers(ws, row):
+    """Write one 1--30-style equipment header row."""
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    headers = ((1, 2, "No."), (3, 5, "機種"), (6, 9, "機番"),
-               (10, 13, "制番"), (14, 17, "PO No"))
-    _row_style(ws, header_row, height=24, border=GRID, fill=LABEL_FILL,
-               font=DETAIL_FONT)
+    headers = ((1, 1, "No."), (2, 2, "PO No."), (3, 4, "機種"),
+               (5, 6, "機番"), (7, 8, "制番"), (9, 9, "No."),
+               (10, 10, "PO No."), (11, 12, "機種"), (13, 14, "機番"),
+               (15, 16, "制番"))
+    _row_style(ws, row, start=1, end=FORM_LAST_COL, height=24, border=GRID,
+               fill=LABEL_FILL, font=DETAIL_FONT)
     for start_col, end_col, label in headers:
-        _merge(ws, header_row, start_col, header_row, end_col, label,
+        _merge(ws, row, start_col, row, end_col, label,
                font=DETAIL_FONT, fill=LABEL_FILL, border=GRID, alignment=center)
 
-    for offset, device in enumerate(devices):
-        row = header_row + 1 + offset
-        _row_style(ws, row, height=22, border=GRID, font=DETAIL_FONT)
-        _merge(ws, row, 1, row, 2, offset + 1,
-               font=DETAIL_FONT, border=GRID, alignment=center)
-        _merge(ws, row, 6, row, 9, device.get("machine_no", ""),
-               font=DETAIL_FONT, border=GRID, alignment=center)
-        _merge(ws, row, 10, row, 13, device.get("serial_no", ""),
-               font=DETAIL_FONT, border=GRID, alignment=center)
 
-    for start_col, end_col, key in ((3, 5, "model"), (14, 17, "po_no")):
+def _write_device_side(ws, row, device, number, columns):
+    """Write the non-grouped fields for one side of a paired device row."""
+    no_col, po_col, model_start, model_end, machine_start, machine_end, serial_start, serial_end = columns
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    po_center = Alignment(horizontal="center", vertical="center",
+                          shrink_to_fit=True)
+    if device is None:
+        _set(ws, f"{chr(64 + no_col)}{row}", "", font=DETAIL_FONT,
+             fill=LABEL_FILL, border=GRID, alignment=center)
+        po = model = machine = serial = ""
+    else:
+        _set(ws, f"{chr(64 + no_col)}{row}", number, font=DETAIL_FONT,
+             fill=LABEL_FILL, border=GRID, alignment=center)
+        po = device.get("po_no", "")
+        model = device.get("model", "")
+        machine = device.get("machine_no", "")
+        serial = device.get("serial_no", "")
+    _set(ws, f"{chr(64 + po_col)}{row}", po, font=DETAIL_FONT, border=GRID,
+         alignment=po_center)
+    _merge(ws, row, model_start, row, model_end, model, font=DETAIL_FONT,
+           border=GRID, alignment=center)
+    _merge(ws, row, machine_start, row, machine_end, machine,
+           font=DETAIL_FONT, border=GRID, alignment=center)
+    _merge(ws, row, serial_start, row, serial_end, serial,
+           font=DETAIL_FONT, border=GRID, alignment=center)
+
+
+def _merge_device_groups(ws, first_row, devices, columns):
+    """Merge adjacent PO/model values within one side of a 30-slot block."""
+    po_col, model_start, model_end = columns
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    po_center = Alignment(horizontal="center", vertical="center",
+                          shrink_to_fit=True)
+    for key, start_col, end_col in (
+        ("po_no", po_col, po_col),
+        ("model", model_start, model_end),
+    ):
         group_start = 0
         for group_end in range(1, len(devices) + 1):
             at_end = group_end == len(devices)
             same_as_next = (not at_end
-                            and devices[group_end].get(key, "") == devices[group_start].get(key, ""))
+                            and devices[group_end].get(key, "")
+                            == devices[group_start].get(key, ""))
             if at_end or not same_as_next:
-                first_row = header_row + 1 + group_start
-                last_row = header_row + group_end
-                _merge(ws, first_row, start_col, last_row, end_col,
+                _merge(ws, first_row + group_start, start_col,
+                       first_row + group_end - 1, end_col,
                        devices[group_start].get(key, ""),
-                       font=DETAIL_FONT, border=GRID, alignment=center)
+                       font=DETAIL_FONT, border=GRID,
+                       alignment=po_center if key == "po_no" else center)
                 group_start = group_end
-    return header_row + len(devices)
+
+
+def _write_device_table(ws, header_row, devices):
+    """Write paired 1--30 blocks and return the last row plus page breaks."""
+    left_columns = (1, 2, 3, 4, 5, 6, 7, 8)
+    right_columns = (9, 10, 11, 12, 13, 14, 15, 16)
+    end_row = header_row
+    page_breaks = []
+    for block_start in range(0, len(devices), DEVICE_SLOTS_PER_BLOCK):
+        if block_start:
+            # The next block starts on a new page, so its own header is only
+            # printed when another equipment block actually exists.
+            page_breaks.append(end_row)
+            header_row = end_row + 1
+        _write_device_headers(ws, header_row)
+        block = devices[block_start:block_start + DEVICE_SLOTS_PER_BLOCK]
+        row_count = max(1, (len(block) + 1) // 2)
+        first_data_row = header_row + 1
+        for row_offset in range(row_count):
+            row = first_data_row + row_offset
+            _row_style(ws, row, start=1, end=FORM_LAST_COL, height=22,
+                       border=GRID, font=DETAIL_FONT)
+            left_index = row_offset * 2
+            right_index = left_index + 1
+            left_device = block[left_index] if left_index < len(block) else None
+            right_device = block[right_index] if right_index < len(block) else None
+            _write_device_side(ws, row, left_device, block_start + left_index + 1,
+                               left_columns)
+            _write_device_side(ws, row, right_device, block_start + right_index + 1,
+                               right_columns)
+        _merge_device_groups(ws, first_data_row,
+                             [block[i] for i in range(0, len(block), 2)],
+                             (2, 3, 4))
+        right_devices = [block[i] for i in range(1, len(block), 2)]
+        if right_devices:
+            _merge_device_groups(ws, first_data_row, right_devices,
+                                 (10, 11, 12))
+        end_row = first_data_row + row_count - 1
+    return end_row, page_breaks
 
 
 def build_workbook(form):
@@ -228,91 +307,114 @@ def build_workbook(form):
     ws = wb.active
     ws.title = "搬入依頼書"
     ws.sheet_view.showGridLines = False
-    widths = {"A": 5.44, "B": 22.81, "C": 4.08, "D": 7.9, "E": 2.81,
-              "F": 4.08, "G": 4.35, "H": 3.17, "I": 3.99, "J": 3.08,
-              "K": 4.99, "L": 2.9, "M": 1.9, "N": 6.99, "O": 16.62,
-              "P": 9.35, "Q": 8.99}
+    widths = {"A": 7.642857, "B": 17.142857, "C": 7.642857,
+              "D": 7.642857, "E": 7.642857, "F": 7.642857,
+              "G": 7.642857, "H": 7.642857, "I": 7.642857,
+              "J": 17.107143, "K": 7.589286, "L": 7.642857,
+              "M": 7.642857, "N": 7.642857, "O": 7.642857,
+              "P": 8.43}
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
     for row, height in {1: 20.25, 2: 20.25, 3: 20.25, 4: 13.5, 5: 25.5,
                         6: 14.25, 7: 20.25, 8: 20.25, 9: 20.25,
-                        10: 9, 11: 19.5, 12: 15.75}.items():
+                        10: 9, 11: 19.5}.items():
         ws.row_dimensions[row].height = height
 
     center = Alignment(horizontal="center", vertical="center")
     left = Alignment(horizontal="left", vertical="center")
     wrap = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-    _merge(ws, 1, 1, 1, 2, form.get("issue_date", ""), font=FONT,
-           alignment=center, number_format="date")
-    _merge(ws, 1, 14, 1, 17, "[KE-403]", font=SMALL_FONT, alignment=right_align())
-    _merge(ws, 2, 1, 2, 17, form.get("department", ""), font=FONT, alignment=left)
-    other = form.get("other_department", "")
-    _merge(ws, 3, 1, 3, 17, f"他（　　　{other}　　　）" if other else "他（　　　　　　　　　）",
+    _set(ws, "A1", _date_label(form.get("issue_date", "")), font=FONT,
+         alignment=left)
+    _merge(ws, 1, 15, 1, 16, "[KE-403-BKTC]", font=SMALL_FONT,
+           alignment=right_align())
+    _merge(ws, 2, 1, 2, FORM_LAST_COL, form.get("department", ""),
            font=FONT, alignment=left)
-    _merge(ws, 5, 1, 5, 17, "装 置 搬 入 依 頼 書", font=TITLE_FONT, alignment=center)
-    for cell, label, value in (("P6", "所属長", form.get("manager", "")),
-                               ("Q6", "発行者", form.get("issuer", ""))):
+    other = form.get("other_department", "")
+    _merge(ws, 3, 1, 3, FORM_LAST_COL,
+           f"他（　　　{other}　　　）" if other else "他（　　　　　　　　　）",
+           font=FONT, alignment=left)
+    _merge(ws, 5, 1, 5, FORM_LAST_COL, "装 置 搬 入 依 頼 書",
+           font=TITLE_FONT, alignment=center)
+    for cell, label, value in (("M6", "所属長", form.get("manager", "")),
+                               ("O6", "発行者", form.get("issuer", ""))):
         _set(ws, cell, label, font=FONT, border=GRID, alignment=center)
         col = cell[0]
-        _merge(ws, 7, ord(col) - 64, 9, ord(col) - 64, value, font=FONT,
+        start_col = ord(col) - 64
+        end_col = start_col + 1
+        _merge(ws, 7, start_col, 9, end_col, value, font=FONT,
                border=GRID, alignment=center)
 
     devices = form.get("devices") or []
     _field_label(ws, 11, 1, "設備明細")
-    _merge(ws, 11, 3, 11, 17, f"全{len(devices)}台", font=FONT,
-           border=GRID, alignment=left)
-    device_header_row = 12
-    device_end_row = _write_device_table(ws, device_header_row, devices)
+    _set(ws, "C11", len(devices), font=FONT, fill=LABEL_FILL, border=GRID,
+         alignment=center)
+    _set(ws, "D11", "台", font=FONT, fill=LABEL_FILL, border=GRID,
+         alignment=center)
+    device_end_row, device_page_breaks = _write_device_table(ws, 12, devices)
 
-    # Keep the request details directly below the one authoritative equipment
-    # list.  There is no summary table or appendix.
+    # Keep the request details directly below the equipment blocks.  A second
+    # block starts on a new printed page, and carries its own header instead of
+    # using global print-title rows that would repeat on notes-only pages.
     row = device_end_row + 1
     _field_label(ws, row, 2, "客先装置ID No.")
     _merge(ws, row, 3, row, 4, ("☑ 有り" if form.get("has_customer_id") else "☐ 有り"),
            font=FONT, border=GRID, alignment=center)
     _merge(ws, row, 5, row, 6, "ID No.",
            font=SMALL_FONT, border=GRID, alignment=center)
-    _merge(ws, row, 7, row, 13, "", font=FONT, border=GRID, alignment=left)
-    _merge(ws, row, 14, row, 17, ("☐ 無し" if form.get("has_customer_id") else "☑ 無し"),
+    _merge(ws, row, 7, row, 15, "", font=FONT, border=GRID, alignment=left)
+    _set(ws, f"P{row}", ("☐ 無し" if form.get("has_customer_id") else "☑ 無し"),
            font=FONT, border=GRID, alignment=center)
 
     row += 1
     _field_label(ws, row, 3, "搬入先名")
-    _merge(ws, row, 3, row, 17, form.get("customer", ""), font=FONT, border=GRID, alignment=left)
+    _merge(ws, row, 3, row, FORM_LAST_COL, form.get("customer", ""),
+           font=FONT, border=GRID, alignment=left)
     row += 1
-    _field_label(ws, row, 4, "搬入先住所", row + 1)
-    _merge(ws, row, 3, row + 1, 17, form.get("address", ""), font=FONT, border=GRID, alignment=left)
-    row += 2
+    _field_label(ws, row, 4, "搬入先住所")
+    _merge(ws, row, 3, row, FORM_LAST_COL, form.get("address", ""),
+           font=FONT, border=GRID, alignment=left)
+    row += 1
     _field_label(ws, row, 5, "搬入連絡先")
-    _merge(ws, row, 3, row, 17, form.get("contact", ""), font=FONT, border=GRID, alignment=left)
+    _merge(ws, row, 3, row, 4, "氏名", font=SMALL_FONT, border=GRID,
+           alignment=center)
+    _merge(ws, row, 5, row, 8, "", font=FONT, border=GRID, alignment=left)
+    _set(ws, f"I{row}", "連絡先", font=SMALL_FONT, border=GRID,
+         alignment=center)
+    _merge(ws, row, 10, row, FORM_LAST_COL, form.get("contact", ""),
+           font=FONT, border=GRID, alignment=left)
     row += 1
     ws.row_dimensions[row].height = 24
     _field_label(ws, row, 6, "搬入日時")
     _merge(ws, row, 3, row, 4, "搬入日", font=SMALL_FONT, border=GRID, alignment=center)
-    _merge(ws, row, 5, row, 9, form.get("move_in_date", ""), font=FONT, border=GRID,
+    _merge(ws, row, 5, row, 8, form.get("move_in_date", ""), font=FONT, border=GRID,
            alignment=center, number_format="date")
-    _merge(ws, row, 10, row, 11, "時刻", font=SMALL_FONT, border=GRID, alignment=center)
-    _merge(ws, row, 12, row, 17, form.get("move_in_time", ""), font=FONT, border=GRID, alignment=center)
+    _set(ws, f"I{row}", "時刻", font=SMALL_FONT, border=GRID, alignment=center)
+    _merge(ws, row, 10, row, FORM_LAST_COL, form.get("move_in_time", ""),
+           font=FONT, border=GRID, alignment=center)
     row += 1
     _field_label(ws, row, 7, "搬入車両", row + 3)
     vehicles = ["平ボディー", "ユニック車", "パワーゲート車", "その他"]
     chosen = str(form.get("vehicle_type") or "")
     for vehicle_row, label in enumerate(vehicles, row):
         ws.row_dimensions[vehicle_row].height = 17.6
-        _row_style(ws, vehicle_row, start=3, end=17, height=17.6, border=GRID)
-        _merge(ws, vehicle_row, 3, vehicle_row, 9,
+        _row_style(ws, vehicle_row, start=3, end=FORM_LAST_COL, height=17.6,
+                   border=GRID)
+        _merge(ws, vehicle_row, 3, vehicle_row, 7,
                ("☑ " if chosen == label else "☐ ") + label,
                font=FONT, border=GRID, alignment=left)
         if vehicle_row < row + 3:
-            tonnage = str(form.get("vehicle_tonnage") or "").strip()
-            _set(ws, f"J{vehicle_row}", f"{tonnage} t" if tonnage else "t",
-                 font=FONT, border=GRID, alignment=center)
+            _set(ws, f"H{vehicle_row}", "t", font=FONT, border=GRID,
+                 alignment=center)
+            _merge(ws, vehicle_row, 9, vehicle_row, FORM_LAST_COL,
+                   str(form.get("vehicle_tonnage") or "").strip(),
+                   font=SMALL_FONT, border=GRID, alignment=center)
         else:
-            _set(ws, f"J{vehicle_row}", "", font=FONT, border=GRID, alignment=center)
-        _merge(ws, vehicle_row, 11, vehicle_row, 17,
-               form.get("vehicle_note", "") if vehicle_row == row + 3 else "",
-               font=SMALL_FONT, border=GRID, alignment=left)
+            _set(ws, f"H{vehicle_row}", "", font=FONT, border=GRID,
+                 alignment=center)
+            _merge(ws, vehicle_row, 9, vehicle_row, FORM_LAST_COL,
+                   form.get("vehicle_note", ""), font=SMALL_FONT, border=GRID,
+                   alignment=left)
     row += 4
 
     system_notes = str(form.get("system_notes") or "").splitlines()
@@ -328,13 +430,14 @@ def build_workbook(form):
     note_end = note_start + note_rows - 1
     _field_label(ws, note_start, 8, "特記事項", note_end)
     for note_row in range(note_start, note_end + 1):
-        _row_style(ws, note_row, start=3, end=17, height=21, border=GRID)
-        _merge(ws, note_row, 3, note_row, 17,
+        _row_style(ws, note_row, start=3, end=FORM_LAST_COL, height=21,
+                   border=GRID)
+        _merge(ws, note_row, 3, note_row, FORM_LAST_COL,
                notes[note_row - note_start] if note_row - note_start < len(notes) else "",
                font=FONT, border=GRID, alignment=wrap)
 
     last_row = note_end
-    ws.print_area = f"A1:Q{last_row}"
+    ws.print_area = f"A1:P{last_row}"
     ws.page_setup.orientation = ws.ORIENTATION_PORTRAIT
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
     ws.page_setup.fitToWidth = 1
@@ -343,12 +446,10 @@ def build_workbook(form):
     ws.page_margins = PageMargins(left=0.25, right=0.25, top=0.25, bottom=0.25,
                                   header=0.1, footer=0.1)
     ws.sheet_properties.pageSetUpPr.autoPageBreaks = True
-    # Repeat the equipment title/header only when the equipment table itself
-    # spills past the first printed page.  Later notes pages stay uncluttered.
-    if device_end_row > 35:
-        ws.print_title_rows = "1:12"
+    for break_row in device_page_breaks:
+        ws.row_breaks.append(Break(id=break_row))
     ws.freeze_panes = "A13"
-    ws.oddFooter.center.text = "搬入依頼書　第 &P 页"
+    ws.oddFooter.center.text = "搬入依頼書　第 &P 頁"
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True
     wb.calculation.calcMode = "auto"

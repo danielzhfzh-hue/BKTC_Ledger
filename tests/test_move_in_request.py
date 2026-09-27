@@ -49,7 +49,7 @@ class MoveInRequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "没有关联设备"):
             move_in_request.shipment_defaults(data, shipment_id="ship-1")
 
-    def test_workbook_has_one_complete_equipment_list_on_first_sheet(self):
+    def test_workbook_uses_template_paired_equipment_layout(self):
         data = sample_data(device_count=6)
         form = move_in_request.shipment_defaults(data, shipment_id="ship-1")
         form.update({"move_in_date": "2026-08-31", "contact": "测试联系人 13800000000"})
@@ -59,43 +59,86 @@ class MoveInRequestTests(unittest.TestCase):
             move_in_request.export_xlsx(form, path)
             workbook = load_workbook(path, data_only=False)
             sheet = workbook["搬入依頼書"]
-            self.assertEqual(sheet.print_area, "'搬入依頼書'!$A$1:$Q$36")
+            self.assertEqual(sheet.print_area, "'搬入依頼書'!$A$1:$P$32")
             self.assertEqual(sheet.page_setup.orientation, "portrait")
             self.assertEqual(sheet.page_setup.fitToWidth, 1)
             self.assertEqual(sheet.page_setup.fitToHeight, 0)
             self.assertEqual(workbook.sheetnames, ["搬入依頼書"])
             self.assertIsNone(sheet.print_title_rows)
+            self.assertEqual(sheet["C11"].value, 6)
+            self.assertEqual(sheet["D11"].value, "台")
+            self.assertEqual(sheet["A12"].value, "No.")
+            self.assertEqual(sheet["B12"].value, "PO No.")
+            self.assertEqual(sheet["I12"].value, "No.")
+            self.assertEqual(sheet["J12"].value, "PO No.")
             self.assertEqual(sheet["C13"].value, "KT1000FI")
-            self.assertEqual(sheet["F13"].value, "25800")
-            self.assertEqual(sheet["J13"].value, "26BS006-01")
-            self.assertEqual(sheet["N13"].value, "PO-1")
-            self.assertEqual(sheet["F18"].value, "25805")
-            self.assertEqual(sheet["J18"].value, "26BS006-06")
-            self.assertEqual(sheet["N14"].value, "PO-2")
-            self.assertIn("C14:E18", {str(r) for r in sheet.merged_cells.ranges})
-            self.assertIn("N14:Q18", {str(r) for r in sheet.merged_cells.ranges})
-            self.assertEqual(sheet["C19"].value, "☑ 有り")
-            self.assertEqual(sheet["E19"].value, "ID No.")
-            self.assertIn(sheet["G19"].value, (None, ""))
-            self.assertEqual(sheet["N19"].value, "☐ 無し")
-            self.assertEqual(sheet["C24"].value, "搬入日")
-            self.assertEqual(sheet["E24"].value.isoformat(), "2026-08-31T00:00:00")
-            self.assertEqual(sheet["J24"].value, "時刻")
-            self.assertIn(sheet["L24"].value, (None, ""))
-            self.assertIn("C25:I25", {str(r) for r in sheet.merged_cells.ranges})
-            self.assertIn("K25:Q25", {str(r) for r in sheet.merged_cells.ranges})
-            for row in range(25, 29):
+            self.assertEqual(sheet["E13"].value, "25800")
+            self.assertEqual(sheet["G13"].value, "26BS006-01")
+            self.assertEqual(sheet["B13"].value, "PO-1")
+            self.assertEqual(sheet["K13"].value, "KT1000EPS-C300")
+            self.assertEqual(sheet["M13"].value, "25801")
+            self.assertEqual(sheet["O13"].value, "26BS006-02")
+            self.assertEqual(sheet["J13"].value, "PO-2")
+            self.assertEqual(sheet["E15"].value, "25804")
+            self.assertEqual(sheet["M15"].value, "25805")
+            self.assertEqual(sheet["O15"].value, "26BS006-06")
+            self.assertIn("C14:D15", {str(r) for r in sheet.merged_cells.ranges})
+            self.assertIn("J13:J15", {str(r) for r in sheet.merged_cells.ranges})
+            self.assertEqual(sheet["C16"].value, "☑ 有り")
+            self.assertEqual(sheet["E16"].value, "ID No.")
+            self.assertIn(sheet["G16"].value, (None, ""))
+            self.assertEqual(sheet["P16"].value, "☐ 無し")
+            self.assertEqual(sheet["C20"].value, "搬入日")
+            self.assertEqual(sheet["E20"].value.isoformat(), "2026-08-31T00:00:00")
+            self.assertEqual(sheet["I20"].value, "時刻")
+            self.assertIn(sheet["J20"].value, (None, ""))
+            self.assertIn("C21:G21", {str(r) for r in sheet.merged_cells.ranges})
+            self.assertIn("I21:P21", {str(r) for r in sheet.merged_cells.ranges})
+            for row in range(21, 25):
                 self.assertEqual(sheet[f"C{row}"].border.top.style, "thin")
                 self.assertEqual(sheet[f"C{row}"].border.bottom.style, "thin")
-                self.assertEqual(sheet[f"J{row}"].border.bottom.style, "thin")
-            self.assertEqual(sheet["J25"].value, "t")
-            self.assertIn(sheet["J28"].value, (None, ""))
+                self.assertEqual(sheet[f"H{row}"].border.bottom.style, "thin")
+            self.assertEqual(sheet["H21"].value, "t")
+            self.assertIn(sheet["H24"].value, (None, ""))
             self.assertNotIn("※１", "\n".join(
                 str(cell.value or "")
                 for row in sheet.iter_rows()
                 for cell in row
             ))
             self.assertEqual(len(sheet.row_breaks.brk), 0)
+
+    def test_workbook_fits_twenty_three_devices_and_notes_on_one_page(self):
+        data = sample_data(device_count=23)
+        form = move_in_request.shipment_defaults(data, shipment_id="ship-1")
+        form.update({"move_in_date": "2026-08-31"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "搬入依頼書-23台.xlsx"
+            move_in_request.export_xlsx(form, path)
+            sheet = load_workbook(path, data_only=False)["搬入依頼書"]
+            self.assertEqual(sheet.print_area, "'搬入依頼書'!$A$1:$P$41")
+            self.assertEqual(sheet["A24"].value, 23)
+            self.assertEqual(sheet["C25"].value, "☑ 有り")
+            self.assertEqual(sheet["A34"].value, 8)
+            self.assertEqual(len(sheet.row_breaks.brk), 0)
+
+    def test_workbook_starts_a_new_equipment_block_after_thirty_devices(self):
+        data = sample_data(device_count=31)
+        form = move_in_request.shipment_defaults(data, shipment_id="ship-1")
+        form.update({"move_in_date": "2026-08-31"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "搬入依頼書-31台.xlsx"
+            move_in_request.export_xlsx(form, path)
+            sheet = load_workbook(path, data_only=False)["搬入依頼書"]
+            self.assertEqual(sheet.print_area, "'搬入依頼書'!$A$1:$P$46")
+            self.assertEqual([br.id for br in sheet.row_breaks.brk], [27])
+            self.assertEqual(sheet["A28"].value, "No.")
+            self.assertEqual(sheet["I28"].value, "No.")
+            self.assertEqual(sheet["A29"].value, 31)
+            self.assertIn(sheet["I29"].value, (None, ""))
+            self.assertEqual(sheet["E29"].value, "258030")
+            self.assertEqual(sheet["C30"].value, "☑ 有り")
 
     def test_workbook_supports_fifty_devices_without_truncation(self):
         data = sample_data(device_count=50)
@@ -108,20 +151,26 @@ class MoveInRequestTests(unittest.TestCase):
             workbook = load_workbook(path, data_only=False)
             sheet = workbook["搬入依頼書"]
             machine_numbers = [
-                sheet.cell(row=row, column=6).value
-                for row in range(13, 63)
-                if str(sheet.cell(row=row, column=6).value or "").startswith("2580")
+                sheet.cell(row=row, column=col).value
+                for row in range(13, 39)
+                for col in (5, 13)
+                if str(sheet.cell(row=row, column=col).value or "").startswith("2580")
             ]
             self.assertEqual(machine_numbers, [f"2580{i}" for i in range(50)])
-            self.assertEqual(sheet["F13"].value, "25800")
-            self.assertEqual(sheet["F62"].value, "258049")
-            self.assertEqual(sheet.print_title_rows, "$1:$12")
+            self.assertEqual(sheet["E13"].value, "25800")
+            self.assertEqual(sheet["M13"].value, "25801")
+            self.assertEqual(sheet["E29"].value, "258030")
+            self.assertEqual(sheet["M38"].value, "258049")
+            self.assertIsNone(sheet.print_title_rows)
+            self.assertEqual([br.id for br in sheet.row_breaks.brk], [27])
+            self.assertEqual(sheet["A28"].value, "No.")
+            self.assertEqual(sheet["I28"].value, "No.")
             self.assertIn("现场需要分两次进场", "\n".join(
                 str(cell.value or "")
                 for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row)
                 for cell in row
             ))
-            self.assertEqual(len(sheet.row_breaks.brk), 0)
+            self.assertEqual(len(sheet.row_breaks.brk), 1)
 
     def test_long_special_notes_continue_without_truncation(self):
         data = sample_data(device_count=6)

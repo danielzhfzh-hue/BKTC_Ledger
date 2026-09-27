@@ -17,9 +17,30 @@
     <span class="path-chip" title="本地 SQLite 关系数据库"><i></i>数据库 <b id="badgeStore" class="no">未连接</b></span>
     <span class="path-chip" title="从数据库导出的 Excel 台账"><i></i>台账 <b id="badgeXlsx" class="no">未生成</b></span>
   </div>
+  <div class="erp-global-search"><span>⌕</span><input id="erpGlobalSearch" placeholder="搜索 JOB / 客户 / PO / 制造番号 / 型号…"><div id="erpSearchResults" class="erp-search-results hidden"></div></div>
+  <button id="erpQuickNew" class="header-btn primary">＋ 新建订单</button>
   <button id="btnQuery" class="header-btn">跨表查询</button>
   <button id="btnSettings" class="header-btn settings-btn">设置</button>
 </header>
+
+<aside id="erpSidebar" class="erp-sidebar">
+  <div class="erp-nav-brand">业务导航</div>
+  <button class="erp-nav-item active" data-view="工作台"><span>⌂</span><b>工作台</b></button>
+  <div class="erp-nav-section">销售</div>
+  <button class="erp-nav-item" data-view="报价单"><span>Q</span><b>报价</b></button>
+  <button class="erp-nav-item" data-view="订单中心"><span>◎</span><b>订单中心</b></button>
+  <div class="erp-nav-section">履约</div>
+  <button class="erp-nav-item" data-view="设备台账"><span>▦</span><b>设备</b></button>
+  <button class="erp-nav-item" data-view="发货批次"><span>⇢</span><b>发货</b></button>
+  <div class="erp-nav-section">财务</div>
+  <button class="erp-nav-item" data-view="开票记录"><span>票</span><b>开票</b></button>
+  <button class="erp-nav-item" data-view="回款记录"><span>¥</span><b>回款</b></button>
+  <div class="erp-nav-section">分析与管理</div>
+  <button class="erp-nav-item" data-view="跨表查询"><span>⌗</span><b>分析查询</b></button>
+  <button class="erp-nav-item" data-view="审计记录"><span>✓</span><b>审计记录</b></button>
+  <details class="erp-advanced"><summary>高级数据表</summary><button data-view="合同订单">合同订单</button><button data-view="付款条件">付款条件</button><button data-view="预警规则">预警规则</button><button data-view="使用指南">使用指南</button></details>
+  <button class="erp-nav-item erp-nav-bottom" data-view="设置"><span>⚙</span><b>设置</b></button>
+</aside>
 
 <div class="actionbar">
   <div class="action-group">
@@ -45,6 +66,21 @@
 </nav>
 
 <main>
+  <section id="panel-工作台" class="panel erp-dashboard">
+    <div class="erp-page-head"><div><div class="eyebrow">SALES OPERATIONS</div><h1>业务工作台</h1><p>优先处理需要行动的订单，而不是逐张数据表找问题。</p></div><div id="erpToday" class="erp-today"></div></div>
+    <div id="erpKpis" class="erp-kpis"></div>
+    <div class="erp-dashboard-grid">
+      <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">ATTENTION</span><h3>待处理与风险</h3></div><button id="erpOpenOrderCenter">查看全部订单</button></div><div id="erpAttentionList" class="erp-attention-list"></div></section>
+      <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">PIPELINE</span><h3>订单阶段</h3></div></div><div id="erpStageBoard" class="erp-stage-board"></div></section>
+    </div>
+    <section class="erp-card erp-recent"><div class="erp-card-head"><div><span class="eyebrow">RECENT ORDERS</span><h3>订单运营视图</h3></div><input id="erpDashboardFilter" placeholder="筛选 JOB / 客户 / 型号"></div><div class="erp-table-wrap"><table class="erp-order-table"><thead><tr><th>JOB</th><th>客户</th><th>订单内容</th><th>金额</th><th>阶段</th><th>发货</th><th>验收</th><th>开票</th><th>回款</th><th>风险</th></tr></thead><tbody id="erpRecentOrders"></tbody></table></div></section>
+  </section>
+
+  <section id="panel-订单中心" class="panel hidden erp-orders">
+    <div class="erp-page-head compact"><div><div class="eyebrow">ORDER CONTROL TOWER</div><h1>订单中心</h1><p>以一张订单为主线查看设备、发货、开票、回款与完整业务关系。</p></div><div><button id="erpOrderNew" class="primary">＋ 新建订单</button></div></div>
+    <div class="erp-order-layout"><aside class="erp-order-list-pane"><div class="erp-order-list-toolbar"><input id="erpOrderSearch" placeholder="搜索 JOB / 客户 / 型号"><select id="erpOrderStageFilter"><option value="">全部阶段</option></select></div><div id="erpOrderList" class="erp-order-list"></div></aside><article id="erpOrderDetail" class="erp-order-detail"><div class="erp-empty-state"><b>选择一张订单</b><span>查看它从受注到回款的完整生命周期。</span></div></article></div>
+  </section>
+
   <section id="panel-摘要" class="panel">
     <div class="summary-lead">
       <div>
@@ -598,5 +634,6 @@
 <div id="toast" class="toast hidden"></div>
 
 <script src="app.js"></script>
+<script src="erp_v2.js"></script>
 </body>
 </html>

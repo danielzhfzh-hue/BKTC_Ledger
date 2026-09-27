@@ -25,7 +25,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 import core
 
 
-DATABASE_VERSION = 5
+DATABASE_VERSION = 7
 WORKBOOK_VERSION = 2
 META_SHEET = "_BKTC_META"
 HELP_SHEET = "使用说明"
@@ -107,11 +107,49 @@ def _sql_type(field_type):
     return "TEXT"
 
 
+def _backup_before_schema_upgrade(conn, path, from_version, to_version, keep=10):
+    """Create a raw SQLite snapshot before an in-place schema upgrade.
+
+    This helper deliberately receives an already-open sqlite3 connection and
+    must not call _connect(), otherwise schema migration would recurse.
+    """
+    backup_dir = os.path.join(os.path.dirname(path), "备份")
+    os.makedirs(backup_dir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    target = os.path.join(
+        backup_dir,
+        f"{stem}_pre_schema_v{from_version}_to_v{to_version}_{stamp}.db",
+    )
+    destination = sqlite3.connect(target)
+    try:
+        conn.backup(destination)
+    finally:
+        destination.close()
+    backups = sorted(
+        (
+            os.path.join(backup_dir, name)
+            for name in os.listdir(backup_dir)
+            if name.startswith(stem + "_pre_schema_") and name.endswith(".db")
+        ),
+        key=os.path.getmtime,
+    )
+    while len(backups) > keep:
+        os.remove(backups.pop(0))
+    return target
+
+
 def _connect(path):
     path = os.path.abspath(os.fspath(path))
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    existed_with_data = os.path.exists(path) and os.path.getsize(path) > 0
     conn = sqlite3.connect(path, timeout=15)
     conn.row_factory = sqlite3.Row
+    previous_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+    if existed_with_data and previous_version < DATABASE_VERSION:
+        _backup_before_schema_upgrade(
+            conn, path, previous_version, DATABASE_VERSION
+        )
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = FULL")
@@ -183,6 +221,7 @@ def _create_schema(conn):
             "contact" TEXT NOT NULL DEFAULT '',
             "salesperson" TEXT NOT NULL DEFAULT '',
             "source_job_no" TEXT NOT NULL DEFAULT '',
+            "converted_job_no" TEXT NOT NULL DEFAULT '',
             "currency" TEXT NOT NULL DEFAULT 'RMB',
             "tax_rate" REAL NOT NULL DEFAULT 13,
             "valid_until" TEXT NOT NULL DEFAULT '',
@@ -234,6 +273,61 @@ def _create_schema(conn):
             "updated_at" TEXT NOT NULL,
             UNIQUE ("kind", "value", "language")
         );
+        CREATE TABLE IF NOT EXISTS "customer_master" (
+            "customer_id" TEXT PRIMARY KEY,
+            "name" TEXT NOT NULL UNIQUE,
+            "name_en" TEXT NOT NULL DEFAULT '',
+            "currency" TEXT NOT NULL DEFAULT 'RMB',
+            "salesperson" TEXT NOT NULL DEFAULT '',
+            "address" TEXT NOT NULL DEFAULT '',
+            "ship_to" TEXT NOT NULL DEFAULT '',
+            "incoterm" TEXT NOT NULL DEFAULT '',
+            "active" INTEGER NOT NULL DEFAULT 1,
+            "updated_at" TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS "customer_contact" (
+            "contact_id" TEXT PRIMARY KEY,
+            "customer_id" TEXT NOT NULL DEFAULT '',
+            "customer_name" TEXT NOT NULL DEFAULT '',
+            "name" TEXT NOT NULL,
+            "title" TEXT NOT NULL DEFAULT '',
+            "email" TEXT NOT NULL DEFAULT '',
+            "phone" TEXT NOT NULL DEFAULT '',
+            "is_primary" INTEGER NOT NULL DEFAULT 0,
+            "updated_at" TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS "product_model" (
+            "model_id" TEXT PRIMARY KEY,
+            "model" TEXT NOT NULL UNIQUE,
+            "description" TEXT NOT NULL DEFAULT '',
+            "unit" TEXT NOT NULL DEFAULT '台',
+            "active" INTEGER NOT NULL DEFAULT 1,
+            "updated_at" TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS "payment_term_template" (
+            "template_id" TEXT PRIMARY KEY,
+            "name" TEXT NOT NULL UNIQUE,
+            "currency" TEXT NOT NULL DEFAULT '',
+            "description" TEXT NOT NULL DEFAULT '',
+            "items_json" TEXT NOT NULL DEFAULT '[]',
+            "active" INTEGER NOT NULL DEFAULT 1,
+            "updated_at" TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS "work_item" (
+            "item_id" TEXT PRIMARY KEY,
+            "job_no" TEXT NOT NULL DEFAULT '',
+            "type" TEXT NOT NULL DEFAULT 'follow_up',
+            "title" TEXT NOT NULL,
+            "due_date" TEXT NOT NULL DEFAULT '',
+            "status" TEXT NOT NULL DEFAULT 'open',
+            "priority" TEXT NOT NULL DEFAULT 'medium',
+            "source_type" TEXT NOT NULL DEFAULT '',
+            "source_id" TEXT NOT NULL DEFAULT '',
+            "note" TEXT NOT NULL DEFAULT '',
+            "created_at" TEXT NOT NULL,
+            "completed_at" TEXT NOT NULL DEFAULT '',
+            "updated_at" TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS "idx_audit_event_created"
             ON "_audit_event" ("created_at");
         CREATE INDEX IF NOT EXISTS "idx_audit_change_event"
@@ -250,6 +344,15 @@ def _create_schema(conn):
             ON "quotation_payment_item" ("quote_id", "line_no");
         CREATE INDEX IF NOT EXISTS "idx_quotation_option_recent"
             ON "quotation_option" ("kind", "language", "updated_at");
+        CREATE INDEX IF NOT EXISTS "idx_customer_master_name"
+            ON "customer_master" ("name");
+        CREATE INDEX IF NOT EXISTS "idx_contact_customer"
+            ON "customer_contact" ("customer_id", "customer_name");
+        CREATE INDEX IF NOT EXISTS "idx_product_model_name"
+            ON "product_model" ("model");
+        CREATE INDEX IF NOT EXISTS "idx_work_item_job_status"
+            ON "work_item" ("job_no", "status", "due_date");
+
         CREATE TRIGGER IF NOT EXISTS "audit_event_no_update"
             BEFORE UPDATE ON "_audit_event"
             BEGIN SELECT RAISE(ABORT, 'audit events are append-only'); END;
@@ -271,6 +374,7 @@ def _create_schema(conn):
     for field, definition in (
         ("issuer_key", "TEXT NOT NULL DEFAULT ''"),
         ("payment_language", "TEXT NOT NULL DEFAULT 'zh'"),
+        ("converted_job_no", "TEXT NOT NULL DEFAULT ''"),
     ):
         if field not in quotation_columns:
             conn.execute(f'ALTER TABLE "quotation" ADD COLUMN "{field}" {definition}')
@@ -606,6 +710,76 @@ def _append_audit_event(conn, revision, created_at, reason, changes, context=Non
     return event_id, event_hash
 
 
+
+def _sync_quotation_order_links(conn, prepared):
+    """Synchronize explicit quote -> converted-order links stored on contracts.
+
+    source_job_no keeps its historical meaning (the JOB a quote was created
+    from). Conversion is tracked independently in converted_job_no.
+    """
+    changes = []
+    desired = {}
+    for contract in prepared.get("合同订单", []):
+        quote_id = str(contract.get("来源报价ID") or "").strip()
+        if not quote_id:
+            continue
+        job_no = str(contract.get("JOB No") or "").strip()
+        previous = desired.get(quote_id)
+        if previous and previous != job_no:
+            raise sqlite3.IntegrityError(
+                f"同一报价不能同时转换为多个订单：{quote_id} -> {previous}, {job_no}"
+            )
+        desired[quote_id] = job_no
+
+    # Clear stale conversion targets first (for example when an order is unlinked).
+    for row in conn.execute(
+        'SELECT "quote_id", "converted_job_no" FROM "quotation" '
+        'WHERE "converted_job_no" <> ""'
+    ):
+        quote_id = row["quote_id"]
+        old_job = row["converted_job_no"] or ""
+        if quote_id in desired:
+            continue
+        conn.execute(
+            'UPDATE "quotation" SET "converted_job_no"="", "updated_at"=? WHERE "quote_id"=?',
+            (datetime.now().isoformat(timespec="seconds"), quote_id),
+        )
+        changes.append({
+            "table_name": "报价单", "record_id": quote_id, "job_no": old_job,
+            "operation": "update", "field_name": "转换订单 JOB",
+            "old_value": old_job, "new_value": "", "origin": "association_sync",
+        })
+
+    for quote_id, job_no in desired.items():
+        row = conn.execute(
+            'SELECT "quote_id", "quote_no", "converted_job_no", "status" FROM "quotation" WHERE "quote_id"=?',
+            (quote_id,),
+        ).fetchone()
+        if row is None:
+            raise sqlite3.IntegrityError(f"订单引用的来源报价不存在：{quote_id}")
+        old_job = row["converted_job_no"] or ""
+        old_status = row["status"] or ""
+        new_status = "已接受" if old_status not in {"已拒绝", "已过期"} else old_status
+        if old_job != job_no or new_status != old_status:
+            conn.execute(
+                'UPDATE "quotation" SET "converted_job_no"=?, "status"=?, "updated_at"=? WHERE "quote_id"=?',
+                (job_no, new_status, datetime.now().isoformat(timespec="seconds"), quote_id),
+            )
+        if old_job != job_no:
+            changes.append({
+                "table_name": "报价单", "record_id": quote_id, "job_no": job_no,
+                "operation": "update", "field_name": "转换订单 JOB",
+                "old_value": old_job, "new_value": job_no, "origin": "association_sync",
+            })
+        if new_status != old_status:
+            changes.append({
+                "table_name": "报价单", "record_id": quote_id, "job_no": job_no,
+                "operation": "update", "field_name": "状态",
+                "old_value": old_status, "new_value": new_status, "origin": "association_sync",
+            })
+    return changes
+
+
 def save_database(path, data, rules=None, *, reason="manual_save", backup=True,
                   expected_revision=None, audit_context=None):
     path = os.path.abspath(os.fspath(path))
@@ -636,6 +810,7 @@ def save_database(path, data, rules=None, *, reason="manual_save", backup=True,
             conn.execute(f'DELETE FROM {_q(table)}')
         for table in ("合同订单", "发货批次", "付款条件", "设备台账", "开票记录", "回款记录"):
             _insert_rows(conn, table, prepared[table])
+        changes.extend(_sync_quotation_order_links(conn, prepared))
         conn.execute("DELETE FROM _warning_rules")
         for key, value in (rules or {}).items():
             conn.execute(
@@ -999,6 +1174,7 @@ def _quotation_from_connection(conn, quote_id):
     if row is None:
         return None
     result = {field: row[field] for field in ("quote_id", *QUOTATION_FIELDS)}
+    result["converted_job_no"] = row["converted_job_no"]
     result["created_at"] = row["created_at"]
     result["updated_at"] = row["updated_at"]
     result["items"] = [
@@ -1062,6 +1238,7 @@ def list_quotations(path, search=""):
                 "quote_id": quote["quote_id"], "quote_no": quote["quote_no"],
                 "quote_date": quote["quote_date"], "customer": quote["customer"],
                 "subject": quote["subject"], "source_job_no": quote["source_job_no"],
+                "converted_job_no": quote["converted_job_no"],
                 "currency": quote["currency"], "status": quote["status"],
                 "models": " / ".join(dict.fromkeys(
                     item["model"] for item in quote["items"] if item["model"]
@@ -1208,6 +1385,14 @@ def delete_quotation(path, quote_id, *, expected_revision=None, audit_context=No
         old = _quotation_from_connection(conn, _quote_text(quote_id))
         if old is None:
             raise KeyError(f"报价单不存在：{quote_id}")
+        linked = conn.execute(
+            'SELECT "JOB No" FROM "合同订单" WHERE "来源报价ID"=? LIMIT 1',
+            (old["quote_id"],),
+        ).fetchone()
+        if linked is not None:
+            raise QuotationValidationError(
+                f"报价单已转换为订单 {linked['JOB No']}，请先解除订单关联后再删除"
+            )
         conn.execute('DELETE FROM "quotation" WHERE "quote_id" = ?', (old["quote_id"],))
         revision = current_revision + 1
         now = datetime.now().isoformat(timespec="seconds")

@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
-__version__ = "1.12.1"
+__version__ = "1.14.1"
 APP_DISPLAY_NAME = "上海康肯销售订单管理系统"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"
@@ -29,6 +29,8 @@ sys.path.insert(0, APP_DIR)
 
 import core  # noqa: E402
 import database  # noqa: E402
+import erp_store  # noqa: E402
+import order_ops  # noqa: E402
 import move_in_request  # noqa: E402
 import quotation as quotation_export  # noqa: E402
 import webview  # noqa: E402
@@ -472,6 +474,65 @@ class Api:
     def get_unpaid_rows(self, data, rules=None):
         """Return the unpaid report using the same calculation as generated Excel."""
         return core.unpaid_report_rows(data, rules)
+
+    def get_erp_workspace(self, data=None, rules=None):
+        """Build ERP read models from current UI data or the authoritative database.
+
+        Passing the in-memory six-table payload lets the dashboard preview unsaved
+        edits while all calculations still use the canonical Python domain layer.
+        """
+        if not isinstance(data, dict):
+            data = database.load_database(self.database_path)
+        if not isinstance(rules, dict):
+            rules = database.get_rules(self.database_path)
+        work_items = erp_store.list_work_items(self.database_path)
+        return order_ops.build_workspace(data, rules, work_items=work_items)
+
+    def list_master_data(self):
+        return erp_store.list_master_data(self.database_path)
+
+    def save_master_record(self, kind, record):
+        context = self._audit_context({
+            "source": "master_data_save", "actions": [f"save_master_{kind}"],
+        }, "master_data_save")
+        result = erp_store.save_master_record(
+            self.database_path, kind, record,
+            expected_revision=self.database_revision,
+            audit_context=context,
+        )
+        self.database_revision = result["revision"]
+        result["master_data"] = erp_store.list_master_data(self.database_path)
+        return result
+
+    def list_work_items(self, job_no="", status=""):
+        return erp_store.list_work_items(self.database_path, job_no, status)
+
+    def save_work_item(self, item):
+        context = self._audit_context({
+            "source": "work_item_save", "actions": ["save_work_item"],
+        }, "work_item_save")
+        result = erp_store.save_work_item(
+            self.database_path, item,
+            expected_revision=self.database_revision,
+            audit_context=context,
+        )
+        self.database_revision = result["revision"]
+        result["work_items"] = erp_store.list_work_items(self.database_path)
+        return result
+
+    def complete_work_item(self, item_id):
+        context = self._audit_context({
+            "source": "work_item_complete", "actions": ["complete_work_item"],
+        }, "work_item_complete")
+        result = erp_store.complete_work_item(
+            self.database_path, item_id,
+            expected_revision=self.database_revision,
+            audit_context=context,
+        )
+        self.database_revision = result["revision"]
+        result["work_items"] = erp_store.list_work_items(self.database_path)
+        return result
+
 
     def list_quotations(self, search=""):
         return database.list_quotations(self.database_path, search)

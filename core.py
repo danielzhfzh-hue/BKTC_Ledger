@@ -43,7 +43,8 @@ SCHEMA = {
     "合同订单": [
         ("JOB No", TEXT), ("客户", TEXT), ("担当者", TEXT), ("订单内容", TEXT),
         ("付款条件", TEXT), ("发货方式", TEXT), ("发货地点", TEXT), ("送货地点", TEXT),
-        ("币种", TEXT), ("设备型号", TEXT), ("总台数", INT), ("备注", TEXT),
+        ("币种", TEXT), ("设备型号", TEXT), ("总台数", INT),
+        ("来源报价ID", TEXT), ("来源报价单号", TEXT), ("备注", TEXT),
     ],
     "付款条件": [
         ("JOB No", TEXT), ("客户", TEXT), ("款类", SELECT,

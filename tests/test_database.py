@@ -728,19 +728,25 @@ class CoreReliabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "upgrade.db"
             database.save_database(path, sample_data(), backup=False, reason="database_created")
-            with sqlite3.connect(path) as conn:
+            conn = sqlite3.connect(path)
+            try:
                 conn.execute("PRAGMA user_version = 5")
                 conn.execute(
                     "UPDATE _meta SET value='5' WHERE key='schema_version'"
                 )
                 conn.commit()
+            finally:
+                conn.close()
             before = path.read_bytes()
             info = database.get_database_info(path)
             self.assertEqual(info["integrity"], "ok")
             backups = sorted((Path(td) / "备份").glob("*_pre_schema_v5_to_v7_*.db"))
             self.assertEqual(len(backups), 1)
-            with sqlite3.connect(backups[0]) as conn:
+            conn = sqlite3.connect(backups[0])
+            try:
                 self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 5)
+            finally:
+                conn.close()
             self.assertTrue(before)
 
 

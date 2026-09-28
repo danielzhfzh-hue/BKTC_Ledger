@@ -17,6 +17,15 @@ class ErpV2UiTests(unittest.TestCase):
         ):
             self.assertIn(marker, html)
 
+    def test_summary_panel_id_is_unique_and_dashboard_sections_are_siblings(self):
+        html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(html.count('id="panel-摘要"'), 1)
+        self.assertEqual(html.count('class="erp-card erp-work-card"'), 1)
+        self.assertEqual(html.count('class="erp-card erp-recent"'), 1)
+        work_end = html.index('</section>', html.index('class="erp-card erp-work-card"'))
+        recent_start = html.index('class="erp-card erp-recent"')
+        self.assertLess(work_end, recent_start)
+
     def test_frontend_consumes_canonical_workspace_and_order_tabs(self):
         source = (ROOT / "ui" / "erp_v2.js").read_text(encoding="utf-8")
         for marker in (

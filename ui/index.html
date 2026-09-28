@@ -76,16 +76,20 @@
       <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">ATTENTION</span><h3>待处理与风险</h3></div><button id="erpOpenOrderCenter">查看全部订单</button></div><div id="erpAttentionList" class="erp-attention-list"></div></section>
       <section class="erp-card"><div class="erp-card-head"><div><span class="eyebrow">PIPELINE</span><h3>订单阶段</h3></div></div><div id="erpStageBoard" class="erp-stage-board"></div></section>
     </div>
+    <section class="erp-card erp-work-card">
+      <div class="erp-card-head"><div><span class="eyebrow">MY WORK</span><h3>我的待办</h3></div><button id="erpAddWorkItem" class="primary">＋ 新建待办</button></div>
+      <div id="erpWorkList" class="erp-work-list"></div>
+    </section>
     <section class="erp-card erp-recent">
-    <section class="erp-card erp-work-card"><div class="erp-card-head"><div><span class="eyebrow">MY WORK</span><h3>我的待办</h3></div><button id="erpAddWorkItem" class="primary">＋ 新建待办</button></div><div id="erpWorkList" class="erp-work-list"></div></section><div class="erp-card-head"><div><span class="eyebrow">RECENT ORDERS</span><h3>订单运营视图</h3></div><input id="erpDashboardFilter" placeholder="筛选 JOB / 客户 / 型号"></div><div class="erp-table-wrap"><table class="erp-order-table"><thead><tr><th>JOB</th><th>客户</th><th>订单内容</th><th>金额</th><th>阶段</th><th>发货</th><th>验收</th><th>开票</th><th>回款</th><th>风险</th></tr></thead><tbody id="erpRecentOrders"></tbody></table></div></section>
+      <div class="erp-card-head"><div><span class="eyebrow">RECENT ORDERS</span><h3>订单运营视图</h3></div><input id="erpDashboardFilter" placeholder="筛选 JOB / 客户 / 型号"></div>
+      <div class="erp-table-wrap"><table class="erp-order-table"><thead><tr><th>JOB</th><th>客户</th><th>订单内容</th><th>金额</th><th>阶段</th><th>发货</th><th>验收</th><th>开票</th><th>回款</th><th>风险</th></tr></thead><tbody id="erpRecentOrders"></tbody></table></div>
+    </section>
   </section>
 
   <section id="panel-订单中心" class="panel hidden erp-orders">
     <div class="erp-page-head compact"><div><div class="eyebrow">ORDER CONTROL TOWER</div><h1>订单中心</h1><p>以一张订单为主线查看设备、发货、开票、回款与完整业务关系。</p></div><div><button id="erpOrderNew" class="primary">＋ 新建订单</button></div></div>
     <div class="erp-order-layout"><aside class="erp-order-list-pane"><div class="erp-order-list-toolbar"><input id="erpOrderSearch" placeholder="搜索 JOB / 客户 / 型号"><select id="erpOrderStageFilter"><option value="">全部阶段</option></select></div><div id="erpOrderList" class="erp-order-list"></div></aside><article id="erpOrderDetail" class="erp-order-detail"><div class="erp-empty-state"><b>选择一张订单</b><span>查看它从受注到回款的完整生命周期。</span></div></article></div>
   </section>
-
-  <section id="panel-摘要" class="panel">  </section>
 
   <section id="panel-财务驾驶舱" class="panel hidden erp-finance-page">
     <div class="erp-page-head compact"><div><div class="eyebrow">FINANCE COCKPIT</div><h1>应收与现金流</h1><p>按账龄和未来回款窗口查看应收，并可下钻到 JOB / 款类。</p></div></div>

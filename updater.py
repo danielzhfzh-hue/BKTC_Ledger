@@ -106,7 +106,8 @@ def extract_archive(archive, destination):
             raise ValueError("更新包文件数量异常")
         for entry in entries:
             target = _safe_member_path(root, entry.name)
-            _ensure_inside_root(root, target.parent)
+            if target != root:
+                _ensure_inside_root(root, target.parent)
             if entry.isdir():
                 if target.is_symlink():
                     raise ValueError("更新包路径与符号链接冲突")

@@ -45,6 +45,9 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             package = Path(tmp) / "app.tar.gz"
             with tarfile.open(package, "w:gz") as archive:
+                root_entry = tarfile.TarInfo(".")
+                root_entry.type = tarfile.DIRTYPE
+                archive.addfile(root_entry)
                 data = b"executable"
                 file_entry = tarfile.TarInfo("BKTC_Ledger.app/Contents/MacOS/app")
                 file_entry.size = len(data)

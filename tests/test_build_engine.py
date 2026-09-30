@@ -234,7 +234,7 @@ class BuildEngineReliabilityTests(unittest.TestCase):
         self.assertIn("行质保待确认", headers)
         self.assertIn("行质保规则", headers)
 
-    def test_explicit_serial_matches_override_batch_fallback(self):
+    def test_explicit_serial_matches_do_not_suppress_distinct_batch_record(self):
         fallback = {"记录ID": "batch", "覆盖批次": "1", "覆盖製造番号": ""}
         explicit = {"记录ID": "serial", "覆盖批次": "1",
                     "覆盖製造番号": "26BS001-001"}
@@ -243,7 +243,7 @@ class BuildEngineReliabilityTests(unittest.TestCase):
             [fallback, explicit], "26BS001-001", "1"
         )
 
-        self.assertEqual(matches, [explicit])
+        self.assertEqual(matches, [fallback, explicit])
 
     def test_job_sheet_shows_all_matching_invoice_and_payment_amounts(self):
         ws = Workbook().active

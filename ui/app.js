@@ -106,6 +106,7 @@ function newLocalId() {
 
 function markAuditAction(action) {
   if (action) state.auditActions.add(String(action));
+  window.invalidateErpWorkspace?.();
 }
 
 function pendingAuditContext(source = "manual_save") {
@@ -475,9 +476,7 @@ function coverageMatches(record, device) {
 }
 
 function matchingCoverageRecords(records, device) {
-  const explicit = records.filter((r) => s(r["覆盖製造番号"]) && coverageMatches(r, device));
-  return explicit.length ? explicit
-    : records.filter((r) => !s(r["覆盖製造番号"]) && coverageMatches(r, device));
+  return records.filter((r) => coverageMatches(r, device));
 }
 
 function isoDateValue(value) {
@@ -592,8 +591,15 @@ function recomputeDerived() {
       }
       if (table === "开票记录") {
         const opened = isoDateValue(rec["开票日"]);
+        const term = (state.data["付款条件"] || []).find((t) => s(t["JOB No"]) === s(rec["JOB No"]) && s(t["款类"]) === s(rec["款类"]));
+        const days = rec["账期天数"] == null || rec["账期天数"] === "" ? term?.["账期天数"] : rec["账期天数"];
+        let base = opened;
+        if (opened !== null && s(term?.["触发条件"]) === "月结次月月底") {
+          const date = new Date(opened);
+          base = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 2, 0);
+        }
         rec["应收回款日"] = opened === null ? ""
-          : isoFromMs(opened + (parseInt(rec["账期天数"], 10) || 0) * 86400000);
+          : !term && (days == null || days === "") ? "" : isoFromMs(base + (parseInt(days, 10) || 0) * 86400000);
       }
     }
   }
@@ -618,7 +624,16 @@ function recomputeDerived() {
     const job = s(inv["JOB No"]), kind = s(inv["款类"]), jobDevices = devicesByJob[job] || [];
     const term = (termsByJob[job] || []).find((x) => s(x["款类"]) === kind);
     const warranty = warrantyTermSettings(kind, term);
-    if (warranty.usesWarranty) {
+    const trigger = s(term?.["触发条件"]);
+    if (["验收后", "验收合格后", "货到签收后", "合同生效后"].includes(trigger)) {
+      const field = trigger === "货到签收后" ? "签收日" : "质保开始日";
+      const dates = trigger === "合同生效后"
+        ? [isoDateValue((d["合同订单"] || []).find((order) => s(order["JOB No"]) === job)?.["合同生效日"])]
+        : coveredDevices(inv, jobDevices).map((dev) => isoDateValue(dev[field]));
+      const days = inv["账期天数"] == null || inv["账期天数"] === "" ? term["账期天数"] : inv["账期天数"];
+      inv["应收回款日"] = dates.length && dates.every((date) => date !== null)
+        ? isoFromMs(Math.max(...dates) + (Number(days) || 0) * 86400000) : "";
+    } else if (warranty.usesWarranty) {
       const info = warrantyEndInfo(inv, jobDevices);
       const warrantyDue = info.missing ? null : warrantyDueDate(kind, term, info.end);
       inv["应收回款日"] = warrantyDue === null ? "" : isoFromMs(warrantyDue);
@@ -1527,6 +1542,7 @@ const VIRTUAL_QUERY_SCHEMAS = {
   "未付款订单": [
     { name: "客户", type: "text" }, { name: "JOB No", type: "text" },
     { name: "未回款项数", type: "int" }, { name: "未回收合计", type: "number" },
+    { name: "已知未回收合计", type: "number" }, { name: "金额待确认项数", type: "int" },
     { name: "预警等级", type: "text" }, { name: "未回款原因", type: "text" },
   ],
   "未回款明细": [
@@ -1564,17 +1580,23 @@ function queryRows(table) {
       const key = `${job}\u0001${s(row["客户"])}`;
       const group = groups.get(key) || {
         "客户": row["客户"], "JOB No": job, "未回款项数": 0,
-        "未回收合计": 0, "预警等级": new Set(), "未回款原因": new Set(),
+        "已知未回收合计": 0, "金额待确认项数": 0, "预警等级": new Set(), "未回款原因": new Set(),
       };
       group["未回款项数"] += 1;
-      group["未回收合计"] += Number(row["未回收金额"]) || 0;
+      const amount = row["未回收金额"];
+      if (amount === null || amount === undefined || amount === "" || !Number.isFinite(Number(amount))) {
+        group["金额待确认项数"] += 1;
+      } else {
+        group["已知未回收合计"] += Math.round(Number(amount) * 100);
+      }
       if (s(row["预警等级"])) group["预警等级"].add(s(row["预警等级"]));
       if (s(row["未回收原因"])) group["未回款原因"].add(s(row["未回收原因"]));
       groups.set(key, group);
     }
     return [...groups.values()].map((group) => ({
       ...group,
-      "未回收合计": Math.round(group["未回收合计"] * 100) / 100,
+      "已知未回收合计": group["已知未回收合计"] / 100,
+      "未回收合计": group["金额待确认项数"] ? null : group["已知未回收合计"] / 100,
       "预警等级": [...group["预警等级"]].sort((a, b) => (severity[a] ?? 9) - (severity[b] ?? 9)).join(" / "),
       "未回款原因": [...group["未回款原因"]].join("；"),
     }));
@@ -1656,7 +1678,7 @@ function qbAddFilterRow() {
       <option value="gt">大于</option><option value="lt">小于</option>
       <option value="empty">为空</option><option value="notempty">不为空</option>
     </select>
-    <select class="qb-f-val"></select>
+    <input class="qb-f-val" placeholder="输入值或选择建议" aria-label="筛选值"><datalist></datalist>
     <button class="qb-f-del" title="删除条件">✕</button>`;
   $("qbFilters").appendChild(tr);
   const f0 = fields[0];
@@ -1673,10 +1695,14 @@ function distinctValues(table, name) {
   else arr.sort((a, b) => a.localeCompare(b, "zh"));
   return arr;
 }
+let qbValueListId = 0;
 function populateValueSelect(sel, table, name) {
   const vals = distinctValues(table, name);
-  sel.innerHTML = `<option value="">（选值…）</option>` +
-    vals.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
+  const suggestions = sel.parentElement.querySelector("datalist");
+  if (!suggestions.id) suggestions.id = "qbValues-" + (++qbValueListId);
+  sel.setAttribute("list", suggestions.id);
+  sel.value = "";
+  suggestions.innerHTML = vals.map((v) => `<option value="${esc(v)}"></option>`).join("");
 }
 function readFilters() {
   return [...document.querySelectorAll("#qbFilters .qb-filter")].map((tr) => {
@@ -1698,6 +1724,7 @@ function matchFilter(value, flt) {
   if (flt.op === "eq") return v === target;
   if (flt.op === "contains") return v.toLocaleLowerCase().includes(target.toLocaleLowerCase());
   if (flt.op === "ne") return v !== target;
+  if ((flt.op === "gt" || flt.op === "lt") && v === "") return false;
   if (flt.op === "gt") return _numOrStr(v) > _numOrStr(target);
   if (flt.op === "lt") return _numOrStr(v) < _numOrStr(target);
   return true;
@@ -1733,8 +1760,8 @@ async function qbDoPreview() {
   if (!fields.length) { toast("请至少勾选一个输出字段", "error"); return; }
   $("qbCount").textContent = `符合 ${rows.length} 行 × ${fields.length} 列`;
   const head = `<tr>${fields.map((f) => `<th>${esc(f.label)}</th>`).join("")}</tr>`;
-  const body = rows.slice(0, 10).map((r) =>
-    `<tr>${fields.map((f) => `<td>${esc(r[f.label])}</td>`).join("")}</tr>`).join("");
+  const body = rows.map((r) =>
+    `<tr>${fields.map((f) => `<td>${esc(f.type === "number" && r[f.label] == null ? "待确认" : r[f.label])}</td>`).join("")}</tr>`).join("");
   $("qbPreview").innerHTML = `<thead>${head}</thead><tbody>${body}</tbody>`;
 }
 async function qbDoExport() {
@@ -2058,19 +2085,37 @@ function applyBackendState(r) {
       integrity: "ok", last_saved_at: new Date().toISOString().slice(0, 19) };
   }
   if (r.data) recomputeDerived();
+  if (state.data && state.schema) renderCounts();
+}
+
+function saveSnapshot() {
+  return JSON.parse(JSON.stringify({ data: state.data, rules: state.rules }));
+}
+
+function acceptSavedSnapshot(r, snapshot) {
+  const changed = JSON.stringify({ data: state.data, rules: state.rules }) !== JSON.stringify(snapshot);
+  if (changed) {
+    const { data, rules, ...metadata } = r;
+    applyBackendState(metadata);
+    state.dirty = true;
+  } else {
+    applyBackendState(r);
+    state.dirty = false;
+    clearPendingAuditActions();
+  }
+  return changed;
 }
 
 async function saveCurrent(silent = false) {
   if (state._saving) return false;
   state._saving = true;
+  const snapshot = saveSnapshot();
   try {
     if (!silent) setStatus("正在校验并保存数据库…");
-    const r = await call("save_data", state.data, state.rules, pendingAuditContext());
-    applyBackendState(r);
-    state.dirty = false;
-    clearPendingAuditActions();
-    setStatus(`数据库已保存：${r.path}（修订 ${r.revision}）`);
-    if (!silent) toast("数据库已通过校验并保存", "ok");
+    const r = await call("save_data", snapshot.data, snapshot.rules, pendingAuditContext());
+    const changed = acceptSavedSnapshot(r, snapshot);
+    setStatus(`数据库已保存：${r.path}（修订 ${r.revision}）` + (changed ? "；保存期间的新修改尚未保存" : ""));
+    if (!silent) toast(changed ? "已保存提交时的数据；新修改仍待保存" : "数据库已通过校验并保存", "ok");
     renderAll();
     return true;
   } catch (err) {
@@ -2089,31 +2134,113 @@ $("btnSave").addEventListener("click", async () => {
 });
 
 $("btnGenerate").addEventListener("click", async () => {
+  if (state._saving) { toast("正在保存，请完成后再导出台账", "error"); return; }
+  state._saving = true;
+  const snapshot = saveSnapshot();
   try {
     setStatus("正在从数据库导出台账…");
-    const r = await call("generate", state.data, state.rules, pendingAuditContext("generate_ledger"));
-    applyBackendState(r);
-    state.dirty = false;
-    clearPendingAuditActions();
+    const r = await call("generate", snapshot.data, snapshot.rules, pendingAuditContext("generate_ledger"));
+    const changed = acceptSavedSnapshot(r, snapshot);
     const msg = `已生成：${r.out}（未回收 ${r.counts["未回收行数"]} 行，合计 ${Number(r.counts["未回收合计"]).toLocaleString()}）` +
-      (r.notice ? `；${r.notice}` : "");
+      (r.notice ? `；${r.notice}` : "") + (changed ? "；导出期间的新修改尚未保存，也未包含在此台账中" : "");
     setStatus(msg);
     toast(r.notice ? "台账已导出到备用文件" : "台账已导出", "ok");
     renderAll();
   } catch (err) { setStatus(String(err), "error"); toast(String(err), "error"); }
+  finally { state._saving = false; }
+});
+
+$("btnEditableExport").addEventListener("click", async () => {
+  if (state._saving || state.dirty || state.quoteDirty) return toast("请先保存当前修改，再导出可编辑工作簿", "error");
+  const databasePath = state.storePath;
+  try {
+    const path = await call("pick_editable_workbook", true);
+    if (!path) return;
+    if (state._saving || state.dirty || state.quoteDirty || state.storePath !== databasePath) {
+      return toast("选择文件期间数据已修改或数据库已切换，请保存后重新导出", "error");
+    }
+    const result = await call("export_editable_workbook", path);
+    const changed = state.dirty || state.quoteDirty || state.storePath !== databasePath;
+    setStatus("可编辑工作簿已导出：" + result.path + (changed ? "；导出期间的新修改未包含在此工作簿中" : ""));
+    toast("可编辑 Excel 已导出", "ok");
+  } catch (error) { toast(String(error), "error"); }
+});
+
+$("btnEditableImport").addEventListener("click", async () => {
+  if (state._saving || state.dirty || state.quoteDirty) return toast("请先保存当前修改，再导入 Excel 变更", "error");
+  const databasePath = state.storePath;
+  try {
+    const path = await call("pick_editable_workbook", false);
+    if (!path) return;
+    if (state._saving || state.dirty || state.quoteDirty || state.storePath !== databasePath) {
+      return toast("选择文件期间数据已修改或数据库已切换，请保存后重新导入", "error");
+    }
+    const preview = await call("preview_editable_import", path);
+    if (state.storePath !== databasePath) return toast("数据库已切换，请重新预览", "error");
+    const overlay = document.createElement("div");
+    overlay.className = "modal-backdrop";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", "Excel 导入差异预览");
+    const blocked = preview.stale || (preview.issues || []).some((issue) => issue.severity === "error");
+    overlay.innerHTML = '<div class="modal-card entry-card"><div class="modal-head"><h3>Excel 导入差异预览</h3><button data-cancel>×</button></div>' +
+      '<div class="modal-body"><p>' + esc(path) + '</p><p>新增 ' + Number(preview.action_counts["新增"] || 0) +
+      '，修改 ' + Number(preview.action_counts["修改"] || 0) + '，删除 ' + Number(preview.action_counts["删除"] || 0) + '</p>' +
+      (preview.stale ? '<p class="error">工作簿已过期，请重新导出并编辑。</p>' : '') +
+      (preview.issues || []).map((issue) => '<p>' + esc(issue.severity + '：' + issue.msg) + '</p>').join("") +
+      (preview.changes || []).map((change) => '<details open><summary>' + esc(change.action + ' · ' + change.table + ' · ' + change.label) +
+        '</summary><small>' + esc(change.record_id) + '</small><table><thead><tr><th>字段</th><th>修改前</th><th>修改后</th></tr></thead><tbody>' +
+        (change.fields || []).map((field) => '<tr><td>' + esc(field.field + (field.derived ? '（自动计算）' : '')) + '</td><td>' +
+          esc(JSON.stringify(field.before)) + '</td><td>' + esc(JSON.stringify(field.after)) + '</td></tr>').join("") + '</tbody></table></details>').join("") +
+      '<p data-error role="alert"></p></div><div class="modal-foot"><button data-cancel>取消</button><button class="primary" data-apply' +
+      (blocked || !preview.changes.length ? ' disabled' : '') + '>确认以上差异并导入</button></div></div>';
+    const close = () => { document.removeEventListener("keydown", escape); overlay.remove(); };
+    const escape = (event) => { if (event.key === "Escape" && !state._saving) close(); };
+    overlay.querySelectorAll("[data-cancel]").forEach((button) => button.addEventListener("click", close));
+    overlay.querySelector("[data-apply]").addEventListener("click", async () => {
+      if (state._saving || state.dirty || state.quoteDirty) return toast("预览期间有新的修改，请保存后重新预览", "error");
+      if (!confirm("第二次确认：将按预览新增、修改或删除数据库记录，并自动备份。确定执行？")) return;
+      state._saving = true;
+      const wasInert = document.body.inert;
+      document.body.inert = true;
+      try {
+        const result = await call("confirm_editable_import", preview.token, true, pendingAuditContext("xlsx_import"));
+        applyBackendState(result);
+        state.dirty = false;
+        clearPendingAuditActions();
+        close();
+        renderAll();
+        setStatus("Excel 变更已导入；备份：" + result.backup);
+        toast("Excel 变更已导入并形成审计记录", "ok");
+      } catch (error) {
+        overlay.querySelector("[data-error]").textContent = String(error);
+      } finally { document.body.inert = wasInert; state._saving = false; }
+    });
+    document.addEventListener("keydown", escape);
+    document.body.appendChild(overlay);
+    overlay.querySelector("[data-cancel]").focus();
+  } catch (error) { toast(String(error), "error"); }
 });
 
 async function refreshWithFeedback(store) {
+  if (state._saving) return toast("正在保存或切换数据库，请稍后再试", "error");
+  if ((state.dirty || state.quoteDirty) && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
+  state._saving = true;
+  const previousInert = document.body.inert;
+  document.body.inert = true;
   try {
     await refresh(store);
   } catch (err) {
     setStatus("路径切换失败：" + String(err), "error");
     toast("路径切换失败：" + String(err), "error");
+  } finally {
+    state._saving = false;
+    document.body.inert = previousInert;
   }
 }
 
 $("btnPickStore").addEventListener("click", async () => {
-  if ((state.dirty || state.quoteDirty) && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
+  if (state._saving) return toast("正在保存或切换数据库，请稍后再试", "error");
   try {
     let p = await call("pick_store");
     if (!p) p = window.prompt("请输入 SQLite 或 JSON 文件的完整路径：", state.storePath || "");
@@ -2128,7 +2255,7 @@ $("btnPickStore").addEventListener("click", async () => {
 });
 
 $("btnApplyStorePath").addEventListener("click", async () => {
-  if ((state.dirty || state.quoteDirty) && !confirm("当前有未保存更改。切换数据库会放弃这些更改，确定继续吗？")) return;
+  if (state._saving) return toast("正在保存或切换数据库，请稍后再试", "error");
   const p = $("setStoreInput").value.trim();
   if (!p) return toast("请先输入数据库路径", "error");
   await refreshWithFeedback(p);
@@ -2194,11 +2321,24 @@ function renderAuditEvents(result) {
   }
   $("auditBody").innerHTML = rows.join("") || '<tr><td colspan="5" class="muted">当前筛选条件下没有审计记录</td></tr>';
   const changes = state.auditEvents.reduce((sum, event) => sum + (event.changes || []).length, 0);
-  $("auditSummary").textContent = `返回 ${state.auditEvents.length} 次保存、${changes} 项变更。审计从 ${chain?.started_at?.replace("T", " ") || "启用时"} 开始。`;
+  $("auditSummary").textContent = `返回 ${state.auditEvents.length} 次保存、${changes} 项变更。` +
+    (result.truncated ? `匹配共 ${result.total_matched} 次保存，当前显示第 ${(result.offset || 0) + 1}～${(result.offset || 0) + state.auditEvents.length} 次；可翻页查看，导出包含全部匹配记录。` : "") +
+    `审计从 ${chain?.started_at?.replace("T", " ") || "启用时"} 开始。`;
 }
 
-async function loadAuditEvents() {
+let auditOffset = 0;
+let auditPageFilters = "";
+let auditRequest = 0;
+async function loadAuditEvents(offset = 0) {
+  if (!Number.isInteger(offset)) offset = 0;
+  const filters = auditFilters();
+  const filterKey = JSON.stringify(filters);
+  if (filterKey !== auditPageFilters) offset = 0;
+  auditPageFilters = filterKey;
   if (!state.storePath) return;
+  const request = ++auditRequest;
+  $("btnAuditPrevious").disabled = true;
+  $("btnAuditNext").disabled = true;
   if ($("auditTable").options.length === 1 && state.schema) {
     for (const table of [...Object.keys(state.schema), "预警规则", "报价单", "报价明细"]) {
       $("auditTable").insertAdjacentHTML("beforeend", `<option value="${esc(table)}">${esc(table)}</option>`);
@@ -2206,13 +2346,21 @@ async function loadAuditEvents() {
   }
   $("auditBody").innerHTML = '<tr><td colspan="5" class="muted">正在读取并验证审计链…</td></tr>';
   try {
-    renderAuditEvents(await call("get_audit_events", auditFilters(), 1000));
+    const result = await call("get_audit_events", filters, 1000, offset);
+    if (request !== auditRequest) return;
+    auditOffset = result.offset || 0;
+    renderAuditEvents(result);
+    $("btnAuditPrevious").disabled = auditOffset === 0;
+    $("btnAuditNext").disabled = !result.has_more;
   } catch (error) {
+    if (request !== auditRequest) return;
     $("auditBody").innerHTML = `<tr><td colspan="5" class="error">${esc(String(error))}</td></tr>`;
   }
 }
 
 $("btnAuditRefresh").addEventListener("click", loadAuditEvents);
+$("btnAuditPrevious").addEventListener("click", () => loadAuditEvents(Math.max(0, auditOffset - 1000)));
+$("btnAuditNext").addEventListener("click", () => loadAuditEvents(auditOffset + 1000));
 $("btnAuditExport").addEventListener("click", async () => {
   try {
     const result = await call("export_audit", auditFilters());
@@ -2894,9 +3042,10 @@ function renderShipmentEntry(job) {
 }
 
 function paymentKindsForJob(job) {
-  return [...new Set(state.data["付款条件"]
+  const kinds = [...new Set(state.data["付款条件"]
     .filter((row) => s(row["JOB No"]) === job && s(row["款类"]))
     .map((row) => s(row["款类"])))];
+  return kinds.length ? kinds : ["预付款", "发货款", "到货款", "验收款", "质保款"];
 }
 
 function renderTransactionEntry(table, job) {
@@ -2905,11 +3054,13 @@ function renderTransactionEntry(table, job) {
   draft["客户"] = customerForJob(job);
   const isInvoice = table === "开票记录";
   const kinds = paymentKindsForJob(job);
-  const kindOptions = '<option value="">请选择付款条件中的款类…</option>' + kinds.map((kind) =>
+  const termsConfigured = state.data["付款条件"].some((row) => s(row["JOB No"]) === job && s(row["款类"]));
+  const kindOptions = '<option value="">请选择款类…</option>' + kinds.map((kind) =>
     `<option value="${esc(kind)}" ${kind === s(draft["款类"]) ? "selected" : ""}>${esc(kind)}</option>`).join("");
   const dateField = isInvoice ? "开票日" : "回款日";
   return entryJobSection(job) + `<div class="entry-section">
     <h4>② ${isInvoice ? "开票" : "回款"}信息</h4>
+    ${job && !termsConfigured ? '<p class="muted">付款条件未配置：可先录入真实款项，比例与应收日期仍待确认。</p>' : ''}
     ${job ? `<div class="entry-grid three">
       <label>款类<select id="entryKind" ${kinds.length ? "" : "disabled"}>${kindOptions}</select></label>
       <label>${dateField}<input id="entryTransactionDate" type="date" value="${esc(val(draft, dateField))}"></label>
@@ -3157,7 +3308,7 @@ function commitTransactionEntry() {
   };
   if (isInvoice) {
     record["状态"] = "已开";
-    record["账期天数"] = Number(draft["账期天数"]);
+    record["账期天数"] = draft["账期天数"] == null || draft["账期天数"] === "" ? null : Number(draft["账期天数"]);
   }
   let target = state.data[table].find((row) => s(row["JOB No"]) === job && isBlankTransaction(table, row));
   if (target) Object.assign(target, record);
@@ -3216,7 +3367,7 @@ $("entryBody").addEventListener("change", (event) => {
   if (event.target.id === "entryKind" && entry.table === "开票记录") {
     const term = state.data["付款条件"].find((row) =>
       s(row["JOB No"]) === s(entry.job) && s(row["款类"]) === event.target.value);
-    if ($("entryInvoiceDays")) $("entryInvoiceDays").value = term?.["账期天数"] ?? 0;
+    if ($("entryInvoiceDays")) $("entryInvoiceDays").value = term?.["账期天数"] ?? "";
   }
   syncEntryTransactionDraft();
 });

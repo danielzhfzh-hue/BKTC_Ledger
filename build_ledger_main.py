@@ -139,17 +139,11 @@ def cov_match(x, ser, batch):
 
 
 def matching_records(cands, ser, batch):
-    """返回设备覆盖到的全部记录，保留番号优先的兜底语义。
+    """返回设备覆盖到的全部独立记录，不按覆盖方式推断重复。
 
-    只要有显式製造番号匹配，就不再同时计入纯批次记录，
-    避免历史的批次兜底行与精确分配行重复计金额。
+    批次与番号是关联方式，不是重复交易的依据；每条记录应按其覆盖分摊。
     """
-    explicit = [x for x in cands
-                if s(x['覆盖製造番号']) and cov_match(x, ser, batch)]
-    if explicit:
-        return explicit
-    return [x for x in cands
-            if not s(x['覆盖製造番号']) and cov_match(x, ser, batch)]
+    return [x for x in cands if cov_match(x, ser, batch)]
 
 
 def first_match(cands, ser, batch):
@@ -709,12 +703,12 @@ def write_job_sheet(ws, job, ctr, devs, tms, ships, shp_key, invs, pays, rules=N
     return rows, cols, blocks, info
 
 
-def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices, rules=None):
+def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices, rules=None, *, as_of=None):
     """计算未回收行（含应收常量、静态原因与预警豁免标记）。"""
     rules = {**DEFAULT_RULES, **(rules or {})}
     tol = rules['金额容差']
     days = rules['临近天数']
-    today = datetime.now()
+    today = datetime.strptime(str(as_of)[:10], "%Y-%m-%d") if as_of is not None else datetime.now()
     rows = []
     jobs = sorted({s(c['JOB No']) for c in contracts})
     terms_by, ships_by, inv_by, pay_by, dev_by = {}, {}, {}, {}, {}
@@ -731,10 +725,24 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
     cust = {s(c['JOB No']): s(c['客户']) for c in contracts}
 
     for job in jobs:
-        tms = terms_by.get(job, [])
+        tms = [term for term in terms_by.get(job, []) if s(term.get('款类'))]
         invs = inv_by.get(job, [])
         pays = pay_by.get(job, [])
         devs = dev_by.get(job, [])
+        terms_complete = bool(tms) and all(
+            num(term.get('比例%')) is not None and 0 <= num(term.get('比例%')) <= 100
+            for term in tms
+        )
+        if not terms_complete and (devs or not (invs or pays)):
+            rows.append({'客户': cust[job], 'JOB No': job, '批次': '（待确认）',
+                         '款类': '（比例未配置）', '预警等级': '④待确认',
+                         '开票日期': '', '预定回收日期': '', '未回收金额': None,
+                         '未回收原因': ('付款条件未配置' if not tms else '付款条件比例不完整') + '；未回收金额待确认',
+                         'recv': 0, 'unacc': 0, 'warn_exempt': 1, 'static': True,
+                         'raw_batch': '', 'inv_dt': None, 'due_dt': None,
+                         '_warranty_end': None, '_warranty_pending': False,
+                         '_warranty_rule': False})
+            continue
         types = sorted({s(t['款类']) for t in tms} |
                        {s(x['款类']) for x in invs if s(x['款类']) != '全额'} |
                        {s(x['款类']) for x in pays},
@@ -913,8 +921,7 @@ def compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices
                 reasons.append('临近')
             elif due:
                 reasons.append('未到付款期')
-            if (('未验收' in reasons) and rules['未验收待确认']) or \
-               warranty_missing or due is None:
+            if pend:
                 warn = '④待确认'
             elif warranty_active:
                 warn = '③未到期'

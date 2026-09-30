@@ -1,9 +1,11 @@
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 from openpyxl import load_workbook
 
@@ -61,6 +63,103 @@ class DatabaseTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_coverage_rounding_does_not_assign_residual_to_free_device(self):
+        data = sample_data()
+        prototype = dict(data["设备台账"][0])
+        data["设备台账"] = [
+            {**prototype, "记录ID": "d1", "製造番号": "A", "未税单价": 100},
+            {**prototype, "记录ID": "d2", "製造番号": "B", "未税单价": 100},
+            {**prototype, "记录ID": "d3", "製造番号": "C", "未税单价": 100},
+            {**prototype, "记录ID": "d4", "製造番号": "D", "未税单价": 0, "是否无偿": "是"},
+        ]
+        data["回款记录"] = [{"记录ID": "p1", "JOB No": "26BS001", "款类": "预付款",
+                           "回款日": "2026-09-01", "含税金额": 1, "覆盖批次": "1"}]
+        database.save_database(self.db, data, self.rules, backup=False)
+        with closing(sqlite3.connect(self.db)) as conn:
+            rows = dict(conn.execute('SELECT device_id, allocated_amount FROM "回款记录_设备关联"'))
+        self.assertEqual(rows["d4"], 0)
+        self.assertEqual(round(sum(rows.values()), 2), 1)
+
+    def test_coverage_tampering_is_detected_even_when_foreign_keys_are_valid(self):
+        data = sample_data()
+        data["回款记录"] = [{"记录ID": "p1", "JOB No": "26BS001", "款类": "预付款",
+                           "回款日": "2026-09-01", "含税金额": 10, "覆盖批次": "1"}]
+        database.save_database(self.db, data, self.rules, backup=False)
+        with closing(sqlite3.connect(self.db)) as conn:
+            conn.execute('UPDATE "回款记录_设备关联" SET allocated_amount=99')
+            conn.commit()
+        self.assertFalse(database.verify_audit_chain(self.db)["ok"])
+        with self.assertRaises(database.DatabaseValidationError):
+            database.save_database(self.db, data, self.rules, backup=False)
+
+    def test_financial_coverage_has_stable_ids_foreign_keys_and_exact_total(self):
+        data = sample_data()
+        data["回款记录"] = [{"记录ID": "p1", "JOB No": "26BS001", "款类": "预付款",
+                           "回款日": "2026-09-01", "含税金额": 33.33, "覆盖批次": "1"}]
+        database.save_database(self.db, data, self.rules, backup=False)
+        with closing(sqlite3.connect(self.db)) as conn:
+            rows = conn.execute('SELECT financial_id, device_id, allocated_amount FROM "回款记录_设备关联"').fetchall()
+            self.assertEqual(rows, [("p1", "device-1", 33.33)])
+            self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+            conn.execute("PRAGMA foreign_keys=ON")
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute('INSERT INTO "回款记录_设备关联" VALUES("bad", "device-1", 1)')
+        coverage = database.get_financial_coverage(self.db, "回款记录", customer="原客户")
+        self.assertEqual(coverage[0]["allocated_amount"], 33.33)
+        self.assertEqual(coverage[0]["job_no"], "26BS001")
+        self.assertEqual(database.get_financial_coverage(self.db, "回款记录", customer="不存在"), [])
+        data["回款记录"] = []
+        database.save_database(self.db, data, self.rules, backup=False)
+        with closing(sqlite3.connect(self.db)) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM "回款记录_设备关联"').fetchone()[0], 0)
+
+    def test_audit_detects_business_table_edit_without_log_edit(self):
+        database.save_database(self.db, sample_data(), self.rules, backup=False)
+        self.assertTrue(database.verify_audit_chain(self.db)["ok"])
+        with closing(sqlite3.connect(self.db)) as conn:
+            conn.execute('UPDATE "设备台账" SET "未税单价"=999')
+            conn.commit()
+        status = database.verify_audit_chain(self.db)
+        self.assertFalse(status["ok"])
+        self.assertIn("业务数据", status["error"])
+        with self.assertRaises(database.DatabaseValidationError):
+            database.save_database(self.db, database.load_database(self.db), self.rules, backup=False)
+        self.assertFalse(database.verify_audit_chain(self.db)["ok"])
+
+    def test_financial_facts_without_terms_are_saved_with_warning(self):
+        data = sample_data()
+        data["付款条件"] = []
+        data["开票记录"] = [{"记录ID": "i1", "JOB No": "26BS001", "款类": "预付款",
+                           "开票日": "2026-09-03", "含税金额": 30, "状态": "已开", "覆盖批次": "1"}]
+        data["回款记录"] = [{"记录ID": "p1", "JOB No": "26BS001", "款类": "预付款",
+                           "回款日": "2026-09-02", "含税金额": 30, "覆盖批次": "1"}]
+        result = database.save_database(self.db, data, backup=False)
+        self.assertTrue(any(issue["severity"] == "warning" and "付款条件未配置" in issue["msg"] for issue in result["issues"]))
+        loaded = database.load_database(self.db)
+        self.assertEqual(loaded["回款记录"][0]["含税金额"], 30)
+        self.assertEqual(loaded["开票记录"][0]["应收回款日"], "")
+
+    def test_audit_filters_are_applied_before_limit(self):
+        data = sample_data()
+        database.save_database(self.db, data, self.rules, backup=False,
+                               audit_context={"operator_name": "早期操作员", "source": "manual_save"})
+        data["合同订单"][0]["备注"] = "later"
+        database.save_database(self.db, data, self.rules, backup=False,
+                               audit_context={"operator_name": "后来操作员", "source": "manual_save"})
+        result = database.get_audit_events(self.db, {"operator_name": "早期操作员"}, limit=1)
+        self.assertEqual(len(result["events"]), 1)
+        self.assertEqual(result["events"][0]["operator_name"], "早期操作员")
+        result = database.get_audit_events(self.db, {"job_no": "26BS001"}, limit=1)
+        self.assertEqual(result["total_matched"], 2)
+        self.assertTrue(result["truncated"])
+        page = database.get_audit_events(self.db, {"job_no": "26BS001"}, limit=1, offset=1)
+        self.assertEqual(page["events"][0]["operator_name"], "早期操作员")
+        self.assertFalse(page["has_more"])
+        self.assertNotEqual(page["events"][0]["event_id"], result["events"][0]["event_id"])
+        complete = database.get_audit_events(self.db, {"job_no": "26BS001"}, limit=None)
+        self.assertEqual(len(complete["events"]), 2)
+        self.assertFalse(complete["truncated"])
 
     def test_json_migration_is_relational_and_preserves_unknown_fields(self):
         source = self.root / "ledger.records.json"
@@ -314,6 +413,54 @@ class DatabaseTests(unittest.TestCase):
 
         with self.assertRaises(database.StaleImportError):
             database.apply_editable_import(self.db, prepared)
+
+    def test_same_size_and_timestamp_workbook_change_after_preview_is_rejected(self):
+        database.save_database(self.db, sample_data(), self.rules, backup=False)
+        book = self.root / "editable.xlsx"
+        database.export_editable_workbook(self.db, book)
+        prepared = database.prepare_editable_import(self.db, book)
+        stat = book.stat()
+        content = bytearray(book.read_bytes())
+        content[20] ^= 1
+        book.write_bytes(content)
+        os.utime(book, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        with self.assertRaises(database.StaleImportError):
+            database.apply_editable_import(self.db, prepared)
+
+    def test_deleted_record_preview_includes_its_field_values(self):
+        before = sample_data()
+        after = core.empty_data()
+        changes, _, _ = database._diff_data(before, after)
+        contract = next(change for change in changes if change["table"] == "合同订单")
+        job = next(field for field in contract["fields"] if field["field"] == "JOB No")
+        self.assertEqual(job["before"], "26BS001")
+        self.assertEqual(job["after"], "")
+
+    def test_editable_export_rejects_unaudited_business_data_changes(self):
+        database.save_database(self.db, sample_data(), self.rules, backup=False)
+        with closing(sqlite3.connect(self.db)) as conn:
+            conn.execute('UPDATE "合同订单" SET "客户" = ?', ("未经审计修改",))
+            conn.commit()
+        book = self.root / "editable.xlsx"
+        with self.assertRaises(database.DatabaseValidationError):
+            database.export_editable_workbook(self.db, book)
+        self.assertFalse(book.exists())
+
+    def test_multi_table_load_keeps_snapshot_when_another_connection_commits(self):
+        database.save_database(self.db, sample_data(), self.rules, backup=False)
+        original_reader = database._data_from_connection
+
+        def concurrent_read(conn):
+            self.assertTrue(conn.in_transaction)
+            with closing(sqlite3.connect(self.db)) as writer:
+                writer.execute('UPDATE "合同订单" SET "客户" = ?', ("并发新版本",))
+                writer.commit()
+            return original_reader(conn)
+
+        with mock.patch.object(database, "_data_from_connection", side_effect=concurrent_read):
+            loaded = database.load_database(self.db)
+        self.assertEqual(loaded["合同订单"][0]["客户"], "原客户")
+        self.assertEqual(database.load_database(self.db)["合同订单"][0]["客户"], "并发新版本")
 
     def test_formula_cells_are_rejected(self):
         database.save_database(self.db, sample_data(), self.rules, backup=False)
@@ -740,7 +887,7 @@ class CoreReliabilityTests(unittest.TestCase):
             before = path.read_bytes()
             info = database.get_database_info(path)
             self.assertEqual(info["integrity"], "ok")
-            backups = sorted((Path(td) / "备份").glob("*_pre_schema_v5_to_v7_*.db"))
+            backups = sorted((Path(td) / "备份").glob(f"*_pre_schema_v5_to_v{database.DATABASE_VERSION}_*.db"))
             self.assertEqual(len(backups), 1)
             conn = sqlite3.connect(backups[0])
             try:

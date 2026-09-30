@@ -45,6 +45,7 @@ SCHEMA = {
         ("付款条件", TEXT), ("发货方式", TEXT), ("发货地点", TEXT), ("送货地点", TEXT),
         ("币种", TEXT), ("设备型号", TEXT), ("总台数", INT),
         ("来源报价ID", TEXT), ("来源报价单号", TEXT), ("备注", TEXT),
+        ("合同生效日", DATE),
     ],
     "付款条件": [
         ("JOB No", TEXT), ("客户", TEXT), ("款类", SELECT,
@@ -60,6 +61,7 @@ SCHEMA = {
         ("发货批次", TEXT), ("送货单回收", SELECT, ["", "已签收"]),
         ("验收状态", SELECT, ["未验收", "已验收"]), ("质保开始日", DATE),
         ("质保结束日", DATE), ("质保期", TEXT), ("备注", TEXT),
+        ("签收日", DATE),
     ],
     "发货批次": [
         ("JOB No", TEXT), ("客户", TEXT), ("发货批次", TEXT), ("出荷日", DATE), ("台数", INT),
@@ -97,7 +99,7 @@ def empty_data():
 
 
 def _norm(v, typ):
-    if v is None:
+    if v is None or (typ in (NUMBER, INT) and isinstance(v, str) and not v.strip()):
         return None if typ in (NUMBER, INT) else ""  # 数字字段保留 null=未填(区别于 0),下游一律 `or 0` 兜底
     if typ == TEXT:
         return s(v)
@@ -145,10 +147,12 @@ def coverage_values(text):
     return [x.strip() for x in re.split(r"[;；\r\n]+", s(text)) if x.strip()]
 
 
-def derive(data):
+def derive(data, *, as_of=None):
     """自动派生：发货批次合计、合同总台数/设备型号、覆盖台数等。"""
     data = normalize(data)
+    term_by_job_kind = {(s(t["JOB No"]), s(t["款类"])): t for t in data["付款条件"]}
     customer_by_job = {s(c["JOB No"]): s(c["客户"]) for c in data["合同订单"]}
+    contract_date_by_job = {s(c["JOB No"]): c.get("合同生效日") for c in data["合同订单"]}
     for table in ("付款条件", "设备台账", "发货批次", "开票记录", "回款记录"):
         for rec in data[table]:
             rec["客户"] = customer_by_job.get(s(rec["JOB No"]), "")
@@ -227,9 +231,16 @@ def derive(data):
                 x["应收回款日"] = ""
                 if invd:
                     try:
-                        days = int(float(x.get("账期天数") or 0))
-                        x["应收回款日"] = (datetime.strptime(invd[:10], "%Y-%m-%d")
-                                            + timedelta(days=days)).strftime("%Y-%m-%d")
+                        term = term_by_job_kind.get((s(x["JOB No"]), s(x["款类"])), {})
+                        invoice_days = x.get("账期天数")
+                        if not term and invoice_days is None:
+                            continue
+                        days = int(float((term.get("账期天数") if invoice_days is None else invoice_days) or 0))
+                        base = datetime.strptime(invd[:10], "%Y-%m-%d")
+                        if s(term.get("触发条件")) == "月结次月月底":
+                            month_index = base.year * 12 + base.month + 1
+                            base = datetime(month_index // 12, month_index % 12 + 1, 1) - timedelta(days=1)
+                        x["应收回款日"] = (base + timedelta(days=days)).strftime("%Y-%m-%d")
                     except ValueError:
                         pass
 
@@ -274,6 +285,19 @@ def derive(data):
         job = s(inv.get("JOB No"))
         kind = s(inv.get("款类"))
         term = terms_by_job_kind.get(job, {}).get(kind)
+        trigger = s(term.get("触发条件")) if term else ""
+        if trigger in {"验收后", "验收合格后", "货到签收后", "合同生效后"}:
+            covered = covered_devices(inv, devs_by_job.get(job, []))
+            if trigger == "合同生效后":
+                dates = [to_dt(contract_date_by_job.get(job))]
+            else:
+                field = "签收日" if trigger == "货到签收后" else "质保开始日"
+                dates = [to_dt(dev.get(field)) for dev in covered]
+            days = inv.get("账期天数")
+            days = int(float((term.get("账期天数") if days is None else days) or 0))
+            due = max(dates) + timedelta(days=days) if dates and all(dates) else None
+            inv["应收回款日"] = due.strftime("%Y-%m-%d") if due else ""
+            continue
         uses_warranty, _ = warranty_term_settings(kind, term)
         if not uses_warranty:
             continue
@@ -289,7 +313,7 @@ def derive(data):
         return ((num(record.get("含税金额")) or 0) * selected_price / total_price
                 if total_price else 0.0)
 
-    today = datetime.now().date()
+    today = datetime.strptime(str(as_of)[:10], "%Y-%m-%d").date() if as_of is not None else datetime.now().date()
     for inv in data["开票记录"]:
         job = s(inv["JOB No"])
         kind = s(inv["款类"])
@@ -446,7 +470,10 @@ def validate(data):
             job, kind = s(rec.get("JOB No")), s(rec.get("款类"))
             if not kind or (table == "开票记录" and kind == "全额"):
                 continue
-            if kind not in term_kinds.get(job, set()):
+            if not term_kinds.get(job):
+                issues.append({"severity": "warning",
+                               "msg": f"{table} {job} 付款条件未配置；已保留款项事实，应收比例与日期待确认"})
+            elif kind not in term_kinds[job]:
                 issues.append({
                     "severity": "error",
                     "msg": f"{table} {job} 款类 {kind!r} 不在该 JOB 的付款条件中",
@@ -631,16 +658,18 @@ def summary(data):
     devices = data.get("设备台账", [])
     unpaid = compute_unpaid_rows(contracts, terms, shipments, invoices, payments, devices)
     counts["未回收行数"] = len(unpaid)
-    counts["未回收合计"] = round(sum(r["未回收金额"] for r in unpaid), 2)
+    counts["未回收合计"] = round(sum(r["未回收金额"] or 0 for r in unpaid), 2)
+    counts["未回收金额待确认行数"] = sum(r["未回收金额"] is None for r in unpaid)
     return counts
 
 
-def unpaid_report_rows(data, rules=None):
+def unpaid_report_rows(data, rules=None, *, already_derived=False, as_of=None):
     """Return JSON-safe rows using the same calculation as the generated unpaid sheet."""
-    data = derive(data)
+    if not already_derived:
+        data = derive(data, as_of=as_of)
     rows = compute_unpaid_rows(
         data["合同订单"], data["付款条件"], data["发货批次"],
-        data["开票记录"], data["回款记录"], data["设备台账"], rules,
+        data["开票记录"], data["回款记录"], data["设备台账"], rules, as_of=as_of,
     )
     public_fields = [
         "客户", "JOB No", "批次", "款类", "预警等级", "开票日期",

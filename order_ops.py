@@ -140,11 +140,14 @@ def _document_flow(job: str, quote_id: str, quote_no: str,
 
 
 def build_order_snapshots(data: dict[str, list[dict[str, Any]]], rules=None,
-                          today: date | str | None = None) -> list[dict[str, Any]]:
+                          today: date | str | None = None, *, _prepared=None) -> list[dict[str, Any]]:
     """Return compact order-level ERP snapshots from the six authoritative tables."""
     current = _today(today)
-    derived = core.derive(copy.deepcopy(data))
-    unpaid_rows = core.unpaid_report_rows(derived, rules)
+    if _prepared is None:
+        derived = core.derive(copy.deepcopy(data), as_of=current)
+        unpaid_rows = core.unpaid_report_rows(derived, rules, already_derived=True, as_of=current)
+    else:
+        derived, unpaid_rows = _prepared
     unpaid_by_job: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in unpaid_rows:
         unpaid_by_job[_text(row.get("JOB No"))].append(row)
@@ -189,11 +192,15 @@ def build_order_snapshots(data: dict[str, list[dict[str, Any]]], rules=None,
         invoice_amount = round(sum(_num(x.get("含税金额")) for x in invoices), 2)
         paid_amount = round(sum(_num(x.get("含税金额")) for x in payments), 2)
         outstanding = round(sum(_num(x.get("未回收金额")) for x in unpaid_by_job.get(job, [])), 2)
+        amount_unknown = any(x.get("未回收金额") is None for x in unpaid_by_job.get(job, []))
 
         ship_pct = _pct(len(shipped_devices), len(devices))
         accept_pct = _pct(len(accepted_devices), len(devices))
         invoice_pct = _pct(invoice_amount, expected_gross) if expected_gross else (100 if invoices else 0)
         paid_pct = _pct(paid_amount, invoice_amount) if invoice_amount else 0
+        fulfillment_complete = bool(devices) and len(shipped_devices) == len(devices) and len(accepted_devices) == len(devices)
+        tolerance = float((rules or {}).get("金额容差", 0.01))
+        financial_status = "待确认" if amount_unknown else ("已收清" if outstanding <= tolerance and paid_amount > 0 else "部分回款" if paid_amount > 0 else "未回款")
 
         stage, stage_index = "已受注", 0
         if devices and pending_serial:
@@ -202,15 +209,19 @@ def build_order_snapshots(data: dict[str, list[dict[str, Any]]], rules=None,
             stage, stage_index = "履约/出货", 2
         if devices and len(shipped_devices) == len(devices) and len(accepted_devices) < len(devices):
             stage, stage_index = "验收", 3
-        if invoice_amount > 0:
+        if fulfillment_complete and invoice_amount > 0:
             stage, stage_index = "开票", 4
-        if paid_amount > 0:
+        if fulfillment_complete and paid_amount > 0:
             stage, stage_index = "回款", 5
-        if invoice_pct >= 99 and invoice_amount > 0 and outstanding <= 0.01 and paid_pct >= 99:
+        if (fulfillment_complete and not amount_unknown and expected_gross > 0
+                and abs(invoice_amount - expected_gross) <= tolerance
+                and abs(paid_amount - expected_gross) <= tolerance and outstanding <= tolerance):
             stage, stage_index = "已结清", 6
 
         overdue_rows, due_soon_rows = [], []
         for row in unpaid_by_job.get(job, []):
+            if "待确认" in _text(row.get("预警等级")):
+                continue
             due = _date(row.get("预定回收日期"))
             if not due:
                 continue
@@ -225,7 +236,9 @@ def build_order_snapshots(data: dict[str, list[dict[str, Any]]], rules=None,
             0 <= ((_date(x.get("出荷日")) or current) - current).days <= 7
             for x in shipments if _date(x.get("出荷日"))
         )
-        if overdue_rows:
+        if amount_unknown:
+            risk_level, risk_code, risk_label = "medium", "terms_missing", "付款条件待配置"
+        elif overdue_rows:
             risk_level, risk_code, risk_label = "high", "ar_overdue", "应收逾期"
         elif upcoming_ship and pending_serial:
             risk_level, risk_code, risk_label = "high", "serial_before_ship", "临近发货仍待编号"
@@ -247,9 +260,10 @@ def build_order_snapshots(data: dict[str, list[dict[str, Any]]], rules=None,
             "scheduled_count": len(scheduled_devices), "accepted_count": len(accepted_devices),
             "pending_serial": pending_serial, "total_untaxed": total_untaxed,
             "expected_gross": expected_gross, "invoice_amount": invoice_amount,
-            "paid_amount": paid_amount, "outstanding": outstanding,
+            "paid_amount": paid_amount, "outstanding": None if amount_unknown else outstanding,
             "ship_pct": ship_pct, "accept_pct": accept_pct, "invoice_pct": invoice_pct,
             "paid_pct": paid_pct, "stage": stage, "stage_index": stage_index,
+            "financial_status": financial_status,
             "risk_level": risk_level, "risk_code": risk_code, "risk_label": risk_label,
             "next_ship_date": min(
                 (_text(x.get("出荷日")) for x in shipments
@@ -262,26 +276,31 @@ def build_order_snapshots(data: dict[str, list[dict[str, Any]]], rules=None,
 
 
 def build_finance(data: dict[str, list[dict[str, Any]]], rules=None,
-                  today: date | str | None = None) -> dict[str, Any]:
+                  today: date | str | None = None, *, _prepared=None) -> dict[str, Any]:
     current = _today(today)
-    derived = core.derive(copy.deepcopy(data))
+    if _prepared is None:
+        derived = core.derive(copy.deepcopy(data), as_of=current)
+        unpaid_rows = core.unpaid_report_rows(derived, rules, already_derived=True, as_of=current)
+    else:
+        derived, unpaid_rows = _prepared
     customer_by_job = {_text(x.get("JOB No")): _text(x.get("客户")) for x in derived["合同订单"]}
     currency_by_job = {_text(x.get("JOB No")): _text(x.get("币种")) or "RMB" for x in derived["合同订单"]}
     rows, aging, forecast = [], defaultdict(list), defaultdict(list)
 
-    for raw in core.unpaid_report_rows(derived, rules):
+    for raw in unpaid_rows:
         job = _text(raw.get("JOB No"))
         due = _date(raw.get("预定回收日期"))
+        pending = due is None or "待确认" in _text(raw.get("预警等级"))
         row = {
             **raw, "job": job,
             "customer": customer_by_job.get(job, _text(raw.get("客户"))),
             "currency": currency_by_job.get(job, "RMB"),
-            "amount": round(_num(raw.get("未回收金额")), 2),
+            "amount": None if raw.get("未回收金额") is None else round(_num(raw.get("未回收金额")), 2),
             "due_date": due.isoformat() if due else "",
-            "days": (due - current).days if due else None,
+            "days": (due - current).days if not pending else None,
         }
         rows.append(row)
-        if due is None:
+        if pending:
             aging["待确认"].append(row); forecast["待确认"].append(row); continue
         days = (due - current).days
         if days >= 0:
@@ -308,10 +327,17 @@ def build_finance(data: dict[str, list[dict[str, Any]]], rules=None,
 
 def build_actions(data: dict[str, list[dict[str, Any]]], rules=None,
                   today: date | str | None = None,
-                  work_items: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+                  work_items: list[dict[str, Any]] | None = None, *,
+                  _prepared=None, _orders=None, _finance=None) -> list[dict[str, Any]]:
     current = _today(today)
-    snapshots = {row["job"]: row for row in build_order_snapshots(data, rules, current)}
-    finance = build_finance(data, rules, current)
+    if _prepared is None:
+        derived = core.derive(copy.deepcopy(data), as_of=current)
+        _prepared = (derived, core.unpaid_report_rows(derived, rules, already_derived=True, as_of=current))
+    else:
+        derived = _prepared[0]
+    orders = _orders if _orders is not None else build_order_snapshots(data, rules, current, _prepared=_prepared)
+    snapshots = {row["job"]: row for row in orders}
+    finance = _finance if _finance is not None else build_finance(data, rules, current, _prepared=_prepared)
     actions = []
 
     def add(job, kind, priority, title, detail="", due_date="", amount=0, currency="RMB", source_id=""):
@@ -336,7 +362,6 @@ def build_actions(data: dict[str, list[dict[str, Any]]], rules=None,
         elif days <= 30:
             add(job, "ar_due", "medium", f"应收将在 {days} 天内到期", _text(row.get("款类")), row["due_date"], row["amount"], row["currency"], source)
 
-    derived = core.derive(copy.deepcopy(data))
     devices_by_job, shipments_by_job = defaultdict(list), defaultdict(list)
     for row in derived["设备台账"]: devices_by_job[_text(row.get("JOB No"))].append(row)
     for row in derived["发货批次"]: shipments_by_job[_text(row.get("JOB No"))].append(row)
@@ -388,9 +413,11 @@ def build_workspace(data: dict[str, list[dict[str, Any]]], rules=None,
                     today: date | str | None = None,
                     work_items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     current = _today(today)
-    orders = build_order_snapshots(data, rules, current)
-    finance = build_finance(data, rules, current)
-    actions = build_actions(data, rules, current, work_items)
+    derived = core.derive(copy.deepcopy(data), as_of=current)
+    prepared = (derived, core.unpaid_report_rows(derived, rules, already_derived=True, as_of=current))
+    orders = build_order_snapshots(data, rules, current, _prepared=prepared)
+    finance = build_finance(data, rules, current, _prepared=prepared)
+    actions = build_actions(data, rules, current, work_items, _prepared=prepared, _orders=orders, _finance=finance)
     return {
         "as_of": current.isoformat(), "orders": orders, "actions": actions, "finance": finance,
         "stage_counts": [{"stage": label, "count": sum(1 for row in orders if row["stage"] == label)} for label in STAGE_LABELS],

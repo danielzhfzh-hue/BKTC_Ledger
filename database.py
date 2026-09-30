@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -25,7 +26,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 import core
 
 
-DATABASE_VERSION = 7
+DATABASE_VERSION = 10
 WORKBOOK_VERSION = 2
 META_SHEET = "_BKTC_META"
 HELP_SHEET = "使用说明"
@@ -70,6 +71,7 @@ class PreparedImport:
     table_counts: dict[str, dict[str, int]]
     issues: list[dict[str, str]]
     file_signature: tuple[int, int]
+    file_hash: str
 
     @property
     def stale(self):
@@ -316,6 +318,7 @@ def _create_schema(conn):
         CREATE TABLE IF NOT EXISTS "work_item" (
             "item_id" TEXT PRIMARY KEY,
             "job_no" TEXT NOT NULL DEFAULT '',
+            "order_id" TEXT REFERENCES "合同订单" ("记录ID") ON DELETE SET NULL,
             "type" TEXT NOT NULL DEFAULT 'follow_up',
             "title" TEXT NOT NULL,
             "due_date" TEXT NOT NULL DEFAULT '',
@@ -423,10 +426,39 @@ def _create_schema(conn):
                 f'CREATE INDEX IF NOT EXISTS {_q("idx_" + table + "_job")} '
                 f'ON {_q(table)} ({_q("JOB No")})'
             )
+    work_item_columns = {
+        row[1] for row in conn.execute('PRAGMA table_info("work_item")')
+    }
+    work_item_link_migration = "order_id" not in work_item_columns
+    if work_item_link_migration:
+        conn.execute(
+            'ALTER TABLE "work_item" ADD COLUMN "order_id" TEXT '
+            'REFERENCES "合同订单" ("记录ID") ON DELETE SET NULL'
+        )
+        conn.execute(
+            'UPDATE "work_item" SET "order_id"=('
+            'SELECT "记录ID" FROM "合同订单" WHERE "JOB No"="work_item"."job_no") '
+            'WHERE "order_id" IS NULL AND "job_no"<>\'\' AND EXISTS ('
+            'SELECT 1 FROM "合同订单" WHERE "JOB No"="work_item"."job_no")'
+        )
     conn.execute(
         f'CREATE INDEX IF NOT EXISTS {_q("idx_设备台账_batch")} '
         f'ON {_q("设备台账")} ({_q("JOB No")}, {_q("发货批次")})'
     )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS "idx_work_item_order_status" '
+        'ON "work_item" ("order_id", "status", "due_date")'
+    )
+    for table in ("开票记录", "回款记录"):
+        bridge = table + "_设备关联"
+        conn.execute(f'CREATE TABLE IF NOT EXISTS {_q(bridge)} ('
+                     'financial_id TEXT NOT NULL, device_id TEXT NOT NULL, allocated_amount REAL, '
+                     'PRIMARY KEY(financial_id, device_id), '
+                     f'FOREIGN KEY(financial_id) REFERENCES {_q(table)}("记录ID") ON DELETE CASCADE, '
+                     'FOREIGN KEY(device_id) REFERENCES "设备台账"("记录ID") ON DELETE CASCADE)')
+        conn.execute(f'CREATE INDEX IF NOT EXISTS {_q("idx_" + bridge + "_device")} ON {_q(bridge)}(device_id)')
+    if int(conn.execute("PRAGMA user_version").fetchone()[0] or 0) < 9:
+        _sync_financial_coverage(conn, _data_from_connection(conn))
     conn.execute(
         "INSERT OR IGNORE INTO _meta(key, value) VALUES('database_id', ?)",
         (str(uuid.uuid4()),),
@@ -452,6 +484,8 @@ def _create_schema(conn):
         (str(DATABASE_VERSION),),
     )
     conn.execute(f"PRAGMA user_version = {DATABASE_VERSION}")
+    if not audit_was_present or not _meta(conn, "business_state_baseline"):
+        _set_meta(conn, "business_state_baseline", _business_state_hash(conn))
     conn.commit()
 
 
@@ -660,6 +694,121 @@ def _audit_summary(changes):
     return summary
 
 
+def _financial_coverage_rows(data, table):
+    result = []
+    for record in data[table]:
+        covered = sorted((device for device in data["设备台账"]
+                          if core.s(device.get("JOB No")) == core.s(record.get("JOB No"))
+                          and core.cov_match(record, core.s(device.get("製造番号")), core.s(device.get("发货批次")))),
+                         key=lambda device: device["记录ID"])
+        weights = [0 if core.s(device.get("是否无偿")) == "是" else float(device.get("未税单价") or 0) for device in covered]
+        total_weight = sum(weights)
+        last_paid_device = max((index for index, weight in enumerate(weights) if weight > 0), default=-1)
+        total_amount = round(float(record.get("含税金额") or 0), 2)
+        allocated = 0
+        for index, device in enumerate(covered):
+            amount = None
+            if total_weight:
+                amount = round(total_amount - allocated, 2) if index == last_paid_device else round(total_amount * weights[index] / total_weight, 2)
+                allocated = round(allocated + amount, 2)
+            result.append((record["记录ID"], device["记录ID"], amount))
+    return sorted(result)
+
+
+def _sync_financial_coverage(conn, data):
+    for table in ("开票记录", "回款记录"):
+        bridge = _q(table + "_设备关联")
+        conn.execute(f"DELETE FROM {bridge}")
+        conn.executemany(f"INSERT INTO {bridge}(financial_id, device_id, allocated_amount) VALUES(?, ?, ?)",
+                         _financial_coverage_rows(data, table))
+
+
+def _assert_financial_coverage(conn):
+    data = _data_from_connection(conn)
+    for table in ("开票记录", "回款记录"):
+        actual = [tuple(row) for row in conn.execute(
+            f'SELECT financial_id, device_id, allocated_amount FROM {_q(table + "_设备关联")} ORDER BY financial_id, device_id')]
+        if actual != _financial_coverage_rows(data, table):
+            raise DatabaseValidationError([{"severity": "error",
+                                            "msg": f"{table} 设备关联或分摊金额与业务记录不一致，已禁止写入"}])
+
+
+def get_financial_coverage(path, table, job_no="", customer=""):
+    if table not in {"开票记录", "回款记录"}:
+        raise ValueError("只支持开票记录或回款记录的设备关联查询")
+    conn = _connect(path)
+    try:
+        conn.execute("BEGIN")
+        _assert_business_state(conn)
+        conditions, parameters = [], []
+        if job_no:
+            conditions.append('o."JOB No"=?')
+            parameters.append(job_no)
+        if customer:
+            conditions.append('o."客户"=?')
+            parameters.append(customer)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        rows = conn.execute(
+            f'SELECT f."记录ID" AS financial_id, d."记录ID" AS device_id, '
+            'o."JOB No" AS job_no, o."客户" AS customer, f."款类" AS kind, '
+            'd."製造番号" AS serial, d."设备型号" AS model, d."发货批次" AS batch, '
+            'c.allocated_amount FROM ' + _q(table + "_设备关联") + ' c '
+            f'JOIN {_q(table)} f ON f."记录ID"=c.financial_id '
+            'JOIN "设备台账" d ON d."记录ID"=c.device_id '
+            'JOIN "合同订单" o ON o."JOB No"=f."JOB No"' + where +
+            ' ORDER BY o."JOB No", f."记录ID", d."记录ID"', parameters,
+        )
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _business_state_hash(conn):
+    payload = {}
+    excluded = {"_meta", "_change_log", "_audit_event", "_audit_change", "开票记录_设备关联", "回款记录_设备关联"}
+    tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+              if row[0] not in excluded and not row[0].startswith("sqlite_")]
+    for table in sorted(tables):
+        ignored = set(core.DERIVED.get(table, [])) | {"updated_at", "_row_order"}
+        if table == "work_item":
+            ignored.add("order_id")
+        columns = [row[1] for row in conn.execute(f"PRAGMA table_info({_q(table)})") if row[1] not in ignored]
+        rows = [dict(row) for row in conn.execute(f'SELECT {", ".join(_q(x) for x in columns)} FROM {_q(table)}')]
+        payload[table] = sorted(rows, key=lambda row: json.dumps(row, sort_keys=True, ensure_ascii=False, default=str))
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _assert_business_state(conn):
+    _assert_financial_coverage(conn)
+    _assert_work_item_links(conn)
+    latest = conn.execute("SELECT summary_json FROM _audit_event ORDER BY revision DESC LIMIT 1").fetchone()
+    expected = (json.loads(latest[0]).get("_business_state_hash") if latest else None) or _meta(conn, "business_state_baseline")
+    if expected and expected != _business_state_hash(conn):
+        raise DatabaseValidationError([{"severity": "error",
+                                        "msg": "业务数据与审计基线不一致，已禁止写入；请核查外部修改或恢复已验证备份"}])
+
+
+def _assert_work_item_links(conn):
+    columns = {row[1] for row in conn.execute('PRAGMA table_info("work_item")')}
+    if "order_id" not in columns:
+        return
+    invalid = conn.execute(
+        'SELECT w.item_id, w.job_no, w.order_id FROM "work_item" w '
+        'LEFT JOIN "合同订单" linked ON linked."记录ID"=w.order_id '
+        'LEFT JOIN "合同订单" named ON named."JOB No"=w.job_no '
+        'WHERE (w.order_id IS NOT NULL AND '
+        '(linked."记录ID" IS NULL OR linked."JOB No"<>w.job_no)) '
+        'OR (w.order_id IS NULL AND w.job_no<>\'\' AND named."记录ID" IS NOT NULL) '
+        'LIMIT 1'
+    ).fetchone()
+    if invalid:
+        raise DatabaseValidationError([{
+            "severity": "error",
+            "msg": f"待办事项 {invalid['item_id']} 的订单关联无效，请重新选择订单后保存",
+        }])
+
+
 def _append_audit_event(conn, revision, created_at, reason, changes, context=None):
     context = context if isinstance(context, dict) else {}
     event_id = "audit-" + uuid.uuid4().hex
@@ -681,6 +830,7 @@ def _append_audit_event(conn, revision, created_at, reason, changes, context=Non
         "event": event,
         "changes": changes,
     }
+    event["summary"]["_business_state_hash"] = _business_state_hash(conn)
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True,
                            separators=(",", ":"), default=str)
     event_hash = hashlib.sha256((previous_hash + "\n" + canonical).encode("utf-8")).hexdigest()
@@ -780,6 +930,39 @@ def _sync_quotation_order_links(conn, prepared):
     return changes
 
 
+def _sync_work_item_order_links(conn, old_data, prepared):
+    renames = _job_rename_map(old_data, prepared)
+    jobs = {core.s(row.get("JOB No")) for row in prepared["合同订单"]}
+    remaining_ids = {row["记录ID"] for row in prepared["合同订单"]}
+    deleted_jobs = {core.s(row.get("JOB No")) for row in old_data["合同订单"]
+                    if row["记录ID"] not in remaining_ids}
+    changes = []
+    now = datetime.now().isoformat(timespec="seconds")
+    for row in conn.execute("SELECT item_id, job_no, note FROM work_item WHERE job_no <> ''").fetchall():
+        old_job = row["job_no"]
+        new_job = renames.get(old_job, old_job)
+        note = row["note"] or ""
+        if old_job in deleted_jobs or new_job not in jobs:
+            new_job = ""
+            note = (note + "\n" if note else "") + f"原关联订单 {old_job} 已删除"
+        if new_job == old_job:
+            continue
+        conn.execute("UPDATE work_item SET job_no=?, note=?, updated_at=? WHERE item_id=?",
+                     (new_job, note, now, row["item_id"]))
+        for field, before, after in (("关联订单", old_job, new_job), ("备注", row["note"] or "", note)):
+            if before != after:
+                changes.append({"table_name": "待办事项", "record_id": row["item_id"],
+                                "job_no": new_job or old_job, "operation": "update", "field_name": field,
+                                "old_value": before, "new_value": after, "origin": "association_sync"})
+    conn.execute(
+        'UPDATE "work_item" SET "order_id"=('
+        'SELECT "记录ID" FROM "合同订单" WHERE "JOB No"="work_item"."job_no") '
+        'WHERE "job_no"<>\'\' AND EXISTS ('
+        'SELECT 1 FROM "合同订单" WHERE "JOB No"="work_item"."job_no")'
+    )
+    return changes
+
+
 def save_database(path, data, rules=None, *, reason="manual_save", backup=True,
                   expected_revision=None, audit_context=None):
     path = os.path.abspath(os.fspath(path))
@@ -796,6 +979,7 @@ def save_database(path, data, rules=None, *, reason="manual_save", backup=True,
     conn = _connect(path)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        _assert_business_state(conn)
         current_revision = int(_meta(conn, "revision", "0") or 0)
         if expected_revision is not None and current_revision != expected_revision:
             raise StaleImportError(
@@ -811,6 +995,9 @@ def save_database(path, data, rules=None, *, reason="manual_save", backup=True,
         for table in ("合同订单", "发货批次", "付款条件", "设备台账", "开票记录", "回款记录"):
             _insert_rows(conn, table, prepared[table])
         changes.extend(_sync_quotation_order_links(conn, prepared))
+        changes.extend(_sync_work_item_order_links(conn, old_data, prepared))
+        _sync_financial_coverage(conn, prepared)
+        _assert_work_item_links(conn)
         conn.execute("DELETE FROM _warning_rules")
         for key, value in (rules or {}).items():
             conn.execute(
@@ -843,6 +1030,7 @@ def save_database(path, data, rules=None, *, reason="manual_save", backup=True,
             _set_meta(conn, "audit_started_at", now)
             _set_meta(conn, "audit_start_revision", revision)
             _set_meta(conn, "audit_chain_head", "")
+            _set_meta(conn, "business_state_baseline", _business_state_hash(conn))
         conn.commit()
     except sqlite3.IntegrityError as exc:
         conn.rollback()
@@ -872,6 +1060,7 @@ def load_database(path):
         raise FileNotFoundError(path)
     conn = _connect(path)
     try:
+        conn.execute("BEGIN")
         integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
             raise RuntimeError(f"数据库完整性检查失败：{integrity}")
@@ -903,6 +1092,7 @@ def get_revision(path):
 def get_database_info(path):
     conn = _connect(path)
     try:
+        conn.execute("BEGIN")
         audit_count = conn.execute("SELECT COUNT(*) FROM _audit_event").fetchone()[0]
         return {
             "path": os.path.abspath(os.fspath(path)),
@@ -1379,6 +1569,7 @@ def delete_quotation(path, quote_id, *, expected_revision=None, audit_context=No
     conn = _connect(path)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        _assert_business_state(conn)
         current_revision = int(_meta(conn, "revision", "0") or 0)
         if expected_revision is not None and current_revision != expected_revision:
             raise StaleImportError(f"数据库已从修订 {expected_revision} 更新到 {current_revision}，请重新加载后再删除报价")
@@ -1510,6 +1701,7 @@ def save_quotation(path, quotation, *, expected_revision=None, audit_context=Non
     conn = _connect(path)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        _assert_business_state(conn)
         current_revision = int(_meta(conn, "revision", "0") or 0)
         if expected_revision is not None and current_revision != expected_revision:
             raise StaleImportError(
@@ -1700,6 +1892,7 @@ def _audit_event_from_row(row, changes):
 def verify_audit_chain(path):
     conn = _connect(path)
     try:
+        conn.execute("BEGIN")
         previous_hash = ""
         checked = 0
         for row in conn.execute("SELECT * FROM _audit_event ORDER BY revision, event_id"):
@@ -1730,6 +1923,16 @@ def verify_audit_chain(path):
         if head != previous_hash:
             return {"ok": False, "checked_events": checked,
                     "error": "审计链尾标记不匹配，可能有记录被删除"}
+        latest = conn.execute("SELECT summary_json FROM _audit_event ORDER BY revision DESC LIMIT 1").fetchone()
+        state_hash = (json.loads(latest[0]).get("_business_state_hash") if latest else None) or _meta(conn, "business_state_baseline")
+        if state_hash and state_hash != _business_state_hash(conn):
+            return {"ok": False, "checked_events": checked,
+                    "error": "业务数据与最近审计记录不一致，可能绕过应用被直接修改"}
+        try:
+            _assert_financial_coverage(conn)
+            _assert_work_item_links(conn)
+        except DatabaseValidationError as error:
+            return {"ok": False, "checked_events": checked, "error": str(error)}
         return {
             "ok": True,
             "checked_events": checked,
@@ -1741,40 +1944,49 @@ def verify_audit_chain(path):
         conn.close()
 
 
-def get_audit_events(path, filters=None, limit=500):
+def get_audit_events(path, filters=None, limit=500, offset=0):
     filters = filters if isinstance(filters, dict) else {}
+    clauses, parameters = [], []
+    for name in ("operator_name", "source", "date_from", "date_to"):
+        value = filters.get(name)
+        if not value:
+            continue
+        clauses.append({
+            "operator_name": "instr(e.operator_name, ?) > 0",
+            "source": "e.source = ?",
+            "date_from": "substr(e.created_at, 1, 10) >= ?",
+            "date_to": "substr(e.created_at, 1, 10) <= ?",
+        }[name])
+        parameters.append(value)
+    for name in ("table_name", "job_no", "operation"):
+        if filters.get(name):
+            condition = "instr(c.job_no, ?) > 0" if name == "job_no" else f"c.{name} = ?"
+            clauses.append("EXISTS (SELECT 1 FROM _audit_change c WHERE c.event_id = e.event_id AND " + condition + ")")
+            parameters.append(filters[name])
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    limit = None if limit is None else max(1, min(int(limit or 500), 5000))
+    offset = max(0, int(offset or 0))
     conn = _connect(path)
     try:
+        conn.execute("BEGIN")
+        total = conn.execute("SELECT COUNT(*) FROM _audit_event e" + where, parameters).fetchone()[0]
         rows = conn.execute(
-            "SELECT * FROM _audit_event ORDER BY revision DESC, event_id DESC LIMIT ?",
-            (max(1, min(int(limit or 500), 5000)),),
+            "SELECT e.* FROM _audit_event e" + where + " ORDER BY revision DESC, event_id DESC LIMIT ? OFFSET ?",
+            [*parameters, -1 if limit is None else limit, offset],
         ).fetchall()
         result = []
         for row in rows:
             changes = _audit_changes_for_event(conn, row["event_id"])
             event = _audit_event_from_row(row, changes)
-            if filters.get("operator_name") and filters["operator_name"] not in event["operator_name"]:
-                continue
-            if filters.get("source") and filters["source"] != event["source"]:
-                continue
-            if filters.get("date_from") and event["created_at"][:10] < filters["date_from"]:
-                continue
-            if filters.get("date_to") and event["created_at"][:10] > filters["date_to"]:
-                continue
-            table_name = filters.get("table_name")
-            job_no = filters.get("job_no")
-            operation = filters.get("operation")
-            if table_name and not any(x["table_name"] == table_name for x in changes):
-                continue
-            if job_no and not any(job_no in x["job_no"] for x in changes):
-                continue
-            if operation and not any(x["operation"] == operation for x in changes):
-                continue
             result.append(event)
         return {
             "events": result,
             "chain": verify_audit_chain(path),
             "total_returned": len(result),
+            "total_matched": total,
+            "offset": offset,
+            "has_more": total > offset + len(result),
+            "truncated": offset > 0 or total > len(result),
         }
     finally:
         conn.close()
@@ -1865,8 +2077,18 @@ def _excel_value(value, field_type):
 def export_editable_workbook(database_path, workbook_path):
     database_path = os.path.abspath(os.fspath(database_path))
     workbook_path = os.path.abspath(os.fspath(workbook_path))
-    data = load_database(database_path)
-    info = get_database_info(database_path)
+    conn = _connect(database_path)
+    try:
+        conn.execute("BEGIN")
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if integrity != "ok":
+            raise RuntimeError(f"数据库完整性检查失败：{integrity}")
+        _assert_business_state(conn)
+        data = _data_from_connection(conn)
+        info = {"database_id": _meta(conn, "database_id"),
+                "revision": int(_meta(conn, "revision", "0") or 0)}
+    finally:
+        conn.close()
     wb = Workbook()
     help_ws = wb.active
     help_ws.title = HELP_SHEET
@@ -2041,8 +2263,10 @@ def _diff_data(before, after):
             action_counts["新增"] += 1
             table_counts[table]["新增"] += 1
         for rid in old.keys() - new.keys():
+            fields = [{"field": f, "before": old[rid].get(f), "after": ""}
+                      for f in field_names if old[rid].get(f) not in (None, "")]
             changes.append({"table": table, "action": "删除", "record_id": rid,
-                            "label": _record_label(table, old[rid]), "fields": []})
+                            "label": _record_label(table, old[rid]), "fields": fields})
             action_counts["删除"] += 1
             table_counts[table]["删除"] += 1
         for rid in old.keys() & new.keys():
@@ -2169,7 +2393,8 @@ def prepare_editable_import(database_path, workbook_path):
         raise FileNotFoundError(workbook_path)
     current = load_database(database_path)
     info = get_database_info(database_path)
-    wb = load_workbook(workbook_path, data_only=False)
+    workbook_bytes = Path(workbook_path).read_bytes()
+    wb = load_workbook(io.BytesIO(workbook_bytes), data_only=False)
     metadata = _workbook_metadata(wb)
     if int(metadata.get("format_version") or 0) != WORKBOOK_VERSION:
         raise SpreadsheetFormatError("工作簿格式版本不兼容，请从当前应用重新导出")
@@ -2251,6 +2476,7 @@ def prepare_editable_import(database_path, workbook_path):
         table_counts=table_counts,
         issues=issues,
         file_signature=(stat.st_size, stat.st_mtime_ns),
+        file_hash=hashlib.sha256(workbook_bytes).hexdigest(),
     )
 
 
@@ -2266,7 +2492,8 @@ def apply_editable_import(database_path, prepared, audit_context=None):
     if _canonical_hash(load_database(database_path)) != prepared.database_hash:
         raise StaleImportError("数据库内容在差异预览后又被修改，请重新预览")
     stat = os.stat(prepared.workbook_path)
-    if (stat.st_size, stat.st_mtime_ns) != prepared.file_signature:
+    if ((stat.st_size, stat.st_mtime_ns) != prepared.file_signature or
+            hashlib.sha256(Path(prepared.workbook_path).read_bytes()).hexdigest() != prepared.file_hash):
         raise StaleImportError("Excel 文件在差异预览后又被修改，请重新预览")
     return save_database(
         database_path,

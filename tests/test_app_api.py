@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from types import SimpleNamespace
 
 import app
 import core
@@ -12,6 +13,82 @@ from create_portable_starter import create_starter_files
 
 
 class ApiMigrationTests(unittest.TestCase):
+    def test_failed_database_switch_restores_previous_backend_paths_and_revision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api = app.Api(str(root / "original.db"))
+            api.load_state()
+            previous = (api.database_path, api.xlsx_path, api.database_revision, api.legacy_json_path)
+            preview = ("pending-token", object())
+            api._editable_import = preview
+            damaged = root / "damaged.db"
+            damaged.write_bytes(b"not a sqlite database")
+            with self.assertRaises(app.database.sqlite3.DatabaseError):
+                api.load_state(str(damaged))
+            self.assertEqual((api.database_path, api.xlsx_path, api.database_revision, api.legacy_json_path), previous)
+            self.assertIs(api._editable_import, preview)
+            self.assertEqual(api.load_state()["store_path"], str(root / "original.db"))
+
+    def test_editable_export_returns_revision_of_exported_snapshot_not_later_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            api = app.Api(str(Path(tmp) / "ledger.db"))
+            exported = {"ok": True, "path": "editable.xlsx", "revision": 7, "rows": 12}
+            with mock.patch.object(app.database, "export_editable_workbook", return_value=exported), \
+                    mock.patch.object(app.database, "get_revision", return_value=8) as later_revision:
+                result = api.export_editable_workbook("editable.xlsx")
+                self.assertEqual(result["revision"], 7)
+                later_revision.assert_not_called()
+
+    def test_import_failure_preserves_preview_for_retry_but_new_preview_invalidates_old_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            api = app.Api(str(Path(tmp) / "ledger.db"))
+            prepared = SimpleNamespace(workbook_path="edited.xlsx", base_revision=1,
+                                       current_revision=1, stale=False, changes=[],
+                                       action_counts={}, table_counts={}, issues=[])
+            saved = {"revision": 2, "data": core.empty_data(), "backup": "backup.db",
+                     "issues": [], "audit_event_id": "event"}
+            with mock.patch.object(app.database, "prepare_editable_import", return_value=prepared), \
+                    mock.patch.object(app.database, "apply_editable_import",
+                                      side_effect=[PermissionError("数据库不可写"), saved]) as apply:
+                first = api.preview_editable_import("edited.xlsx")
+                for confirmation in (1, "true", {}, None):
+                    with self.assertRaises(ValueError):
+                        api.confirm_editable_import(first["token"], confirmation)
+                apply.assert_not_called()
+                with self.assertRaises(PermissionError):
+                    api.confirm_editable_import(first["token"], True)
+                self.assertEqual(api._editable_import[0], first["token"])
+                second = api.preview_editable_import("edited.xlsx")
+                with self.assertRaises(ValueError):
+                    api.confirm_editable_import(first["token"], True)
+                result = api.confirm_editable_import(second["token"], True)
+                self.assertEqual(result["revision"], 2)
+                self.assertIsNone(api._editable_import)
+                self.assertEqual(apply.call_count, 2)
+
+    def test_editable_import_requires_matching_preview_and_second_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            api = app.Api(str(Path(tmp) / "ledger.db"))
+            prepared = SimpleNamespace(workbook_path="edited.xlsx", base_revision=1,
+                                       current_revision=1, stale=False, changes=[],
+                                       action_counts={}, table_counts={}, issues=[])
+            saved = {"revision": 2, "data": core.empty_data(), "backup": "backup.db",
+                     "issues": [], "audit_event_id": "event"}
+            with mock.patch.object(app.database, "prepare_editable_import", return_value=prepared), \
+                    mock.patch.object(app.database, "apply_editable_import", return_value=saved) as apply:
+                preview = api.preview_editable_import("edited.xlsx")
+                with self.assertRaises(ValueError):
+                    api.confirm_editable_import(preview["token"])
+                with self.assertRaises(ValueError):
+                    api.confirm_editable_import("wrong", True)
+                apply.assert_not_called()
+                result = api.confirm_editable_import(preview["token"], True)
+                self.assertEqual(result["revision"], 2)
+                self.assertEqual(api.database_revision, 2)
+                with self.assertRaises(ValueError):
+                    api.confirm_editable_import(preview["token"], True)
+                self.assertEqual(apply.call_count, 1)
+
     def test_schema_for_js_keeps_options_and_derived_flag_in_fixed_positions(self):
         schema = app.schema_for_js()
         contract_fields = {field[0]: field for field in schema["合同订单"]}

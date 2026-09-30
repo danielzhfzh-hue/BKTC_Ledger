@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -358,6 +359,7 @@ class Api:
         self.legacy_json_path = None
         self.config_path = config_path
         self.operator_name = str(operator_name or getpass.getuser()).strip() or "unknown"
+        self._editable_import = None
         self._set_data_path(data_path)
         if legacy_json_path and not str(data_path).lower().endswith(".json"):
             self.legacy_json_path = legacy_json_path
@@ -424,6 +426,19 @@ class Api:
         }
 
     def load_state(self, store=None):
+        previous = (self.database_path, self.xlsx_path, self.database_revision,
+                    self.legacy_json_path, self._editable_import)
+        try:
+            result = self._load_state(store)
+        except Exception:
+            (self.database_path, self.xlsx_path, self.database_revision,
+             self.legacy_json_path, self._editable_import) = previous
+            raise
+        if store:
+            self._editable_import = None
+        return result
+
+    def _load_state(self, store=None):
         if store:
             self._set_data_path(store)
         migration = None
@@ -458,6 +473,50 @@ class Api:
                 "backup": result["backup"], "issues": result["issues"],
                 "audit_event_id": result["audit_event_id"],
                 "audit_change_count": result["audit_change_count"]}
+
+    def preview_editable_import(self, workbook_path):
+        self._editable_import = None
+        prepared = database.prepare_editable_import(self.database_path, workbook_path)
+        token = secrets.token_urlsafe(24)
+        self._editable_import = (token, prepared)
+        return {"token": token, "path": prepared.workbook_path,
+                "base_revision": prepared.base_revision, "revision": prepared.current_revision,
+                "stale": prepared.stale, "changes": prepared.changes,
+                "action_counts": prepared.action_counts, "table_counts": prepared.table_counts,
+                "issues": prepared.issues}
+
+    def get_financial_coverage(self, table, job_no="", customer=""):
+        return database.get_financial_coverage(self.database_path, table, job_no, customer)
+
+    def pick_editable_workbook(self, exporting=False):
+        if not webview.windows:
+            raise RuntimeError("应用窗口尚未就绪")
+        result = webview.windows[0].create_file_dialog(
+            webview.SAVE_DIALOG if exporting else webview.OPEN_DIALOG,
+            file_types=("Excel (*.xlsx)",),
+            save_filename="BKTC_Ledger_可编辑.xlsx" if exporting else "",
+        )
+        return result[0] if result else None
+
+    def confirm_editable_import(self, token, confirmed=False, audit_context=None):
+        pending = self._editable_import
+        if confirmed is not True:
+            raise ValueError("必须审查差异并二次确认后才能导入")
+        if not pending or not secrets.compare_digest(str(token), pending[0]):
+            raise ValueError("差异预览已失效，请重新预览")
+        result = database.apply_editable_import(
+            self.database_path, pending[1], self._audit_context(audit_context, "xlsx_import")
+        )
+        self._editable_import = None
+        self.database_revision = result["revision"]
+        return {"ok": True, "path": self.database_path, "data": result["data"],
+                "revision": result["revision"], "backup": result["backup"],
+                "issues": result["issues"], "audit_event_id": result["audit_event_id"]}
+
+    def export_editable_workbook(self, workbook_path):
+        if not str(workbook_path).lower().endswith(".xlsx"):
+            raise ValueError("可编辑工作簿必须保存为 .xlsx")
+        return database.export_editable_workbook(self.database_path, workbook_path)
 
     def generate(self, data, rules=None, audit_context=None):
         saved = self._save_database(data, rules, audit_context, "generate_ledger")
@@ -717,11 +776,11 @@ class Api:
             _save_config(self.database_path, self.config_path, self.operator_name)
         return {"ok": True, "operator_name": self.operator_name}
 
-    def get_audit_events(self, filters=None, limit=500):
-        return database.get_audit_events(self.database_path, filters, limit)
+    def get_audit_events(self, filters=None, limit=500, offset=0):
+        return database.get_audit_events(self.database_path, filters, limit, offset)
 
     def export_audit(self, filters=None):
-        result = database.get_audit_events(self.database_path, filters, 5000)
+        result = database.get_audit_events(self.database_path, filters, limit=None)
         dl = os.path.join(os.path.expanduser("~"), "Downloads")
         os.makedirs(dl, exist_ok=True)
         path = os.path.join(

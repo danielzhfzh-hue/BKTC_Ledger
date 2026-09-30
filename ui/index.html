@@ -69,6 +69,7 @@
 </nav>
 
 <main>
+  <div id="erpRefreshStatus" role="status" aria-live="polite" class="muted hidden"></div>
   <section id="panel-工作台" class="panel erp-dashboard">
     <div class="erp-page-head"><div><div class="eyebrow">SALES OPERATIONS</div><h1>业务工作台</h1><p>优先处理需要行动的订单，而不是逐张数据表找问题。</p></div><div id="erpToday" class="erp-today"></div></div>
     <div id="erpKpis" class="erp-kpis"></div>
@@ -81,7 +82,7 @@
       <div id="erpWorkList" class="erp-work-list"></div>
     </section>
     <section class="erp-card erp-recent">
-      <div class="erp-card-head"><div><span class="eyebrow">RECENT ORDERS</span><h3>订单运营视图</h3></div><input id="erpDashboardFilter" placeholder="筛选 JOB / 客户 / 型号"></div>
+      <div class="erp-card-head"><div><span class="eyebrow">ORDERS</span><h3>订单运营视图 <small id="erpRecentCount" class="muted"></small></h3></div><input id="erpDashboardFilter" placeholder="筛选 JOB / 客户 / 型号"></div>
       <div class="erp-table-wrap"><table class="erp-order-table"><thead><tr><th>JOB</th><th>客户</th><th>订单内容</th><th>金额</th><th>阶段</th><th>发货</th><th>验收</th><th>开票</th><th>回款</th><th>风险</th></tr></thead><tbody id="erpRecentOrders"></tbody></table></div>
     </section>
   </section>
@@ -346,7 +347,7 @@
         </div>
       </div>
       <div class="qb-box">
-        <div class="qb-box-h">预览（前 10 行；点「预览」刷新）</div>
+        <div class="qb-box-h">完整查询结果（可滚动查看；点「预览」刷新）</div>
         <div class="qb-prev-wrap"><table id="qbPreview" class="qb-preview"></table></div>
       </div>
     </div>
@@ -374,6 +375,7 @@
         <button id="btnAuditExport">导出 XLSX</button>
       </div>
       <div id="auditSummary" class="audit-summary muted"></div>
+      <div class="toolbar"><button id="btnAuditPrevious" disabled>上一页</button><button id="btnAuditNext" disabled>下一页</button></div>
       <div class="audit-table-wrap">
         <table class="audit-table">
           <thead><tr><th>时间 / 修订</th><th>操作人 / 来源</th><th>业务对象</th><th>变更</th><th>旧值 → 新值</th></tr></thead>
@@ -408,13 +410,15 @@
           <tr><td>当前版本</td>
               <td><span id="setVersion">v?</span>　<span id="updateInfo" class="muted"></span></td>
               <td><button id="btnCheckUpdate">检查更新</button>　<button id="btnDownloadUpdate" class="primary hidden">下载并打开</button></td></tr>
+          <tr><td>Excel 往返编辑</td><td>先导出可编辑工作簿，外部修改后预览差异，再确认导入。生成的展示台账不是导入模板。</td>
+              <td><button id="btnEditableExport">导出可编辑 Excel</button><button id="btnEditableImport">导入变更…</button></td></tr>
         </tbody>
       </table>
       <h3>说明</h3>
       <p>· <b>保存数据库</b>：在一个事务内校验并写入本地 <code>.db</code>；失败会整体回滚，写入前自动在 <code>备份/</code> 保留数据库快照。<br>
          · <b>旧 JSON 迁移</b>：选择 <code>*.records.json</code> 时会在同目录创建 <code>.db</code>，原 JSON 保留不动。<br>
          · <b>文件路径</b>：只需选择或粘贴数据库路径；路径会保存为当前 Windows/macOS 用户的下次启动设置。<br>
-         · <b>单一数据源</b>：数据库是唯一权威数据源，Excel 仅作为导出结果，不会从外部表格回写数据库。<br>
+         · <b>单一数据源</b>：数据库是唯一权威数据源；展示台账仅供查看。应用导出的可编辑 Excel 可在外部修改，通过差异预览和二次确认后写入数据库。<br>
          · <b>审计记录</b>：新增、删除和实质字段修改与业务数据在同一事务写入；失败保存不会留下审计记录。请先设置正确的“当前操作人”。<br>
          · <b>导出台账</b>：按数据库重写同目录同名 <code>xlsx</code>（导航页 / 未回收管理表 / 各 JOB 页），旧版自动进同目录 <code>备份/</code>（留近 10 份）。<br>
          · <b>检查更新</b>：联网查 GitHub 最新 Release（仅 push 到 main 还不会产生可更新版本）；有新版可点「下载并打开」，解压到下载目录后，<b>请退出本程序，用其中的新版本替换旧文件夹</b>（未签名，首开仍需 Mac 右键打开 / Windows SmartScreen「仍要运行」）。</p>

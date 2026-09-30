@@ -9,11 +9,14 @@
   let selectedDetailTab = "总览";
   let selectedFinanceBucket = "";
   let workspaceRequest = 0;
+  let workspaceDirty = true;
+  let workspaceTimer = null;
 
   function money(value, currency) {
+    if (value === null || value === undefined) return "未确定";
     const n = Number(value) || 0;
     const symbol = currency === "USD" ? "$" : currency === "EUR" ? "€" : "¥";
-    return symbol + n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    return symbol + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
   function tr(value) {
@@ -49,22 +52,40 @@
 
   async function refreshErpWorkspace() {
     if (!state.data) return;
+    clearTimeout(workspaceTimer);
     const request = ++workspaceRequest;
+    const status = $("erpRefreshStatus");
+    if (status) { status.classList.remove("hidden"); status.textContent = "正在重新计算订单、财务和待办…"; }
+    const snapshot = JSON.parse(JSON.stringify({ data: state.data, rules: state.rules }));
     try {
-      const result = await call("get_erp_workspace", state.data, state.rules);
+      const result = await call("get_erp_workspace", snapshot.data, snapshot.rules);
       if (request !== workspaceRequest) return;
       erpWorkspace = result;
+      workspaceDirty = false;
+      if (status) status.classList.add("hidden");
       renderDashboard();
       renderOrderCenter();
       renderFinance();
       if (window.I18N?.apply) window.I18N.apply(document.body);
     } catch (error) {
+      if (request !== workspaceRequest) return;
+      workspaceDirty = true;
+      if (status) status.textContent = "汇总刷新失败，当前显示的结果可能不是最新数据；切换回工作台可重试。";
       console.error("ERP workspace:", error);
       if (state.tab === "工作台" || state.tab === "订单中心" || state.tab === "财务驾驶舱") {
         toast(String(error), "error");
       }
     }
   }
+
+  window.invalidateErpWorkspace = function () {
+    workspaceDirty = true;
+    ++workspaceRequest;
+    clearTimeout(workspaceTimer);
+    const status = $("erpRefreshStatus");
+    if (status) { status.classList.remove("hidden"); status.textContent = "数据已修改，汇总正在刷新…"; }
+    workspaceTimer = setTimeout(refreshErpWorkspace, 250);
+  };
 
   function progress(value) {
     return '<span class="erp-progress"><i><b style="width:' + value + '%"></b></i><span>' + value + '%</span></span>';
@@ -75,7 +96,8 @@
     const q = s($("erpDashboardFilter")?.value).toLowerCase();
     const rows = snapshots().filter(function (x) {
       return !q || [x.job, x.customer, x.content].join(" ").toLowerCase().includes(q);
-    }).slice(0, 40);
+    });
+    $("erpRecentCount").textContent = rows.length + " / " + snapshots().length + " 个订单";
     $("erpRecentOrders").innerHTML = rows.map(function (x) {
       return '<tr data-job="' + esc(x.job) + '"><td><b>' + esc(x.job) + '</b></td><td>' + esc(x.customer) +
         '</td><td>' + esc(x.content) + '</td><td>' + money(x.total_untaxed, x.currency) +
@@ -202,7 +224,7 @@
       '<div class="erp-detail-metric"><span>发货进度</span><b>' + x.shipped_count + '/' + x.device_count + '</b></div>' +
       '<div class="erp-detail-metric"><span>验收进度</span><b>' + x.accepted_count + '/' + x.device_count + '</b></div>' +
       '<div class="erp-detail-metric"><span>已开票</span><b>' + money(x.invoice_amount, x.currency) + '</b></div>' +
-      '<div class="erp-detail-metric"><span>已回款</span><b>' + money(x.paid_amount, x.currency) + '</b></div></div>' +
+      '<div class="erp-detail-metric"><span>已回款 · ' + esc(x.financial_status || "") + '</span><b>' + money(x.paid_amount, x.currency) + '</b></div></div>' +
       (x.source_quote_no ? '<div class="erp-detail-section"><h3>来源报价</h3><b>' + esc(x.source_quote_no) + '</b><span class="muted"> → ' + esc(job) + '</span></div>' : '') +
       '<div class="erp-detail-section"><h3>Document Flow</h3><div class="erp-flow-lanes">' + renderFlow(x.document_flow, x.currency) + '</div></div>' +
       '<div class="erp-detail-section"><h3>当前行动</h3>' +
@@ -335,8 +357,30 @@
       }).join("") + '</span></div>';
   }
 
-  function financeRowsForView() {
-    const finance = erpWorkspace?.finance;
+  function filteredFinance(finance, query) {
+    const q = s(query).toLowerCase();
+    const matches = (row) => !q || [row.job, row.customer, row["款类"], row["批次"], row["未回收原因"]].join(" ").toLowerCase().includes(q);
+    const amounts = (rows) => {
+      const totals = {};
+      for (const row of rows) {
+        if (row.amount === null || row.amount === undefined) continue;
+        totals[row.currency] = (totals[row.currency] || 0) + Math.round(Number(row.amount) * 100);
+      }
+      for (const currency of Object.keys(totals)) totals[currency] /= 100;
+      return totals;
+    };
+    const filterBuckets = (buckets) => (buckets || []).map((bucket) => {
+      const rows = (bucket.rows || []).filter(matches);
+      return { ...bucket, rows, count: rows.length, amounts: amounts(rows) };
+    });
+    const rows = (finance.rows || []).filter(matches);
+    const aging = filterBuckets(finance.aging);
+    const forecast = filterBuckets(finance.forecast);
+    return { ...finance, rows, aging, forecast, open_amounts: amounts(rows),
+      overdue_amounts: amounts(forecast.find((bucket) => bucket.bucket === "已逾期")?.rows || []) };
+  }
+
+  function financeRowsForView(finance) {
     if (!finance) return [];
     let rows = finance.rows || [];
     if (selectedFinanceBucket) {
@@ -344,27 +388,22 @@
       const bucket = (finance[kind] || []).find(function (x) { return x.bucket === bucketName; });
       rows = bucket?.rows || [];
     }
-    const q = s($("erpFinanceFilter")?.value).toLowerCase();
-    if (q) {
-      rows = rows.filter(function (row) {
-        return [row.job, row.customer, row["款类"], row["批次"], row["未回收原因"]].join(" ").toLowerCase().includes(q);
-      });
-    }
     return rows;
   }
 
   function renderFinance() {
     if (!$("erpFinanceKpis") || !erpWorkspace) return;
-    const finance = erpWorkspace.finance || {};
+    const query = s($("erpFinanceFilter")?.value);
+    const finance = filteredFinance(erpWorkspace.finance || {}, query);
     const due30 = sumBucketAmounts((finance.forecast || []).filter(function (x) {
       return x.bucket === "0-7天" || x.bucket === "8-30天";
     }));
     const confirm = (finance.aging || []).find(function (x) { return x.bucket === "待确认"; });
     const kpis = [
-      ["应收总额", formatAmounts(finance.open_amounts), "当前未回收"],
+      ["应收总额", formatAmounts(finance.open_amounts), query ? "当前关键词筛选结果（分组仅下钻明细）" : "全库未回收（分组仅下钻明细）"],
       ["已逾期", formatAmounts(finance.overdue_amounts), "优先跟进"],
       ["30天内预计回款", formatAmounts(due30), "未来现金流"],
-      ["待确认", (confirm?.count || 0) + " 笔", "缺少有效应收日期"],
+      ["待确认", (confirm?.count || 0) + " 笔", "金额、日期或付款条件待确认"],
       ["应收明细", (finance.rows || []).length + " 笔", "按 JOB / 款类下钻"]
     ];
     $("erpFinanceKpis").innerHTML = kpis.map(function (x, i) {
@@ -373,7 +412,7 @@
     }).join("");
     $("erpAging").innerHTML = (finance.aging || []).map(function (x) { return bucketHtml(x, "aging"); }).join("");
     $("erpForecast").innerHTML = (finance.forecast || []).map(function (x) { return bucketHtml(x, "forecast"); }).join("");
-    const rows = financeRowsForView();
+    const rows = financeRowsForView(finance);
     $("erpFinanceRows").innerHTML = rows.length ? rows.map(function (row) {
       const overdue = Number(row.days) < 0;
       return '<div class="erp-finance-row" data-job="' + esc(row.job) + '">' +
@@ -456,72 +495,115 @@
 
   async function saveMaster(kind, existing) {
     existing = existing || {};
-    let record = { ...existing };
-    if (kind === "customer") {
-      const name = prompt(tr("客户标准名称"), existing.name || "");
-      if (name === null || !name.trim()) return;
-      record = {
-        ...record, name: name.trim(),
-        currency: prompt(tr("默认币种"), existing.currency || "RMB") || "RMB",
-        salesperson: prompt(tr("默认担当者"), existing.salesperson || "") || "",
-        ship_to: prompt(tr("默认送货地点"), existing.ship_to || "") || "",
-        address: prompt(tr("客户地址"), existing.address || "") || "",
-        incoterm: prompt(tr("默认 Incoterm"), existing.incoterm || "") || "",
-        active: 1
-      };
-    } else if (kind === "contact") {
-      const name = prompt(tr("联系人姓名"), existing.name || "");
-      if (name === null || !name.trim()) return;
-      const customerName = prompt(tr("所属客户"), existing.customer_name || "");
-      if (customerName === null) return;
-      const customer = (erpMasterData?.customers || []).find(function (x) { return x.name === customerName; });
-      record = {
-        ...record, name: name.trim(), customer_name: customerName.trim(),
-        customer_id: customer?.customer_id || "",
-        title: prompt(tr("职务"), existing.title || "") || "",
-        email: prompt("Email", existing.email || "") || "",
-        phone: prompt(tr("电话"), existing.phone || "") || "",
-        is_primary: confirm(tr("设为主要联系人？")) ? 1 : 0
-      };
-    } else if (kind === "model") {
-      const model = prompt(tr("设备型号"), existing.model || "");
-      if (model === null || !model.trim()) return;
-      record = {
-        ...record, model: model.trim(),
-        description: prompt(tr("型号说明"), existing.description || "") || "",
-        unit: prompt(tr("单位"), existing.unit || "台") || "台",
-        active: 1
-      };
-    } else {
-      const name = prompt(tr("付款条件模板名称"), existing.name || "");
-      if (name === null || !name.trim()) return;
-      const existingLines = (existing.items || []).map(function (item) {
-        return [item.kind || "", item.ratio || 0, item.days || 0, item.trigger || "", item.description_zh || item.description || ""].join("|");
-      }).join("；");
-      const rawLines = prompt(tr("模板条款（款类|比例|账期天数|触发条件|说明；多条用分号分隔）"), existingLines);
-      if (rawLines === null) return;
-      const items = rawLines.split(/[；;\n]+/).map(function (line) {
-        const parts = line.split("|").map(function (x) { return x.trim(); });
-        return { kind: parts[0] || "", ratio: Number(parts[1]) || 0, days: Number(parts[2]) || 0,
-          trigger: parts[3] || "", description_zh: parts[4] || "" };
-      }).filter(function (item) { return item.kind; });
-      record = {
-        ...record, name: name.trim(),
-        description: prompt(tr("模板说明"), existing.description || "") || "",
-        currency: prompt(tr("适用币种（留空=不限）"), existing.currency || "") || "",
-        items: items,
-        active: 1
-      };
-    }
-    try {
+    const fields = {
+      customer: [["name", "客户标准名称", "", true], ["currency", "默认币种", "RMB"], ["salesperson", "默认担当者"], ["ship_to", "默认送货地点"], ["address", "客户地址"], ["incoterm", "默认 Incoterm"]],
+      contact: [["name", "联系人姓名", "", true], ["customer_name", "所属客户"], ["title", "职务"], ["email", "Email"], ["phone", "电话"], ["is_primary", "主要联系人", 0, false, "checkbox"]],
+      model: [["model", "设备型号", "", true], ["description", "型号说明"], ["unit", "单位", "台"]],
+      payment_template: [["name", "付款条件模板名称", "", true], ["description", "模板说明"], ["currency", "适用币种（留空=不限）"], ["rawLines", "模板条款（款类|比例|账期天数|触发条件|说明；每行一条）", "", false, "textarea"]]
+    };
+    const original = { ...existing, rawLines: (existing.items || []).map((item) =>
+      [item.kind || "", item.ratio ?? 0, item.days ?? 0, item.trigger || "", item.description_zh || item.description || ""].join("|")).join("\n") };
+    const persist = async (values) => {
+      const { rawLines, ...formValues } = values;
+      const record = { ...existing, ...formValues, active: 1 };
+      if (kind === "contact") {
+        const customer = (erpMasterData?.customers || []).find((x) => x.name === values.customer_name);
+        record.customer_id = customer?.customer_id || "";
+      } else if (kind === "payment_template") {
+        record.items = rawLines.split(/[；;\n]+/).filter((line) => line.trim()).map((line, index) => {
+          const parts = line.split("|").map((x) => x.trim());
+          const ratio = Number(parts[1]), days = Number(parts[2]);
+          if (!parts[0] || !parts[1] || parts[2] === undefined || parts[2] === "" ||
+              !Number.isFinite(ratio) || ratio < 0 || ratio > 100 ||
+              !Number.isInteger(days) || days < 0) {
+            throw new Error("第 " + (index + 1) + " 条：请填写款类、0～100 的百分比和非负整数账期天数");
+          }
+          return { kind: parts[0], ratio, days, trigger: parts[3] || "", description_zh: parts[4] || "" };
+        });
+      }
       const result = await call("save_master_record", kind, record);
       applyBackendState({ revision: result.revision });
       erpMasterData = result.master_data;
       renderMasterData();
       toast("主数据已保存", "ok");
-    } catch (error) {
-      toast(String(error), "error");
-    }
+    };
+    const values = await new Promise((resolve) => {
+      let saving = false;
+      const previousFocus = document.activeElement;
+      const overlay = document.createElement("div");
+      overlay.className = "modal-backdrop";
+      overlay.setAttribute("role", "dialog");
+      overlay.setAttribute("aria-modal", "true");
+      overlay.tabIndex = -1;
+      overlay.setAttribute("aria-label", tr("编辑主数据"));
+      const formFields = fields[kind] || fields.payment_template;
+      overlay.innerHTML = '<form class="modal-card entry-card"><div class="modal-head"><h3>' + tr("编辑主数据") +
+        '</h3><button type="button" data-cancel>×</button></div><div class="modal-body"><div class="entry-grid">' +
+        formFields.map(([key, label, fallback, required, type]) => {
+          const value = original[key] ?? fallback ?? "";
+          const attrs = ' name="' + key + '"' + (required ? ' required' : '');
+          const control = type === "textarea" ? '<textarea rows="5"' + attrs + '>' + esc(value) + '</textarea>' :
+            type === "checkbox" ? '<input type="checkbox"' + attrs + (Number(value) ? ' checked' : '') + '>' :
+            '<input' + attrs + ' value="' + esc(value) + '"' + (key === "email" ? ' type="email"' : '') + '>';
+          return '<label' + (type === "textarea" ? ' class="full"' : '') + '>' + esc(tr(label)) + control + '</label>';
+        }).join("") + '</div></div><div class="modal-foot"><button type="button" data-cancel>' + tr("取消") +
+        '</button><button type="submit" class="primary">' + tr("保存") + '</button></div></form>';
+      const errorMessage = document.createElement("p");
+      errorMessage.className = "error";
+      errorMessage.setAttribute("role", "alert");
+      overlay.querySelector(".modal-body").appendChild(errorMessage);
+      const close = (result) => {
+        if (saving) return;
+        document.removeEventListener("keydown", escape);
+        overlay.remove();
+        previousFocus?.focus();
+        resolve(result);
+      };
+      const escape = (event) => {
+        if (event.key === "Escape") { event.preventDefault(); close(null); }
+        if (event.key !== "Tab") return;
+        const focusable = [...overlay.querySelectorAll("button:not(:disabled), input:not(:disabled), textarea:not(:disabled)")];
+        const first = focusable[0], last = focusable[focusable.length - 1];
+        if (!first) { event.preventDefault(); overlay.focus(); }
+        else if (event.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) {
+          event.preventDefault(); last.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) {
+          event.preventDefault(); first.focus();
+        }
+      };
+      overlay.querySelectorAll("[data-cancel]").forEach((button) => button.addEventListener("click", () => close(null)));
+      overlay.querySelector("form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (saving) return;
+        const values = {};
+        for (const [key, , , , type] of formFields) {
+          const input = overlay.querySelector('[name="' + key + '"]');
+          values[key] = type === "checkbox" ? (input.checked ? 1 : 0) : input.value.trim();
+        }
+        saving = true;
+        errorMessage.textContent = "";
+        const controls = overlay.querySelectorAll("button, input, textarea");
+        controls.forEach((control) => { control.disabled = true; });
+        overlay.setAttribute("aria-busy", "true");
+        overlay.focus();
+        try {
+          await persist(values);
+          saving = false;
+          close(values);
+        } catch (error) {
+          errorMessage.textContent = String(error);
+        } finally {
+          saving = false;
+          controls.forEach((control) => { control.disabled = false; });
+          overlay.removeAttribute("aria-busy");
+          if (overlay.isConnected) overlay.querySelector("input")?.focus();
+        }
+      });
+      document.addEventListener("keydown", escape);
+      document.body.appendChild(overlay);
+      overlay.querySelector("input")?.focus();
+    });
+    if (values === null) return;
   }
 
   function openWorkItem(job) {
@@ -581,6 +663,7 @@
     if (tab === "订单中心") renderOrderCenter();
     if (tab === "财务驾驶舱") renderFinance();
     if (tab === "主数据") loadMasterData(false);
+    if (workspaceDirty && ["工作台", "订单中心", "财务驾驶舱"].includes(tab)) refreshErpWorkspace();
   };
 
   window.renderAll = function () {

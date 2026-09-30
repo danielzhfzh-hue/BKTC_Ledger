@@ -189,6 +189,7 @@ def save_master_record(path, kind, record, *, expected_revision=None,
     conn = database._connect(path)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        database._assert_business_state(conn)
         current = int(database._meta(conn, "revision", "0") or 0)
         if expected_revision is not None and current != expected_revision:
             raise database.StaleImportError(
@@ -277,16 +278,21 @@ def save_work_item(path, item, *, expected_revision=None, audit_context=None, ba
     conn = database._connect(path)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        database._assert_business_state(conn)
         current = int(database._meta(conn, "revision", "0") or 0)
         if expected_revision is not None and current != expected_revision:
             raise database.StaleImportError(
                 f"数据库已从修订 {expected_revision} 更新到 {current}，请重新加载后再操作"
             )
         job_no = _text(item.get("job_no"))
-        if job_no and not conn.execute(
-            'SELECT 1 FROM "合同订单" WHERE "JOB No"=?', (job_no,)
-        ).fetchone():
-            raise ValueError(f"JOB No 不存在：{job_no}")
+        order_id = None
+        if job_no:
+            order = conn.execute(
+                'SELECT "记录ID" FROM "合同订单" WHERE "JOB No"=?', (job_no,)
+            ).fetchone()
+            if order is None:
+                raise ValueError(f"JOB No 不存在：{job_no}")
+            order_id = order["记录ID"]
         item_id = _text(item.get("item_id")) or f"work-{uuid.uuid4().hex}"
         old = _row_dict(conn.execute(
             'SELECT * FROM "work_item" WHERE item_id=?', (item_id,)
@@ -300,7 +306,7 @@ def save_work_item(path, item, *, expected_revision=None, audit_context=None, ba
         if status != "done":
             completed_at = ""
         payload = {
-            "item_id": item_id, "job_no": job_no,
+            "item_id": item_id, "job_no": job_no, "order_id": order_id,
             "type": _text(item.get("type")) or "follow_up",
             "title": _text(item.get("title")),
             "due_date": _text(item.get("due_date")),

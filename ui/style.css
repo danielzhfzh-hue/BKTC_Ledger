@@ -128,7 +128,12 @@ body {
 .paths b { font-weight: 700; }
 .paths b.ok { color: var(--ok); }
 .paths b.no { color: var(--danger); }
-.header-btn { margin-left: 2px; }
+.header-btn { margin-left: 2px; flex-shrink: 0; white-space: nowrap; }
+.app-header .brand-copy { flex-shrink: 0; }
+.app-header .lang-switch { flex-shrink: 0; }
+.app-header .erp-global-search { flex: 1 1 240px; min-width: 130px; }
+@media(max-width:1500px) { .app-header .paths { display: none; } }
+@media(max-width:1450px) { .erp-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 #btnQuery { margin-left: auto; }
 .settings-btn {
   color: #fff;
@@ -195,7 +200,7 @@ nav#tabs {
 .tab:hover { color: var(--brand); background: var(--brand-soft); }
 .tab.active { color: var(--brand); background: #fff; border-bottom-color: var(--teal); font-weight: 800; }
 
-main { flex: 1; min-height: 0; overflow: hidden; padding: 16px 22px; }
+main { flex: 1; min-height: 0; overflow: auto; padding: 16px 22px; }
 .panel { height: 100%; display: flex; flex-direction: column; }
 .hidden { display: none !important; }
 .summary-lead {
@@ -374,7 +379,7 @@ th.col-h.filt-on .col-filt { color: #fff; background: rgba(255,255,255,.18); }
 .cf-item input { margin: 0; }
 .cf-item .cf-v { flex: 1; word-break: break-all; }
 
-.modal { position: fixed; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center; background: rgba(6,28,48,.48); backdrop-filter: blur(2px); }
+.modal, .modal-backdrop { position: fixed; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center; background: rgba(6,28,48,.48); backdrop-filter: blur(2px); }
 .modal-card { width: 570px; max-width: 94vw; max-height: 88vh; display: flex; flex-direction: column; background: #fff; border: 1px solid #b9c7d1; border-radius: 7px; box-shadow: 0 22px 60px rgba(4,29,50,.28); }
 .modal-head { min-height: 50px; padding: 11px 16px; color: var(--ink); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; font-size: 14px; }
 .modal-head > div { display: flex; flex-direction: column; gap: 2px; }
@@ -654,7 +659,7 @@ footer { min-height: 34px; padding: 6px 22px; color: #3d4b56; background: #e8eef
 .erp-master-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.erp-master-list{max-height:560px;overflow:auto}.erp-master-row{padding:10px 12px;border-bottom:1px solid #edf1f4;display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.erp-master-row:hover{background:#f8fbfd}.erp-master-row b{color:#204966}.erp-master-row small{display:block;color:#7d8d98;margin-top:3px}.erp-master-row .tag{font-size:9px;padding:2px 6px;border-radius:999px;background:#eef3f6;color:#6e7d87}.erp-master-row.inferred .tag{background:#fff4da;color:#9a6700}
 .erp-detail-tabs{display:flex;gap:2px;padding:0 19px;border-bottom:1px solid var(--line);background:#fbfcfd;position:sticky;top:0;z-index:2}.erp-detail-tab{border:0;border-radius:0;background:transparent;padding:10px 11px;color:#657786;font-size:11px}.erp-detail-tab.active{color:var(--brand);box-shadow:inset 0 -2px 0 var(--brand);font-weight:800}.erp-detail-table{width:100%;border-collapse:collapse;font-size:11px}.erp-detail-table th,.erp-detail-table td{padding:7px 8px;border-bottom:1px solid #edf1f4;text-align:left;vertical-align:top}.erp-detail-table th{background:#f4f7f9;color:#587080}.erp-detail-table-wrap{overflow:auto;max-height:330px}
 .erp-flow-lanes{display:grid;gap:7px}.erp-flow-line{display:flex;align-items:center;gap:5px;overflow:auto}.erp-flow-line .erp-flow-node{min-width:110px}
-@media(max-width:1180px){.erp-master-grid{grid-template-columns:1fr}.erp-finance-grid{grid-template-columns:1fr}.erp-finance-row{grid-template-columns:80px 1fr 90px 90px}.erp-finance-row>*:nth-child(5),.erp-finance-row>*:nth-child(6){display:none}}
+@media(max-width:1180px){.erp-master-grid{grid-template-columns:1fr}.erp-finance-grid{grid-template-columns:1fr}.erp-finance-row{grid-template-columns:90px minmax(0,1fr) 110px}.erp-finance-row>*:nth-child(5){grid-column:2;text-align:left}.erp-finance-row>*:nth-child(6){grid-column:3}}
 @media (max-width: 1280px) {
   .actionhint { display: none; }
   .cards { grid-template-columns: repeat(4, 1fr); }

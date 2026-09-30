@@ -71,10 +71,14 @@ class UpdaterTests(unittest.TestCase):
             connection.execute("INSERT INTO entries VALUES ('kept')")
             connection.commit()
             updater.snapshot_sqlite(source, snapshot)
-            self.assertEqual(
-                sqlite3.connect(snapshot).execute("SELECT value FROM entries").fetchone()[0],
-                "kept",
-            )
+            snapshot_connection = sqlite3.connect(snapshot)
+            try:
+                self.assertEqual(
+                    snapshot_connection.execute("SELECT value FROM entries").fetchone()[0],
+                    "kept",
+                )
+            finally:
+                snapshot_connection.close()
             connection.close()
 
     def test_failed_health_check_restores_program_database_and_workbook(self):
@@ -140,7 +144,7 @@ class UpdaterTests(unittest.TestCase):
             connection.close()
             self.assertEqual(xlsx.read_bytes(), b"old workbook")
             self.assertEqual(len(calls), 2)
-            self.assertEqual(json.loads(result.read_text()) ["ok"], False)
+            self.assertEqual(json.loads(result.read_text(encoding="utf-8"))["ok"], False)
 
     def test_healthy_startup_commits_new_program_and_discards_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

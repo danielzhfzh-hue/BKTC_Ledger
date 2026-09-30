@@ -147,17 +147,21 @@ def _connect(path):
     existed_with_data = os.path.exists(path) and os.path.getsize(path) > 0
     conn = sqlite3.connect(path, timeout=15)
     conn.row_factory = sqlite3.Row
-    previous_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
-    if existed_with_data and previous_version < DATABASE_VERSION:
-        _backup_before_schema_upgrade(
-            conn, path, previous_version, DATABASE_VERSION
-        )
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = FULL")
-    conn.execute("PRAGMA busy_timeout = 15000")
-    _create_schema(conn)
-    return conn
+    try:
+        previous_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+        if existed_with_data and previous_version < DATABASE_VERSION:
+            _backup_before_schema_upgrade(
+                conn, path, previous_version, DATABASE_VERSION
+            )
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = FULL")
+        conn.execute("PRAGMA busy_timeout = 15000")
+        _create_schema(conn)
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def _create_schema(conn):

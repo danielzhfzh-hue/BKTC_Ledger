@@ -7,7 +7,7 @@ import unittest
 class FrontendSaveTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_revision_only_save_refreshes_footer_without_replacing_data(self):
-        source = (pathlib.Path(__file__).resolve().parents[1] / "ui/app.js").read_text()
+        source = (pathlib.Path(__file__).resolve().parents[1] / "ui/app.js").read_text(encoding="utf-8")
         function = source[source.index("function applyBackendState(r)"):source.index("function saveSnapshot()")]
         script = r'''
 const assert = require("node:assert/strict");
@@ -26,7 +26,7 @@ assert.equal(state.data,data);
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_unpaid_query_preserves_unknown_totals_and_exact_known_cents(self):
-        source = (pathlib.Path(__file__).resolve().parents[1] / "ui/app.js").read_text()
+        source = (pathlib.Path(__file__).resolve().parents[1] / "ui/app.js").read_text(encoding="utf-8")
         function = source[source.index("function queryRows(table)"):source.index("async function refreshUnpaidRows()")]
         script = r'''
 const assert = require("node:assert/strict");
@@ -50,7 +50,7 @@ assert.equal(rows[1]["金额待确认项数"], 0);
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_workspace_ignores_old_response_after_edit(self):
-        source = (pathlib.Path(__file__).resolve().parents[1] / "ui/erp_v2.js").read_text()
+        source = (pathlib.Path(__file__).resolve().parents[1] / "ui/erp_v2.js").read_text(encoding="utf-8")
         functions = source[source.index("  async function refreshErpWorkspace()"):source.index("  function progress(")]
         script = r'''
 const assert = require("node:assert/strict");
@@ -82,7 +82,7 @@ const call = async (name, data) => {submitted.push(data); return await new Promi
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_finance_filter_recalculates_totals_and_buckets(self):
-        source = (pathlib.Path(__file__).resolve().parents[1] / "ui/erp_v2.js").read_text()
+        source = (pathlib.Path(__file__).resolve().parents[1] / "ui/erp_v2.js").read_text(encoding="utf-8")
         function = source[source.index("  function filteredFinance("):source.index("  function financeRowsForView(")]
         script = 'const assert = require("node:assert/strict"); const s = value => String(value || "");\n' + function + r'''
 const rows = [{job: "A", customer: "GTX", amount: 0.1, currency: "RMB"},
@@ -104,7 +104,7 @@ assert.equal(filteredFinance(finance, "missing").rows.length, 0);
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_edit_while_saving_is_retained(self):
-        source = (pathlib.Path(__file__).resolve().parents[1] / "ui/app.js").read_text()
+        source = (pathlib.Path(__file__).resolve().parents[1] / "ui/app.js").read_text(encoding="utf-8")
         functions = source[source.index("function applyBackendState(r)"):source.index('$("btnSave").addEventListener')]
         script = r'''
 const assert = require("node:assert/strict");

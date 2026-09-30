@@ -82,6 +82,6 @@ node --check ui/app.js
 
 ## 数据与发布
 
-真实 `.db`、`.db-wal`、`.db-shm`、`*.records.json`、`.xlsx` 与 `备份/` 已被 `.gitignore` 排除，客户数据不会上传 GitHub。程序会优先使用可执行文件旁的 `data/`；本机源码和 Mac App 会固定使用项目内 `BKTC_Ledger/data/`，不会把 `/tmp` 临时路径当作长期数据库。GitHub Actions 在 macOS/Windows 上先执行回归测试，再打包应用；tag `v*` 会创建 Release。公开构建使用空白启动数据库，本机交付包再放入项目 `data/` 的当前数据库与台账，避免把客户数据上传 GitHub。
+真实 `.db`、`.db-wal`、`.db-shm`、`*.records.json`、`.xlsx` 与 `备份/` 已被 `.gitignore` 排除，客户数据不会上传 GitHub。程序会优先使用可执行文件旁的 `data/`；本机源码和 Mac App 会固定使用项目内 `BKTC_Ledger/data/`，不会把 `/tmp` 临时路径当作长期数据库。GitHub Actions 在 macOS/Windows 上先执行可靠性测试，再打包应用；推送 `v*` 标签会自动创建 Release，并附加 SHA-256 校验文件。应用内更新先校验并暂存程序包，为当前 SQLite 数据库创建一致性快照（包含 WAL 中已提交的事务），成功启动并加载数据库后才完成替换；若启动/加载失败，会恢复旧程序、数据库和 Excel。公开构建使用空白启动数据库，本机交付包再放入项目 `data/` 的当前数据库与台账，避免把客户数据上传 GitHub。更新前数据库快照保存在用户配置目录的 `更新备份/` 下。
 
 完整审计结论见 [AUDIT.md](AUDIT.md)。Windows 说明见 [README_win.md](README_win.md)。

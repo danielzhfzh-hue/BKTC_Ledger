@@ -409,7 +409,7 @@
               <td><span class="muted">无需关联 XLSX</span></td></tr>
           <tr><td>当前版本</td>
               <td><span id="setVersion">v?</span>　<span id="updateInfo" class="muted"></span></td>
-              <td><button id="btnCheckUpdate">检查更新</button>　<button id="btnDownloadUpdate" class="primary hidden">下载并打开</button></td></tr>
+              <td><button id="btnCheckUpdate">检查更新</button>　<button id="btnDownloadUpdate" class="primary hidden">下载并安装</button></td></tr>
           <tr><td>Excel 往返编辑</td><td>先导出可编辑工作簿，外部修改后预览差异，再确认导入。生成的展示台账不是导入模板。</td>
               <td><button id="btnEditableExport">导出可编辑 Excel</button><button id="btnEditableImport">导入变更…</button></td></tr>
         </tbody>
@@ -421,7 +421,7 @@
          · <b>单一数据源</b>：数据库是唯一权威数据源；展示台账仅供查看。应用导出的可编辑 Excel 可在外部修改，通过差异预览和二次确认后写入数据库。<br>
          · <b>审计记录</b>：新增、删除和实质字段修改与业务数据在同一事务写入；失败保存不会留下审计记录。请先设置正确的“当前操作人”。<br>
          · <b>导出台账</b>：按数据库重写同目录同名 <code>xlsx</code>（导航页 / 未回收管理表 / 各 JOB 页），旧版自动进同目录 <code>备份/</code>（留近 10 份）。<br>
-         · <b>检查更新</b>：联网查 GitHub 最新 Release（仅 push 到 main 还不会产生可更新版本）；有新版可点「下载并打开」，解压到下载目录后，<b>请退出本程序，用其中的新版本替换旧文件夹</b>（未签名，首开仍需 Mac 右键打开 / Windows SmartScreen「仍要运行」）。</p>
+         · <b>检查更新</b>：联网查 GitHub 最新 Release（仅 push 到 main 还不会产生可更新版本）；有新版可点「下载并安装」。安装前会校验 SHA-256 并创建数据库备份；新版本未能加载数据库时会自动回滚。程序文件夹需允许当前用户写入（未签名，首开仍需 Mac 右键打开 / Windows SmartScreen「仍要运行」）。</p>
     </div>
   </section>
 </main>

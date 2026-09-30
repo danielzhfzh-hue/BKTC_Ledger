@@ -12,14 +12,16 @@ import secrets
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
-import zipfile
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
 
-__version__ = "1.14.3"
+__version__ = "1.14.4"
 APP_DISPLAY_NAME = "上海康肯销售订单管理系统"
 REPO = "danielzhfzh-hue/BKTC_Ledger"
 CANONICAL_PROJECT_ROOT = "/Users/danielzhu/projects/订单整理/BKTC_Ledger"
@@ -34,6 +36,7 @@ import erp_store  # noqa: E402
 import order_ops  # noqa: E402
 import move_in_request  # noqa: E402
 import quotation as quotation_export  # noqa: E402
+import updater  # noqa: E402
 import webview  # noqa: E402
 
 
@@ -352,7 +355,8 @@ def schema_for_js():
 
 class Api:
     def __init__(self, data_path, legacy_json_path=None, config_path=None,
-                 operator_name=None):
+                 operator_name=None, update_health_marker=None,
+                 update_result_file=None):
         self.xlsx_path = ""
         self.database_path = ""
         self.database_revision = None
@@ -360,6 +364,8 @@ class Api:
         self.config_path = config_path
         self.operator_name = str(operator_name or getpass.getuser()).strip() or "unknown"
         self._editable_import = None
+        self.update_health_marker = update_health_marker
+        self.update_result_file = update_result_file
         self._set_data_path(data_path)
         if legacy_json_path and not str(data_path).lower().endswith(".json"):
             self.legacy_json_path = legacy_json_path
@@ -436,6 +442,11 @@ class Api:
             raise
         if store:
             self._editable_import = None
+        if self.update_health_marker:
+            updater.mark_healthy(
+                self.update_health_marker, self.update_result_file,
+                __version__, self.database_path,
+            )
         return result
 
     def _load_state(self, store=None):
@@ -821,49 +832,187 @@ class Api:
             "has_update": _parse_version(tag) > _parse_version(__version__),
             "release_url": f"https://github.com/{REPO}/releases/tag/v{tag}",
             "asset_name": asset_name, "asset_url": asset_url,
+            "checksum_url": asset_url + ".sha256",
         }
 
-    def download_update(self, asset_url, asset_name):
-        """下载并解压更新，同时把当前 DB/XLSX 带入更新目录，避免替换程序时丢数据。"""
-        if not asset_url or not asset_name:
-            raise RuntimeError("没有可下载的更新资产")
-        dl_root = os.path.join(os.path.expanduser("~"), "Downloads")
-        os.makedirs(dl_root, exist_ok=True)
-        dest_dir = os.path.join(dl_root, "BKTC_Ledger_update")
-        if os.path.isdir(dest_dir):
-            shutil.rmtree(dest_dir, ignore_errors=True)
-        os.makedirs(dest_dir, exist_ok=True)
-        archive = os.path.join(dest_dir, asset_name)
-        req = urllib.request.Request(asset_url, headers={"User-Agent": "BKTC_Ledger"})
-        with urllib.request.urlopen(req, timeout=180) as resp, open(archive, "wb") as f:
-            shutil.copyfileobj(resp, f)
-        if asset_name.endswith((".tar.gz", ".tgz")):
-            with tarfile.open(archive, "r:gz") as tf:
-                try:
-                    tf.extractall(dest_dir, filter="data")
-                except TypeError:
-                    tf.extractall(dest_dir)
-        elif asset_name.endswith(".zip"):
-            with zipfile.ZipFile(archive) as zf:
-                zf.extractall(dest_dir)
-        else:
-            raise RuntimeError(f"未知压缩格式：{asset_name}")
-        # GitHub Release 只放 starter 数据；本机业务数据永远以当前打开的
-        # database_path/xlsx_path 为准，随更新包复制一份供用户直接替换使用。
-        package_data_dir = (
-            os.path.join(dest_dir, "BKTC_Ledger", "data")
-            if asset_name.endswith(".zip")
-            else os.path.join(dest_dir, "data")
+    @staticmethod
+    def _download_update_file(url, path, limit):
+        parsed = urlparse(url or "")
+        if parsed.scheme != "https" or parsed.hostname != "github.com":
+            raise ValueError("更新文件只允许从 GitHub HTTPS Release 下载")
+        if "/releases/download/" not in parsed.path:
+            raise ValueError("更新链接不是 GitHub Release 资产")
+        request = urllib.request.Request(url, headers={"User-Agent": "BKTC_Ledger"})
+        total = 0
+        with urllib.request.urlopen(request, timeout=180) as response, open(path, "wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > limit:
+                    raise ValueError("更新文件超过大小限制")
+                output.write(chunk)
+
+    def _install_locations(self):
+        if not IS_FROZEN:
+            raise RuntimeError("开发运行模式不支持应用内安装更新")
+        if os.name == "nt":
+            target = os.path.dirname(os.path.abspath(sys.executable))
+            return target, os.path.basename(sys.executable), "Windows"
+        executable = Path(sys.executable).resolve()
+        for parent in (executable, *executable.parents):
+            if parent.name.endswith(".app"):
+                return str(parent), str(executable.relative_to(parent)), "macOS"
+        raise RuntimeError("无法确定当前 macOS 应用包位置")
+
+    @staticmethod
+    def _find_release_app(unpacked, platform_name):
+        root = Path(unpacked)
+        if platform_name == "Windows":
+            matches = list(root.rglob("BKTC_Ledger.exe"))
+            if not matches:
+                raise RuntimeError("更新包中未找到 BKTC_Ledger.exe")
+            return str(matches[0].parent)
+        matches = list(root.rglob("BKTC_Ledger.app"))
+        if not matches:
+            raise RuntimeError("更新包中未找到 BKTC_Ledger.app")
+        return str(matches[0])
+
+    @staticmethod
+    def _copy_windows_helper(target_dir, helper_dir):
+        shutil.copytree(
+            target_dir, helper_dir,
+            ignore=shutil.ignore_patterns("data", "备份", "搬入依頼书"),
         )
-        os.makedirs(package_data_dir, exist_ok=True)
-        for source, filename in (
-            (self.database_path, "BKTC_Ledger.db"),
-            (self.xlsx_path, "BKTC_Ledger.xlsx"),
-        ):
-            if os.path.isfile(source):
-                shutil.copy2(source, os.path.join(package_data_dir, filename))
-        os.remove(archive)
-        return dest_dir
+
+    def install_update(self, asset_url, checksum_url, asset_name, version):
+        """Verify, stage and hand off to an isolated helper for atomic swap/rollback."""
+        target_dir, executable_relative, platform_name = self._install_locations()
+        expected_name = ("BKTC_Ledger-Windows.zip" if platform_name == "Windows"
+                         else "BKTC_Ledger-macOS.tar.gz")
+        if asset_name != expected_name:
+            raise ValueError("更新资产与当前操作系统不匹配")
+        expected_url = f"https://github.com/{REPO}/releases/download/v{version}/{asset_name}"
+        if asset_url != expected_url or checksum_url != expected_url + ".sha256":
+            raise ValueError("更新包与校验文件必须来自同一个 GitHub Release")
+        if not os.path.isfile(self.database_path):
+            raise RuntimeError(f"找不到当前数据库，已取消更新：{self.database_path}")
+
+        install_parent = os.path.dirname(target_dir)
+        result_root = os.path.dirname(os.path.abspath(self.config_path or _default_config_path()))
+        os.makedirs(result_root, exist_ok=True)
+        result_path = os.path.join(result_root, "last_update_result.json")
+        update_root = tempfile.mkdtemp(prefix="bktc-ledger-update-")
+        stage_root = None
+        helper_root = None
+        try:
+            archive = os.path.join(update_root, asset_name)
+            checksum_path = archive + ".sha256"
+            self._download_update_file(asset_url, archive, updater.MAX_ARCHIVE_BYTES)
+            self._download_update_file(checksum_url, checksum_path, 4096)
+            with open(checksum_path, encoding="utf-8") as checksum_file:
+                updater.verify_sha256(archive, checksum_file.read())
+
+            unpacked = os.path.join(update_root, "unpacked")
+            updater.extract_archive(archive, unpacked)
+            release_app = self._find_release_app(unpacked, platform_name)
+            stage_root = tempfile.mkdtemp(prefix=".BKTC_Ledger-stage-", dir=install_parent)
+            stage_dir = os.path.join(stage_root, "program")
+            shutil.copytree(release_app, stage_dir, symlinks=True)
+
+            # Keep an application-support snapshot permanently as the pre-update
+            # recovery point; SQLite backup accounts for committed WAL contents.
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            safe_version = re.sub(r"[^0-9.]", "", str(version)) or "unknown"
+            backup_dir = os.path.join(result_root, "更新备份")
+            os.makedirs(backup_dir, exist_ok=True)
+            db_backup = os.path.join(
+                backup_dir,
+                f"{Path(self.database_path).stem}_pre_update_v{safe_version}_{timestamp}.db",
+            )
+            updater.snapshot_sqlite(self.database_path, db_backup)
+            xlsx_existed = os.path.isfile(self.xlsx_path)
+            xlsx_backup = os.path.join(update_root, "ledger.xlsx") if xlsx_existed else None
+            if xlsx_existed:
+                shutil.copy2(self.xlsx_path, xlsx_backup)
+
+            # Windows portable databases live inside the replaceable app folder.
+            # Put the consistent SQLite snapshot and its workbook into staged data;
+            # macOS and relocated Windows databases remain at their configured path.
+            try:
+                db_relative = os.path.relpath(self.database_path, target_dir)
+                db_inside_app = not db_relative.startswith(".." + os.sep) and db_relative != ".."
+                if db_inside_app:
+                    staged_db = os.path.join(stage_dir, db_relative)
+                    os.makedirs(os.path.dirname(staged_db), exist_ok=True)
+                    shutil.copy2(db_backup, staged_db)
+                    if xlsx_existed:
+                        staged_xlsx = _xlsx_path_for_database(staged_db)
+                        os.makedirs(os.path.dirname(staged_xlsx), exist_ok=True)
+                        shutil.copy2(xlsx_backup, staged_xlsx)
+            except ValueError:
+                pass
+
+            stamp = f"v{safe_version}_{timestamp}"
+            previous_dir = target_dir + ".previous-" + stamp
+            health_marker = os.path.join(update_root, "healthy.json")
+            helper_root = tempfile.mkdtemp(prefix="bktc-ledger-updater-")
+            if platform_name == "Windows":
+                helper_app = os.path.join(helper_root, "BKTC_Ledger")
+                self._copy_windows_helper(target_dir, helper_app)
+                helper_executable = os.path.join(
+                    helper_app, os.path.basename(sys.executable)
+                )
+            else:
+                # macOS permits renaming a running app bundle; the helper has
+                # already imported its code and runs with cwd outside the bundle.
+                helper_executable = sys.executable
+            state_path = os.path.join(helper_root, "update_state.json")
+            state = {
+                "target_dir": target_dir, "stage_dir": stage_dir,
+                "previous_dir": previous_dir, "parent_pid": os.getpid(),
+                "executable_relative": executable_relative,
+                "health_marker": health_marker, "result_path": result_path,
+                "database_path": self.database_path, "database_backup": db_backup,
+                "xlsx_path": self.xlsx_path, "xlsx_backup": xlsx_backup,
+                "xlsx_existed": xlsx_existed, "version": version,
+                "temporary_dir": update_root, "stage_parent": stage_root,
+            }
+            with open(state_path, "w", encoding="utf-8") as state_file:
+                json.dump(state, state_file, ensure_ascii=False)
+            command = [helper_executable, "--apply-update", state_path]
+            if os.name == "nt":
+                flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+                )
+                subprocess.Popen(command, cwd=helper_root, creationflags=flags)
+            else:
+                subprocess.Popen(command, cwd=helper_root, start_new_session=True)
+            threading.Timer(1.0, self._close_for_update).start()
+            return {"ok": True, "version": version}
+        except Exception:
+            if stage_root and os.path.isdir(stage_root):
+                shutil.rmtree(stage_root, ignore_errors=True)
+            shutil.rmtree(update_root, ignore_errors=True)
+            if helper_root and os.path.isdir(helper_root):
+                shutil.rmtree(helper_root, ignore_errors=True)
+            raise
+
+    @staticmethod
+    def _close_for_update():
+        try:
+            if webview.windows:
+                webview.windows[0].destroy()
+        except Exception:
+            pass
+
+    def get_update_result(self):
+        result_path = os.path.join(
+            os.path.dirname(os.path.abspath(self.config_path or _default_config_path())),
+            "last_update_result.json",
+        )
+        return updater.take_result(result_path)
 
     def open_path(self, path):
         if sys.platform == "darwin":
@@ -876,15 +1025,21 @@ class Api:
 
 
 def main():
-    config_path = _default_config_path()
-    config = _load_config(config_path)
     ap = argparse.ArgumentParser(description=APP_DISPLAY_NAME)
     ap.add_argument("--database",
                     help="SQLite 数据库路径")
     ap.add_argument("--store",
                     help="兼容旧版：records.json 路径（首次启动迁移为同目录 .db）")
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--apply-update", help=argparse.SUPPRESS)
+    ap.add_argument("--update-health-marker", help=argparse.SUPPRESS)
+    ap.add_argument("--update-result-file", help=argparse.SUPPRESS)
     args = ap.parse_args()
+    if args.apply_update:
+        raise SystemExit(updater.run_helper(args.apply_update))
+
+    config_path = _default_config_path()
+    config = _load_config(config_path)
 
     data_path = (
         args.database or args.store or os.environ.get("BKTC_DATABASE")
@@ -897,6 +1052,8 @@ def main():
     api = Api(
         data_path, legacy_json_path=legacy_json, config_path=config_path,
         operator_name=config.get("operator_name"),
+        update_health_marker=args.update_health_marker,
+        update_result_file=args.update_result_file,
     )
     webview.create_window(
         APP_DISPLAY_NAME,

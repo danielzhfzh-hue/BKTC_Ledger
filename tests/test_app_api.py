@@ -1,11 +1,15 @@
 import contextlib
 import io
 import json
+import hashlib
+import shutil
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 from types import SimpleNamespace
+import zipfile
 
 import app
 import core
@@ -301,45 +305,88 @@ class ApiMigrationTests(unittest.TestCase):
                 str(user_data / "BKTC_Ledger.xlsx"),
             )
 
-    def test_download_update_carries_current_database_and_workbook(self):
+    def test_check_update_exposes_checksum_asset(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def geturl(self):
+                return "https://github.com/danielzhfzh-hue/BKTC_Ledger/releases/tag/v9.8.7"
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(app.sys, "platform", "darwin"), \
+                mock.patch.object(app.urllib.request, "urlopen", return_value=Response()):
+            result = app.Api(str(Path(tmp) / "ledger.db")).check_update()
+        self.assertEqual(result["asset_name"], "BKTC_Ledger-macOS.tar.gz")
+        self.assertEqual(result["checksum_url"], result["asset_url"] + ".sha256")
+
+    def test_install_update_carries_live_windows_database_not_release_starter(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            current_dir = root / "current"
-            current_dir.mkdir()
-            current_db = current_dir / "BKTC_Ledger.db"
-            current_xlsx = current_dir / "BKTC_Ledger.xlsx"
-            current_db.write_bytes(b"current-db")
-            current_xlsx.write_bytes(b"current-xlsx")
-            api = app.Api(str(current_db))
-            api.xlsx_path = str(current_xlsx)
+            target = root / "BKTC_Ledger"
+            data_dir = target / "data"
+            data_dir.mkdir(parents=True)
+            executable = target / "BKTC_Ledger.exe"
+            executable.write_bytes(b"old app")
+            database_path = data_dir / "BKTC_Ledger.db"
+            connection = sqlite3.connect(database_path)
+            connection.execute("CREATE TABLE values_table (value TEXT)")
+            connection.execute("INSERT INTO values_table VALUES ('live-business-data')")
+            connection.commit()
+            connection.close()
+            xlsx_path = data_dir / "BKTC_Ledger.xlsx"
+            xlsx_path.write_bytes(b"live workbook")
 
             archive = io.BytesIO()
-            import zipfile
-            with zipfile.ZipFile(archive, "w") as zf:
-                zf.writestr("BKTC_Ledger/BKTC_Ledger.exe", b"exe")
-                zf.writestr("BKTC_Ledger/data/BKTC_Ledger.db", b"starter-db")
-                zf.writestr("BKTC_Ledger/data/BKTC_Ledger.xlsx", b"starter-xlsx")
-            archive_bytes = archive.getvalue()
+            with zipfile.ZipFile(archive, "w") as package:
+                package.writestr("BKTC_Ledger/BKTC_Ledger.exe", b"new app")
+                package.writestr("BKTC_Ledger/data/BKTC_Ledger.db", b"blank starter")
+                package.writestr("BKTC_Ledger/data/BKTC_Ledger.xlsx", b"blank starter")
+            package_bytes = archive.getvalue()
+            digest = hashlib.sha256(package_bytes).hexdigest()
+            api = app.Api(str(database_path), config_path=str(root / "config.json"))
+            api.xlsx_path = str(xlsx_path)
 
-            class Response(io.BytesIO):
-                def __enter__(self):
-                    return self
+            def download(url, path, limit):
+                if path.endswith(".sha256"):
+                    Path(path).write_text(digest + "  package.zip\n", encoding="ascii")
+                else:
+                    Path(path).write_bytes(package_bytes)
 
-                def __exit__(self, *args):
-                    self.close()
+            with mock.patch.object(app, "IS_FROZEN", True), \
+                    mock.patch.object(api, "_install_locations", return_value=(
+                        str(target), "BKTC_Ledger.exe", "Windows"
+                    )), \
+                    mock.patch.object(api, "_download_update_file", side_effect=download), \
+                    mock.patch.object(app.subprocess, "Popen") as launch, \
+                    mock.patch.object(app.threading, "Timer"):
+                api.install_update(
+                    "https://github.com/danielzhfzh-hue/BKTC_Ledger/releases/download/v1.14.4/BKTC_Ledger-Windows.zip",
+                    "https://github.com/danielzhfzh-hue/BKTC_Ledger/releases/download/v1.14.4/BKTC_Ledger-Windows.zip.sha256",
+                    "BKTC_Ledger-Windows.zip", "1.14.4",
+                )
 
-            with mock.patch.object(app.os.path, "expanduser", return_value=str(root)), \
-                    mock.patch.object(app.urllib.request, "urlopen", return_value=Response(archive_bytes)):
-                update_dir = Path(api.download_update("https://example.test/update.zip", "BKTC_Ledger-Windows.zip"))
-
+            command = launch.call_args.args[0]
+            state_path = Path(command[2])
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            staged_db = Path(state["stage_dir"]) / "data" / "BKTC_Ledger.db"
+            connection = sqlite3.connect(staged_db)
             self.assertEqual(
-                (update_dir / "BKTC_Ledger" / "data" / "BKTC_Ledger.db").read_bytes(),
-                b"current-db",
+                connection.execute("SELECT value FROM values_table").fetchone()[0],
+                "live-business-data",
             )
+            connection.close()
             self.assertEqual(
-                (update_dir / "BKTC_Ledger" / "data" / "BKTC_Ledger.xlsx").read_bytes(),
-                b"current-xlsx",
+                (Path(state["stage_dir"]) / "data" / "BKTC_Ledger.xlsx").read_bytes(),
+                b"live workbook",
             )
+            self.assertTrue(Path(state["database_backup"]).is_file())
+            shutil.rmtree(state["temporary_dir"], ignore_errors=True)
+            shutil.rmtree(state["stage_parent"], ignore_errors=True)
+            shutil.rmtree(state_path.parent, ignore_errors=True)
 
     def test_operator_name_is_persisted_and_used_for_audit(self):
         with tempfile.TemporaryDirectory() as tmp:

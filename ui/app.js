@@ -2403,14 +2403,25 @@ $("btnDownloadUpdate").addEventListener("click", async () => {
     if (u && u.release_url) await call("open_path", u.release_url);
     return;
   }
+  if (state._saving || state.dirty || state.quoteDirty) {
+    return toast("请先保存当前订单和报价单修改，再安装更新", "error");
+  }
+  if (!confirm(`将安装 v${u.latest}。安装时程序会关闭，并先创建 SQLite 一致性备份；如果新版本未能正常加载数据库，会自动恢复旧版本。现在继续吗？`)) return;
   try {
-    setStatus("下载更新中…");
-    const dir = await call("download_update", u.asset_url, u.asset_name);
-    setStatus("已下载并解压到：" + dir);
-    toast("已下载，请退出本程序后用新版本替换", "ok");
-    await call("open_path", dir);
+    setStatus("正在校验并准备更新…");
+    await call("install_update", u.asset_url, u.checksum_url, u.asset_name, u.latest);
+    setStatus("更新包已验证，程序即将关闭并安装新版本…");
   } catch (e) { setStatus(String(e), "error"); toast(String(e), "error"); }
 });
+
+async function showUpdateResult() {
+  try {
+    const result = await call("get_update_result");
+    if (!result) return;
+    if (result.ok) toast(`已成功升级到 v${result.version}`, "ok");
+    else toast(result.message || "升级未完成，已恢复旧版本", "error");
+  } catch (_) {}
+}
 
 $("btnOpenXlsx").addEventListener("click", async () => {
   if (!state.xlsxExists) return toast("请先从数据库导出台账", "error");
@@ -2446,6 +2457,7 @@ window.addEventListener("pywebviewready", async () => {
       r.config_warning ? "error" : "");
     if (r.config_warning) toast(r.config_warning, "error");
     if (r.migration) toast("JSON 已无损迁移；原文件保留不动", "ok");
+    await showUpdateResult();
   } catch (err) {
     setStatus("加载失败：" + err, "error");
   }
